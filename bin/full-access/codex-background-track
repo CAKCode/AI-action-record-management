@@ -1,0 +1,103 @@
+#!/usr/bin/env node
+
+'use strict';
+
+const { registerExternalAttempt } = require('../../src/store');
+const { closeDatabase } = require('../../src/database');
+
+function fail(message, code = 64) {
+  process.stderr.write(`codex-background-track: ${message}\n`);
+  process.exit(code);
+}
+
+function parseArguments(values) {
+  if (values[0] !== 'register') {
+    fail('usage: codex-background-track register --pid PID --log PATH (--step-run-id ID | --step-key KEY --step-label LABEL --run-key KEY --run-kind initial|rerun [--source-run-key KEY]) [--artifact KIND:KEY:PATH] [options]');
+  }
+  const result = { '--artifact': [] };
+  for (let index = 1; index < values.length; index += 2) {
+    const key = values[index];
+    const value = values[index + 1];
+    if (!key?.startsWith('--') || value == null) fail(`missing value for ${key || 'argument'}`);
+    if (key === '--artifact') {
+      result[key].push(value);
+      continue;
+    }
+    if (result[key]) fail(`duplicate option ${key}`);
+    result[key] = value;
+  }
+  const allowed = new Set([
+    '--pid', '--log', '--done', '--state', '--meta', '--label', '--follow-up',
+    '--check-after-seconds', '--interval-seconds', '--chain-key',
+    '--step-run-id', '--step-key', '--step-label', '--run-key', '--run-kind',
+    '--source-run-key', '--selection-mode', '--target-count',
+    '--artifact',
+  ]);
+  const unknown = Object.keys(result).filter((key) => !allowed.has(key));
+  if (unknown.length) fail(`unsupported option ${unknown.join(', ')}`);
+  if (!result['--pid'] || !result['--log']) fail('--pid and --log are required');
+  const creationOptions = ['--step-key', '--step-label', '--run-key', '--run-kind', '--source-run-key', '--selection-mode', '--target-count'];
+  if (result['--step-run-id']) {
+    if (creationOptions.some((key) => result[key])) {
+      fail('--step-run-id cannot be combined with Step or Run creation options');
+    }
+  } else {
+    for (const key of ['--step-key', '--run-key', '--run-kind']) {
+      if (!result[key]) fail(`${key} is required when --step-run-id is not supplied`);
+    }
+    if (result['--run-kind'] === 'rerun' && !result['--source-run-key']) {
+      fail('--source-run-key is required for a rerun');
+    }
+  }
+  return result;
+}
+
+function parseArtifact(value) {
+  const match = String(value || '').match(/^([^:]+):([^:]+):(.*)$/);
+  if (!match || !match[3]) fail('--artifact must use KIND:KEY:ABSOLUTE_PATH');
+  return { kind: match[1], key: match[2], path: match[3] };
+}
+
+const options = parseArguments(process.argv.slice(2));
+const pid = Number(options['--pid']);
+if (!Number.isInteger(pid) || pid < 2) fail('--pid must be an integer greater than 1');
+
+try {
+  const attempt = registerExternalAttempt({
+    taskId: process.env.CODEX_TASK_ID,
+    turnId: process.env.CODEX_TASK_TURN_ID,
+    attemptId: process.env.CODEX_TASK_ATTEMPT_ID,
+    workingDirectory: process.cwd(),
+    pid,
+    logPath: options['--log'],
+    donePath: options['--done'],
+    statePath: options['--state'],
+    metaPath: options['--meta'],
+    label: options['--label'],
+    followUpPrompt: options['--follow-up'],
+    chainKey: options['--chain-key'],
+    stepRunId: options['--step-run-id'],
+    stepKey: options['--step-key'],
+    stepLabel: options['--step-label'],
+    runKey: options['--run-key'],
+    runKind: options['--run-kind'],
+    sourceRunKey: options['--source-run-key'],
+    selectionMode: options['--selection-mode'],
+    targetCount: options['--target-count'],
+    artifacts: options['--artifact'].map(parseArtifact),
+    checkAfterSeconds: options['--check-after-seconds'],
+    checkIntervalSeconds: options['--interval-seconds'],
+  });
+  process.stdout.write([
+    `STEP_ID=${attempt.stepId}`,
+    `STEP_RUN_ID=${attempt.stepRunId}`,
+    `TRACKING_ID=${attempt.id}`,
+    `GENERATION=${attempt.generation}`,
+    `ARTIFACTS=${attempt.artifactDeclarations.length}`,
+    `NEXT_CHECK_SECONDS=${attempt.checkIntervalSeconds}`,
+  ].join('\n') + '\n');
+} catch (error) {
+  fail(error.message, Number(error.statusCode) === 400 ? 64 : 1);
+} finally {
+  try { closeDatabase(); } catch {}
+}

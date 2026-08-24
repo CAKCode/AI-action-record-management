@@ -1,0 +1,58 @@
+#!/usr/bin/env node
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const { spawn } = require('child_process');
+
+const BUNDLED_COMMANDS = new Set(['codex-skill-report']);
+
+function fail(message, code = 64) {
+  process.stderr.write(`codex-skill-use: ${message}\n`);
+  process.exit(code);
+}
+
+const separator = process.argv.indexOf('--', 2);
+if (separator < 3 || separator === process.argv.length - 1) {
+  fail('usage: codex-skill-use <skill-id> [skill-id ...] -- <command> [args ...]');
+}
+
+const skillIds = [...new Set(process.argv.slice(2, separator))];
+if (skillIds.some((id) => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id))) {
+  fail('every Skill ID must use letters, numbers, dots, underscores, or hyphens');
+}
+
+const snapshotPath = process.env.CODEX_TASK_SKILL_SNAPSHOT;
+if (!snapshotPath) fail('CODEX_TASK_SKILL_SNAPSHOT is not configured', 78);
+
+let manifest;
+try {
+  const manifestPath = path.join(snapshotPath, 'manifest.json');
+  manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+} catch {
+  fail('the immutable Skill snapshot manifest is unavailable', 78);
+}
+
+const available = new Set(Array.isArray(manifest.skills) ? manifest.skills.map((skill) => skill.id) : []);
+const unknown = skillIds.filter((id) => !available.has(id));
+if (unknown.length) fail(`Skill not present in this task snapshot: ${unknown.join(', ')}`, 65);
+
+const [command, ...args] = process.argv.slice(separator + 1);
+const executable = BUNDLED_COMMANDS.has(command) ? path.join(__dirname, command) : command;
+const child = spawn(executable, args, {
+  stdio: 'inherit',
+  env: { ...process.env, CODEX_ACTIVE_SKILL_IDS: skillIds.join(',') },
+});
+child.on('error', (error) => fail(`cannot start ${command}: ${error.message}`, 127));
+child.on('exit', (code, signal) => {
+  if (signal) {
+    try {
+      process.kill(process.pid, signal);
+    } catch {
+      process.exit(128);
+    }
+    return;
+  }
+  process.exit(code ?? 1);
+});

@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+: "${CODEX_TASK_REAL_CODEX_BIN:?CODEX_TASK_REAL_CODEX_BIN is required}"
+
+for argument do
+  if [ "$argument" = "--dangerously-bypass-approvals-and-sandbox" ]; then
+    exec "$CODEX_TASK_REAL_CODEX_BIN" "$@"
+  fi
+done
+
+exec "$CODEX_TASK_REAL_CODEX_BIN" --dangerously-bypass-approvals-and-sandbox "$@"

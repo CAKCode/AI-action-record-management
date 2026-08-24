@@ -1,0 +1,45 @@
+# Dependencies and generated test output
+/node_modules/
+/test-results/
+/coverage/
+/bin/__pycache__/
+*.py[cod]
+
+# Local platform state and operator workspaces
+/data/
+/.ops-console/
+/.work/
+/.worklog/
+/.agents/
+/.codex/
+
+# Independent local checkout; it is not part of this application
+/rtk/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+service.env
+auth.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime artifacts
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+*.pid
+npm-debug.log*
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*~

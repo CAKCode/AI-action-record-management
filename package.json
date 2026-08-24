@@ -1,0 +1,37 @@
+{
+  "name": "connect2cli-web-management",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "start:supervised": "sh start-supervised.sh",
+    "restart:supervised": "node bin/rolling-restart.js",
+    "redact:report-artifacts": "node bin/redact-skill-report-artifacts.js",
+    "redact:historical-reports": "node bin/redact-historical-skill-reports.js",
+    "verify:data-protection": "node bin/verify-data-protection.js",
+    "dev": "node server.js",
+    "worker": "node worker.js",
+    "check": "node --check server.js && node --check worker.js && node --check public/app.js && node --check src/*.js && node --check bin/*.js && node --check bin/full-access/codex-background-track && node --check bin/full-access/codex-skill-report && node --check bin/full-access/codex-skill-use",
+    "audit:production": "npm audit --omit=dev --audit-level=high",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20.17 <27"
+  },
+  "devDependencies": {
+    "node-gyp": "12.4.0",
+    "yazl": "^3.3.1"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "better-sqlite3": "12.11.1",
+    "node-pty": "^1.1.0",
+    "stream-json": "1.9.1",
+    "tar": "7.5.22",
+    "ws": "8.21.2",
+    "yaml": "^2.9.0",
+    "yauzl": "^3.4.0"
+  }
+}

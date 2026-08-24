@@ -1,0 +1,88 @@
+#!/usr/bin/env node
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const YAML = require('yaml');
+const { archiveSkillReportArtifacts, publishSkillReport } = require('../../src/store');
+const { closeDatabase } = require('../../src/database');
+const { MAX_REPORT_BYTES } = require('../../src/skill-report');
+
+function fail(message, code = 64) {
+  process.stderr.write(`codex-skill-report: ${message}\n`);
+  process.exitCode = code;
+}
+
+function parseArguments(values) {
+  if (values[0] !== 'publish') {
+    throw new Error('usage: codex-skill-report publish --file REPORT.json|REPORT.yaml');
+  }
+  const options = {};
+  for (let index = 1; index < values.length; index += 2) {
+    const key = values[index];
+    const value = values[index + 1];
+    if (key !== '--file' || value == null || options.file) {
+      throw new Error('usage: codex-skill-report publish --file REPORT.json|REPORT.yaml');
+    }
+    options.file = value;
+  }
+  if (!options.file) throw new Error('--file is required');
+  return options;
+}
+
+function readReport(fileName) {
+  const filePath = path.resolve(process.cwd(), fileName);
+  const stat = fs.lstatSync(filePath);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('report path must be a regular file');
+  if (stat.size > MAX_REPORT_BYTES) throw new Error(`report file exceeds ${MAX_REPORT_BYTES} bytes`);
+  const content = fs.readFileSync(filePath, 'utf8');
+  if (Buffer.byteLength(content) > MAX_REPORT_BYTES) {
+    throw new Error(`report file exceeds ${MAX_REPORT_BYTES} bytes`);
+  }
+  if (path.extname(filePath).toLowerCase() === '.json') return JSON.parse(content);
+  return YAML.parse(content, { maxAliasCount: 0, uniqueKeys: true });
+}
+
+function assertActiveSkill(report) {
+  const activeSkillIds = new Set(String(process.env.CODEX_ACTIVE_SKILL_IDS || '')
+    .split(',').map((value) => value.trim()).filter(Boolean));
+  if (!activeSkillIds.size) {
+    throw Object.assign(new Error('publish through codex-skill-use to bind the report to an active Skill'), { code: 78 });
+  }
+  const skillId = String(report?.skillId ?? report?.skill_id ?? '').trim();
+  if (!activeSkillIds.has(skillId)) {
+    throw Object.assign(new Error(`report Skill is not active in codex-skill-use: ${skillId || '<missing>'}`), { code: 65 });
+  }
+}
+
+async function main() {
+  try {
+    const options = parseArguments(process.argv.slice(2));
+    const taskId = String(process.env.CODEX_TASK_ID || '').trim();
+    const turnId = String(process.env.CODEX_TASK_TURN_ID || '').trim();
+    const attemptId = String(process.env.CODEX_TASK_ATTEMPT_ID || '').trim();
+    if (!taskId || !turnId || !attemptId) {
+      throw Object.assign(new Error('managed task runtime context is required'), { code: 78 });
+    }
+    const input = readReport(options.file);
+    assertActiveSkill(input);
+    const published = publishSkillReport(taskId, input, { turnId, attemptId });
+    const report = await archiveSkillReportArtifacts(taskId, published.id);
+    process.stdout.write([
+      `SKILL_REPORT_ID=${report.id}`,
+      `STEP_RUN_ID=${report.stepRunId}`,
+      `REPORT_KEY=${report.reportKey}`,
+      `REVISION=${report.revision}`,
+      `STATUS=${report.status}`,
+      `IDEMPOTENT=${published.idempotent}`,
+      `ARTIFACTS=${report.artifacts.length}`,
+    ].join('\n') + '\n');
+  } catch (error) {
+    fail(error.message, Number(error.code || error.statusCode) || 64);
+  } finally {
+    try { closeDatabase(); } catch {}
+  }
+}
+
+main();

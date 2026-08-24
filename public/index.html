@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Codex Task Sessions</title>
+  <link rel="stylesheet" href="/vendor/xterm/xterm.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="authOverlay" class="auth-overlay hidden">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <div class="brand-mark">C</div>
+        <div class="auth-title">Codex Task Sessions</div>
+      </div>
+      <form id="authForm" class="auth-form">
+        <label class="auth-field">
+          <span>用户名</span>
+          <input id="authUser" type="text" autocomplete="username" required>
+        </label>
+        <label class="auth-field">
+          <span>密码</span>
+          <input id="authPass" type="password" autocomplete="current-password" required>
+        </label>
+        <p id="authError" class="auth-error"></p>
+        <button type="submit" class="button primary auth-submit">登录</button>
+      </form>
+    </div>
+  </div>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">C</div>
+        <div>
+          <div class="brand-title">Codex Tasks</div>
+          <div class="brand-subtitle" data-i18n="brandSubtitle">持久任务工作台</div>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="Primary">
+        <button class="nav-item active" data-view="overview"><span class="nav-index">01</span><span data-i18n="navOverview">总览</span></button>
+        <button class="nav-item" data-view="tasks"><span class="nav-index">02</span><span data-i18n="navTasks">任务 Session</span></button>
+        <button class="nav-item" data-view="skills"><span class="nav-index">03</span><span data-i18n="navSkills">Skills</span></button>
+        <button class="nav-item" data-view="runtime"><span class="nav-index">04</span><span data-i18n="navRuntime">运行库存</span></button>
+        <button class="nav-item" data-view="audit"><span class="nav-index">05</span><span data-i18n="navAudit">操作审计</span></button>
+      </nav>
+
+      <div class="runtime-card">
+        <div class="runtime-line"><span class="runtime-dot" id="runtimeDot"></span><span id="runtimeState">Runtime</span></div>
+        <div class="runtime-meta" id="runtimeMeta">-</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <p class="top-kicker" id="viewKicker">SESSION OPERATIONS</p>
+          <h1 id="viewTitle">持久任务总览</h1>
+          <p id="viewSubtitle">一个任务对应一个独立、可恢复、可审计的 Codex Session。</p>
+        </div>
+        <div class="topbar-actions">
+          <div class="font-size-control" id="fontSizeControl" role="group">
+            <button type="button" data-font-size="small" aria-pressed="false">A-</button>
+            <button type="button" data-font-size="standard" aria-pressed="false">A</button>
+            <button type="button" data-font-size="large" aria-pressed="false">A+</button>
+          </div>
+          <button class="button secondary compact" id="langToggleBtn" title="Language">EN</button>
+          <button class="button secondary" id="exportBtn" data-i18n="export">导出</button>
+          <button class="button secondary" id="importBtn" data-i18n="import">导入</button>
+          <button class="button secondary" id="syncBtn" data-i18n="syncRuntime">同步 Runtime</button>
+          <button class="button primary" id="topNewTaskBtn" data-i18n="newTask">新建任务</button>
+        </div>
+      </header>
+
+      <section class="runtime-alert hidden" id="runtimeAlert" role="status" aria-live="polite" aria-atomic="true">
+        <span class="runtime-alert-marker" aria-hidden="true"></span>
+        <div class="runtime-alert-copy">
+          <strong id="runtimeAlertTitle"></strong>
+          <ul class="runtime-reasons" id="runtimeReasons"></ul>
+        </div>
+      </section>
+
+      <section class="view active" id="view-overview">
+        <div class="summary-band">
+          <div class="summary-copy">
+            <span class="section-label" data-i18n="executionMode">执行模式</span>
+            <h2 data-i18n="overviewHeadline">任务即 Session，持续工作直到确认完成</h2>
+            <p data-i18n="overviewDescription">每个任务拥有独立持久 Session；每轮结果可继续处理，确认完成后进入只读历史。</p>
+          </div>
+          <div class="metric-grid" id="metricGrid"></div>
+        </div>
+
+        <section class="workspace-section">
+          <div class="section-head">
+            <div>
+              <span class="section-label" data-i18n="liveFloor">ACTIVE TASKS</span>
+              <h2 data-i18n="currentSessionsHeading">当前任务 Sessions</h2>
+            </div>
+            <button class="button primary" data-action="new-task" data-i18n="newTask">新建任务</button>
+          </div>
+          <div class="task-grid" id="overviewTaskGrid"></div>
+        </section>
+
+        <section class="history-section">
+          <div class="section-head">
+            <div>
+              <span class="section-label" data-i18n="completedSessions">COMPLETED SESSIONS</span>
+              <h2 data-i18n="recentHistory">最近完成记录</h2>
+            </div>
+            <button class="text-button" data-action="go-history" data-i18n="viewHistory">查看历史</button>
+          </div>
+          <div class="history-list" id="overviewHistoryList"></div>
+        </section>
+
+        <section class="audit-strip">
+          <div class="section-head">
+            <div>
+              <span class="section-label" data-i18n="recentActivity">RECENT ACTIVITY</span>
+              <h2 data-i18n="recentOperations">最近操作</h2>
+            </div>
+            <button class="text-button" data-action="go-audit" data-i18n="viewAll">查看全部</button>
+          </div>
+          <div class="event-list compact-list" id="overviewAuditList"></div>
+        </section>
+      </section>
+
+      <section class="view" id="view-tasks">
+        <div class="section-toolbar">
+          <div class="segmented" id="taskFilters">
+            <button class="active" data-status="current" data-i18n="filterCurrent">当前任务</button>
+            <button data-status="running" data-i18n="filterRunning">工作中</button>
+            <button data-status="history" data-i18n="filterHistory">历史记录</button>
+          </div>
+          <button class="button primary" data-action="new-task" data-i18n="newTask">新建任务</button>
+        </div>
+        <div class="task-grid large" id="taskGrid"></div>
+        <div class="load-more-row"><button class="button secondary hidden" id="loadMoreTasksBtn" data-i18n="loadMore">加载更多</button></div>
+      </section>
+
+      <section class="view" id="view-skills">
+        <div class="section-toolbar">
+          <div class="inline-note" data-i18n="skillsNote">任务首次启动时冻结平台 Skill 与 Codex Skill 快照，恢复时保持版本一致。</div>
+          <div class="toolbar-actions">
+            <button class="button secondary" id="importSkillBtn" data-i18n="importSkillZip">导入 ZIP</button>
+            <button class="button primary" data-action="new-skill" data-i18n="newSkill">新建 Skill</button>
+          </div>
+        </div>
+        <div class="skill-grid" id="skillGrid"></div>
+      </section>
+
+      <section class="view" id="view-runtime">
+        <div class="summary-band inventory-summary-band">
+          <div class="summary-copy">
+            <span class="section-label" data-i18n="nativeRuntime">NATIVE RUNTIME</span>
+            <h2 data-i18n="runtimeInventoryHeadline">原生 Session 资源与归属</h2>
+            <p id="bridgeInventoryScannedAt" data-i18n="inventoryNotScanned">尚未扫描</p>
+          </div>
+          <div class="metric-grid" id="bridgeInventoryMetrics"></div>
+        </div>
+        <section class="protection-section">
+          <div class="section-head">
+            <div>
+              <span class="section-label" data-i18n="dataProtection">DATA PROTECTION</span>
+              <h2 data-i18n="dataProtectionHeading">数据完整性与恢复保护</h2>
+              <p class="protection-meta" id="protectionMeta" role="status" aria-live="polite"></p>
+            </div>
+          </div>
+          <div class="protection-grid" id="protectionGrid"></div>
+        </section>
+        <div class="section-toolbar inventory-toolbar">
+          <div class="inline-note" id="bridgeInventoryState"></div>
+          <button class="button secondary" id="refreshBridgeInventoryBtn" data-i18n="refreshInventory">刷新状态</button>
+        </div>
+        <div class="inventory-list" id="bridgeInventoryList"></div>
+      </section>
+
+      <section class="view" id="view-audit">
+        <form class="filter-bar" id="auditFilterForm">
+          <input id="auditSessionId" data-i18n-placeholder="taskId" placeholder="任务 ID">
+          <input id="auditKind" data-i18n-placeholder="eventType" placeholder="事件类型">
+          <input id="auditQuery" data-i18n-placeholder="searchAudit" placeholder="搜索操作内容">
+          <button class="button secondary" type="submit" data-i18n="filter">筛选</button>
+        </form>
+        <div class="event-list" id="auditList"></div>
+        <div class="load-more-row">
+          <button class="button secondary hidden" id="newerAuditBtn" data-i18n="newer">较新记录</button>
+          <button class="button secondary hidden" id="loadMoreAuditBtn" data-i18n="older">更早记录</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal hidden" id="taskEditorModal" role="dialog" aria-modal="true" aria-labelledby="taskEditorTitle">
+    <div class="modal-card form-modal">
+      <div class="modal-head">
+        <div>
+          <span class="section-label" data-i18n="persistentSession">PERSISTENT SESSION</span>
+          <h2 id="taskEditorTitle">新建任务</h2>
+        </div>
+        <button class="icon-button" data-close="taskEditorModal" aria-label="Close">&#215;</button>
+      </div>
+      <form id="taskForm" class="modal-body form-grid"></form>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="skillEditorModal" role="dialog" aria-modal="true" aria-labelledby="skillEditorTitle">
+    <div class="modal-card form-modal wide-modal">
+      <div class="modal-head">
+        <div>
+          <span class="section-label">SKILL.md</span>
+          <h2 id="skillEditorTitle">新建 Skill</h2>
+        </div>
+        <button class="icon-button" data-close="skillEditorModal" aria-label="Close">&#215;</button>
+      </div>
+      <form id="skillForm" class="modal-body form-grid"></form>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="taskDetailModal" role="dialog" aria-modal="true" aria-label="Task session detail">
+    <div class="modal-card task-detail-modal">
+      <div class="modal-head task-detail-head" id="taskDetailHead"></div>
+      <div class="task-detail-body">
+        <aside class="task-context" id="taskContext"></aside>
+        <section class="task-console">
+          <div class="tabs" id="detailTabs">
+            <button class="active" data-tab="business-summary" data-i18n="businessSummary">任务摘要</button>
+            <button data-tab="business-reports" data-i18n="businessReports">结构化报告</button>
+            <button data-tab="task-terminal" data-i18n="taskTerminal">Codex CLI</button>
+            <button data-tab="agent-records" data-i18n="agentRecords">Agent 记录</button>
+            <button data-tab="background" data-i18n="background">后台与调度</button>
+            <button data-tab="operations" data-i18n="operations">操作记录</button>
+          </div>
+          <div class="console-output" id="taskConsoleOutput"></div>
+          <form class="prompt-composer" id="continueTaskForm">
+            <textarea id="continueInput" maxlength="524288" data-i18n-placeholder="continuePlaceholder" placeholder="向这个 Session 发送下一条工作指令"></textarea>
+            <div class="composer-actions">
+              <span id="composerHint"></span>
+              <button class="button primary" type="submit" id="continueTaskBtn">继续工作</button>
+            </div>
+          </form>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="skillAttributionModal" role="dialog" aria-modal="true" aria-label="Correct command Skill attribution">
+    <div class="modal-card wide-modal">
+      <div class="modal-head">
+        <div>
+          <span class="section-label">COMMAND / SKILLS</span>
+          <h2 id="skillAttributionTitle">修正归因</h2>
+        </div>
+        <button class="icon-button" data-close="skillAttributionModal" aria-label="Close">&#215;</button>
+      </div>
+      <form id="skillAttributionForm" class="modal-body form-grid"></form>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="bridgeReclaimModal" role="dialog" aria-modal="true" aria-labelledby="bridgeReclaimTitle">
+    <div class="modal-card reclaim-modal">
+      <div class="modal-head">
+        <div>
+          <span class="section-label" data-i18n="nativeRuntime">NATIVE RUNTIME</span>
+          <h2 id="bridgeReclaimTitle" data-i18n="confirmRuntimeReclaim">确认回收 Runtime</h2>
+        </div>
+        <button class="icon-button" data-close="bridgeReclaimModal" aria-label="Close">&#215;</button>
+      </div>
+      <form id="bridgeReclaimForm" class="modal-body reclaim-confirm-body">
+        <p class="reclaim-warning" data-i18n="runtimeReclaimWarning">原生 Session Runtime 删除后不可恢复；平台任务历史和审计记录会继续保留。</p>
+        <div class="confirmation-target">
+          <span data-i18n="targetSession">目标 Session</span>
+          <code id="bridgeReclaimTarget"></code>
+        </div>
+        <label class="field">
+          <span data-i18n="typeSessionId">输入完整 Session ID</span>
+          <input id="bridgeReclaimInput" autocomplete="off" spellcheck="false" maxlength="64" data-i18n-placeholder="sessionIdConfirmation" placeholder="session-0123456789abcdef">
+        </label>
+        <div class="form-actions">
+          <span></span>
+          <div>
+            <button class="button secondary" type="button" data-close="bridgeReclaimModal" data-i18n="cancel">取消</button>
+            <button class="button danger" type="submit" id="confirmBridgeReclaimBtn" disabled data-i18n="reclaimRuntime">回收 Runtime</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="toast hidden" id="toast" role="status" aria-live="polite" aria-atomic="true">
+    <span class="toast-message" id="toastMessage"></span>
+  </div>
+  <input class="hidden" type="file" id="importInput" accept="application/json,.json">
+  <input class="hidden" type="file" id="skillZipInput" accept="application/zip,application/x-zip-compressed,.zip">
+  <script src="/vendor/xterm/xterm.js"></script>
+  <script src="/vendor/xterm/addon-fit.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

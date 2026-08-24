@@ -1,0 +1,36 @@
+[Unit]
+Description=Codex Task Sessions
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=codex-task-sessions
+Group=codex-task-sessions
+WorkingDirectory=/opt/codex-task-sessions
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=8091
+Environment=CODEX_DESK_DATA_DIR=/var/lib/codex-task-sessions/data
+Environment=CODEX_DESK_BACKUP_DIR=/var/lib/codex-task-sessions/backups
+Environment=CODEX_DESK_RUNTIME_DIR=/var/lib/codex-task-sessions/runtime
+Environment=CODEX_TASK_WORKSPACE_ROOTS=/var/lib/codex-task-workspaces
+EnvironmentFile=-/etc/codex-task-sessions.env
+ExecStart=/usr/bin/node /opt/codex-task-sessions/bin/web-supervisor.js
+Restart=always
+RestartSec=3s
+TimeoutStopSec=20s
+KillMode=control-group
+Delegate=yes
+ProtectControlGroups=false
+UMask=0077
+StateDirectory=codex-task-sessions codex-task-workspaces
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
