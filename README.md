@@ -89,6 +89,18 @@ npm test
 
 根目录 `.gitignore` 排除了常见本地状态和密钥文件，但提交前仍应检查暂存文件和差异。远程监听必须启用 Basic Auth，生产环境必须使用专用非 root 服务账户。完整要求见[安全说明](SECURITY.md)。
 
+### Codex 认证源与任务隔离
+
+`CODEX_SOURCE_HOME` 是任务隔离 Codex Home 的认证和配置来源，默认是服务账户的
+`$HOME/.codex`。`start-supervised.sh` 会把 `CODEX_HOME` 固定为该来源，避免把启动
+Shell 中遗留的任务级路径继承给新服务。每个 Task 仍会在
+`BRIDGE_RUNTIME_ROOT/.bridge-codex-home/sessions/<session-id>/` 使用独立的 Codex Home，
+并以私有权限复制认证文件；不同 Task 不直接共享 rollout、SQLite 或临时文件。
+
+如果 Codex CLI 显示登录页面，先检查服务是否已经重启并加载正确的 `CODEX_SOURCE_HOME`，
+不要在任务 Home 中手工写入密钥。旧任务的 Codex Home 已被清理时，提交一次新的 Task Turn
+会重新创建 Runtime；原有 Attempt 输出和 transcript 仍可只读查看。
+
 ## 文档
 
 | 文档 | 内容 |

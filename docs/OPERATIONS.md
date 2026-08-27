@@ -196,6 +196,7 @@ npm run verify:data-protection
 | `CODEX_ROLLING_RESTART_DRAIN_MS` | `500` | 取得维护租约后等待迟到请求进入事务门禁的排空时间，范围 `0..10000` 毫秒 |
 | `CODEX_ALLOW_ROOT_EXECUTION` | 未启用 | 仅供本地开发验证；设为 `1` 才允许 root 进程执行任务，生产环境禁止配置 |
 | `CODEX_TASK_REAL_CODEX_BIN` | 从服务 `PATH` 查找 `codex` | 真实 Codex CLI 绝对路径；平台包装器会固定追加最高权限参数 |
+| `CODEX_SOURCE_HOME` | `$HOME/.codex` | 为每个 Task 隔离 Home 提供认证和配置；不要指向某个 Task 的隔离目录 |
 | `CODEX_TASK_BRIDGE_ROOT` | `/home/jenkins/connect2cli-bridge` | 包含 `workspace_bridge` Python 包的 Bridge 源目录；非默认部署必须显式配置 |
 | `BRIDGE_PYTHON` | `python3` | 运行 Bridge runner 和 execution gate 的 Python `3.11+` 解释器 |
 | `BRIDGE_RUNNER` | 仓库 `bin/bridge-stream-runner.py` | 自定义 Bridge runner；通常不需要覆盖 |
@@ -216,6 +217,25 @@ npm run verify:data-protection
 生产服务必须由专用、非 root、最小权限账户运行。以 root 启动时控制面仍可查询，但 `executionUserSafe=false` 且任务启动返回 `503`；`CODEX_ALLOW_ROOT_EXECUTION=1` 只用于隔离开发环境的临时验证。任务目录白名单不能替代 OS 沙箱，任务输入或 Skill 来源不可信时必须另加容器、虚拟机或等价隔离。
 
 任务 Session 固定以 Codex `danger-full-access`、`approvalPolicy=never` 运行，不会弹出命令审批，也没有 Codex 文件系统沙箱。其最高权限等于 Web/Worker 服务账户的 OS 权限；若服务账户是 root，任务即可修改整台主机。生产环境必须将服务账户、工作目录和网络访问限制在可接受范围内，不能把平台直接暴露给不可信操作者。
+
+### Codex 认证与隔离 Home
+
+平台不会让所有任务直接共用一个 `CODEX_HOME`。服务启动时，`CODEX_SOURCE_HOME` 只作为
+只读认证/配置源，默认是服务账户的 `$HOME/.codex`。Bridge 为每个 Session 创建独立的
+`BRIDGE_RUNTIME_ROOT/.bridge-codex-home/sessions/<session-id>/`，复制 `auth.json`、
+`config.toml` 和必要的 Skill 文件，并在该目录中保存 rollout 与 CLI 状态。
+
+`start-supervised.sh` 会覆盖继承来的任务级 `CODEX_HOME`，避免一次任务的隔离目录被错误地
+当成下一次任务的认证源。修改 `CODEX_SOURCE_HOME` 或启动脚本后必须完整重启服务树；仅刷新
+浏览器不会改变已经运行的 Worker 环境。
+
+故障判断：
+
+- Codex CLI 显示 `Sign in with ChatGPT`，通常表示新隔离 Home 没有可用的 `auth.json`，先检查
+  `CODEX_SOURCE_HOME` 和服务是否已用新环境重启。
+- `The task Codex Home has expired` 表示该 Task 的旧 Runtime 已被回收；提交新的 Turn 会
+  重新创建隔离 Home，历史 transcript 不受影响。
+- 不要把 API key 直接写入任务目录，也不要把一个 Task 的 `CODEX_HOME` 配置复制给其他任务。
 
 ## 健康检查
 

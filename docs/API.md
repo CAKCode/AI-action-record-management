@@ -320,6 +320,13 @@ Reset 保留 Task 的 ID、名称、目标、工作目录、备注、启停与�
 
 托管 Turn 已结束且操作者显式点击“重连”后，页面才连接本端点并恢复任务绑定的 Codex thread；二进制帧是原始终端输出，文本控制帧用于 `status/error`，客户端文本消息支持现有的 `input/resize/interrupt/terminate` 操作。一个任务在任一时刻只允许一个 Codex CLI 进程，页面重连复用同一进程和内存回放窗口。页面 Codex CLI 内嵌视图最多追加 64 MiB 并保留 100,000 行滚动缓存，超过后提示使用完整原始输出入口；服务端 transcript 始终保存完整输出。
 
+每个 Task 的 Codex 进程使用独立的 `CODEX_HOME`，认证和基础配置从服务启动时固定的
+`CODEX_SOURCE_HOME`（默认 `$HOME/.codex`）复制。服务不会把当前 Shell 中继承的旧任务级
+`CODEX_HOME` 当作认证源。若连接返回 `Sign in with ChatGPT`，说明隔离 Home 中没有可用认证，
+应检查启动环境并重启服务；若返回 `The task Codex Home has expired`，说明该 Task 的旧
+Runtime 已回收，应先提交新的 Turn 重新创建 Runtime，再重连。两种情况都不需要把 API key
+写入任务目录。
+
 `completed` 任务连接同一地址时只从 `data/sessions/<task>/interactive-cli/` 顺序校验并回放已封存 transcript，不解析 Bridge Runtime，也不会启动或重连 Codex；每个文件在发送首个字节前先按 manifest 完整校验，回放结束发送 `state=ended`。每个进程对应一个 `0600` 原始文件和一个 `0600` manifest，父目录为 `0700`。客户端中途断开会停止后续归档读取。需要继续执行时必须先显式调用 `/restore`。
 
 ### 查询 Turn
