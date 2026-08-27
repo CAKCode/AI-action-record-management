@@ -6,7 +6,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { createCodexTerminalManager } = require('../src/codex-terminal');
+const {
+  DEFAULT_REPLAY_BYTES,
+  MAX_REPLAY_BYTES,
+  createCodexTerminalManager,
+} = require('../src/codex-terminal');
 
 class FakePtyProcess {
   constructor() {
@@ -130,6 +134,76 @@ test('interactive Codex terminal resumes the isolated task thread and replays ou
   assert.deepEqual(transcriptSeals, [{ exitCode: 0, signal: 15 }]);
   assert.equal(JSON.parse(firstSocket.messages.at(-1)).state, 'ended');
   assert.equal(auditEvents.at(-1).event.kind, 'session.interactive_cli.ended');
+  manager.shutdown();
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('interactive Codex replay window honors the configured high-water mark', () => {
+  assert.equal(DEFAULT_REPLAY_BYTES, 64 * 1024 * 1024);
+  assert.equal(MAX_REPLAY_BYTES, 128 * 1024 * 1024);
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-terminal-replay-window-'));
+  const runtime = {
+    sessionId: 'session-replay-window',
+    threadId: '019f-replay-window-thread',
+    cwdDir: path.join(tempDir, 'workfile'),
+    codexHome: path.join(tempDir, 'codex-home'),
+    chatfileDir: path.join(tempDir, 'chatfiles'),
+  };
+  for (const directory of [runtime.cwdDir, runtime.codexHome, runtime.chatfileDir]) fs.mkdirSync(directory);
+  const processHandle = new FakePtyProcess();
+  const manager = createCodexTerminalManager({
+    getTask: () => ({
+      id: 'replay-window-task', status: 'waiting_review', version: 1,
+      persistentSessionKey: 'single:replay-window-task',
+    }),
+    environment: {
+      CODEX_INTERACTIVE_REPLAY_BYTES: String(64 * 1024),
+      CODEX_INTERACTIVE_DISCONNECT_TIMEOUT_MS: '0',
+    },
+    codexBinary: '/usr/bin/codex-test',
+    pty: { spawn: () => processHandle },
+    resolveRuntime: () => runtime,
+    transcripts: { start: () => ({ append() {}, seal() {} }) },
+  });
+  const firstSocket = new FakeSocket();
+  manager.attach('replay-window-task', firstSocket);
+  const firstChunk = Buffer.alloc(40 * 1024, 'a');
+  const secondChunk = Buffer.alloc(40 * 1024, 'b');
+  processHandle.emitData(firstChunk);
+  processHandle.emitData(secondChunk);
+  const reconnectSocket = new FakeSocket();
+  manager.attach('replay-window-task', reconnectSocket);
+  const replay = Buffer.concat(reconnectSocket.messages.filter(Buffer.isBuffer));
+  assert.equal(replay.length, secondChunk.length);
+  assert.equal(replay[0], 'b'.charCodeAt(0));
+  manager.shutdown();
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('interactive Codex terminal explains when its expired home must be recreated', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-terminal-expired-home-'));
+  const runtime = {
+    sessionId: 'session-expired-home',
+    threadId: '019f-expired-home-thread',
+    cwdDir: path.join(tempDir, 'workfile'),
+    codexHome: path.join(tempDir, 'codex-home'),
+    chatfileDir: path.join(tempDir, 'chatfiles'),
+  };
+  fs.mkdirSync(runtime.cwdDir, { recursive: true });
+  fs.mkdirSync(runtime.chatfileDir, { recursive: true });
+  const manager = createCodexTerminalManager({
+    getTask: () => ({
+      id: 'expired-home-task', status: 'waiting_review', version: 1,
+      persistentSessionKey: 'single:expired-home-task',
+    }),
+    codexBinary: '/usr/bin/codex-test',
+    resolveRuntime: () => runtime,
+  });
+
+  assert.throws(
+    () => manager.attach('expired-home-task', new FakeSocket()),
+    /Codex Home has expired; run the task once to recreate its Runtime before reconnecting/,
+  );
   manager.shutdown();
   fs.rmSync(tempDir, { recursive: true, force: true });
 });

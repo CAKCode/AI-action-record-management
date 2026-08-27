@@ -114,6 +114,11 @@ const PORT = Number(process.env.PORT || 8091);
 const HOST = process.env.HOST || '127.0.0.1';
 const AUTH_USER = process.env.CODEX_DESK_AUTH_USER || '';
 const AUTH_PASSWORD = process.env.CODEX_DESK_AUTH_PASSWORD || '';
+const AUTH_SESSION_COOKIE = 'codex_task_session';
+const AUTH_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const AUTH_SESSION_SECRET = AUTH_USER && AUTH_PASSWORD
+  ? crypto.createHash('sha256').update(`${AUTH_USER}\0${AUTH_PASSWORD}`).digest()
+  : null;
 const REPORT_RESOURCE_ACCESS_PARAM = 'codex_report_resource_access';
 const OPERATOR_ACTOR = AUTH_USER ? `user:${AUTH_USER}` : 'operator';
 const API_MAX_CONCURRENCY = Number(process.env.CODEX_API_MAX_CONCURRENCY ?? 64);
@@ -483,6 +488,63 @@ function escapeRegularExpression(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function encodeExternalArtifactResourcePath(relativePath) {
+  const value = String(relativePath || '');
+  const segments = value.split('/');
+  return segments.includes('..')
+    ? encodeURIComponent(value)
+    : segments.map(encodeURIComponent).join('/');
+}
+
+function externalArtifactManifestReferenceUrl(resourceScope, manifestPath, reference) {
+  const raw = String(reference || '').trim();
+  if (!raw || /^(?:#|\/|\/\/|data:|[A-Za-z][A-Za-z0-9+.-]*:)/i.test(raw)) return null;
+  const suffixMatch = /([?#].*)$/.exec(raw);
+  const pathReference = suffixMatch ? raw.slice(0, suffixMatch.index) : raw;
+  let decodedReference;
+  try {
+    // `%0Nd` is DASH's formatting syntax, not URL escaping.
+    const protectedReference = pathReference.replace(/%0(\d+)d/gi, '%250$1d');
+    decodedReference = decodeURIComponent(protectedReference);
+  } catch {
+    return null;
+  }
+  const normalizedPath = path.posix.normalize(
+    path.posix.join(path.posix.dirname(String(manifestPath || '')), decodedReference),
+  );
+  if (!normalizedPath || normalizedPath === '.') return null;
+  return `${resourceScope}/${encodeExternalArtifactResourcePath(normalizedPath)}${suffixMatch?.[1] || ''}`;
+}
+
+function rewriteExternalArtifactManifest(content, resourceScope, manifestPath, mediaType) {
+  const rewrite = (reference) => externalArtifactManifestReferenceUrl(
+    resourceScope,
+    manifestPath,
+    reference,
+  ) || reference;
+  let transformed = String(content || '');
+  if (mediaType === 'application/vnd.apple.mpegurl') {
+    transformed = transformed.replace(
+      /(\bURI\s*=\s*["'])([^"']+)(["'])/gi,
+      (_, prefix, reference, suffix) => `${prefix}${rewrite(reference)}${suffix}`,
+    );
+    transformed = transformed.split(/(\r?\n)/).map((line) => {
+      if (/^\r?\n$/.test(line) || /^\s*#/.test(line) || !line.trim()) return line;
+      const match = /^(\s*)(\S+)(\s*)$/.exec(line);
+      return match ? `${match[1]}${rewrite(match[2])}${match[3]}` : line;
+    }).join('');
+    return transformed;
+  }
+  transformed = transformed.replace(
+    /(\b(?:media|initialization|sourceURL|href)\s*=\s*["'])([^"']+)(["'])/gi,
+    (_, prefix, reference, suffix) => `${prefix}${rewrite(reference)}${suffix}`,
+  );
+  return transformed.replace(
+    /(<BaseURL\b[^>]*>)([^<]+)(<\/BaseURL\s*>)/gi,
+    (_, prefix, reference, suffix) => `${prefix}${rewrite(reference)}${suffix}`,
+  );
+}
+
 async function withSignedArtifactResourceUrls(opened, resourceScope) {
   const rewritableMediaTypes = new Set([
     'text/html; charset=utf-8',
@@ -508,11 +570,21 @@ async function withSignedArtifactResourceUrls(opened, resourceScope) {
     if (handle) await handle.close();
   }
 
+  let transformedContent = content.toString('utf8');
+  if (opened.resourcePath && ['application/vnd.apple.mpegurl', 'application/dash+xml']
+    .includes(opened.mediaType)) {
+    transformedContent = rewriteExternalArtifactManifest(
+      transformedContent,
+      resourceScope,
+      opened.resourcePath,
+      opened.mediaType,
+    );
+  }
   const resourcePattern = new RegExp(
     `${escapeRegularExpression(resourceScope)}/([^\\s"'\\\\<>&?#]+)`,
     'g',
   );
-  const transformed = content.toString('utf8').replace(resourcePattern, (resourcePath) => (
+  const transformed = transformedContent.replace(resourcePattern, (resourcePath) => (
     `${resourcePath}?${REPORT_RESOURCE_ACCESS_PARAM}=${reportResourceAccessToken(resourcePath)}`
   ));
   const responseContent = Buffer.from(transformed, 'utf8');
@@ -760,6 +832,71 @@ function secureEqual(left, right) {
   return crypto.timingSafeEqual(leftDigest, rightDigest);
 }
 
+function requestCookie(req, name) {
+  const header = String(req.headers.cookie || '');
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator === -1) continue;
+    if (part.slice(0, separator).trim() !== name) continue;
+    return part.slice(separator + 1).trim();
+  }
+  return '';
+}
+
+function createAuthSessionValue(now = Date.now()) {
+  const payload = Buffer.from(JSON.stringify({
+    user: AUTH_USER,
+    expiresAt: now + AUTH_SESSION_TTL_MS,
+    nonce: crypto.randomBytes(18).toString('base64url'),
+  }), 'utf8').toString('base64url');
+  const signature = crypto.createHmac('sha256', AUTH_SESSION_SECRET)
+    .update(payload)
+    .digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+function readAuthSession(value, now = Date.now()) {
+  if (!AUTH_SESSION_SECRET) return null;
+  const parts = String(value || '').split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  const expected = crypto.createHmac('sha256', AUTH_SESSION_SECRET)
+    .update(parts[0])
+    .digest('base64url');
+  if (!secureEqual(parts[1], expected)) return null;
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (payload.user !== AUTH_USER
+    || !Number.isSafeInteger(payload.expiresAt)
+    || payload.expiresAt <= now) return null;
+  return payload;
+}
+
+function authSessionFromRequest(req) {
+  return readAuthSession(requestCookie(req, AUTH_SESSION_COOKIE));
+}
+
+function setAuthSessionCookie(res, value, maxAgeSeconds) {
+  res.setHeader(
+    'Set-Cookie',
+    `${AUTH_SESSION_COOKIE}=${value}; Max-Age=${maxAgeSeconds}; Path=/; HttpOnly; SameSite=Strict`,
+  );
+}
+
+function issueAuthSession(res) {
+  if (!AUTH_SESSION_SECRET) return '';
+  const expiresAt = Date.now() + AUTH_SESSION_TTL_MS;
+  setAuthSessionCookie(res, createAuthSessionValue(), Math.floor(AUTH_SESSION_TTL_MS / 1000));
+  return new Date(expiresAt).toISOString();
+}
+
+function clearAuthSession(res) {
+  setAuthSessionCookie(res, '', 0);
+}
+
 function artifactResourceScope(pathname) {
   const value = String(pathname || '');
   return [
@@ -796,6 +933,7 @@ function requestCredentialsValid(req, pathname = '', searchParams = null) {
     const password = separator === -1 ? '' : decoded.slice(separator + 1);
     if (secureEqual(user, AUTH_USER) && secureEqual(password, AUTH_PASSWORD)) return true;
   }
+  if (authSessionFromRequest(req)) return true;
   return artifactResourceAccessValid(req, pathname, searchParams);
 }
 
@@ -1342,7 +1480,8 @@ const server = http.createServer(async (req, res) => {
   }
   const pathname = url.pathname;
   const isApiRoute = pathname.startsWith('/api/');
-  if (isApiRoute && !authorize(req, res, pathname, url.searchParams)) return;
+  const isAuthSessionProbe = pathname === '/api/auth/session' && req.method === 'GET';
+  if (isApiRoute && !isAuthSessionProbe && !authorize(req, res, pathname, url.searchParams)) return;
   if (isApiRoute && !sameOrigin(req)) {
     json(res, { error: 'Cross-origin write requests are forbidden' }, 403);
     return;
@@ -1363,6 +1502,7 @@ const server = http.createServer(async (req, res) => {
     const maintenance = getPlatformMaintenance();
     if (maintenance && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)
       && pathname !== '/api/recovery-checkpoints'
+      && pathname !== '/api/auth/session'
       && !acceptsIdempotentReplayDuringMaintenance(req, pathname)) {
       const remainingSeconds = Math.max(1, Math.ceil((Date.parse(maintenance.expiresAt) - Date.now()) / 1000));
       res.setHeader('Retry-After', String(remainingSeconds));
@@ -1374,6 +1514,25 @@ const server = http.createServer(async (req, res) => {
           expiresAt: maintenance.expiresAt,
         },
       }, 503);
+      return;
+    }
+    if (pathname === '/api/auth/session') {
+      if (req.method === 'POST') {
+        const expiresAt = issueAuthSession(res);
+        json(res, expiresAt ? { ok: true, expiresAt } : { ok: true });
+        return;
+      }
+      if (req.method === 'DELETE') {
+        clearAuthSession(res);
+        json(res, { ok: true });
+        return;
+      }
+      if (req.method === 'GET') {
+        json(res, { ok: Boolean(authSessionFromRequest(req)) });
+        return;
+      }
+      res.setHeader('Allow', 'GET, POST, DELETE');
+      json(res, { error: 'Method not allowed' }, 405);
       return;
     }
     if (pathname === '/api/health' && req.method === 'GET') {

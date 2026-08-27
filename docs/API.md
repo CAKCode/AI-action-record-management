@@ -8,7 +8,7 @@
 - 错误响应格式为 `{"error":"错误说明"}`。
 - 每个响应包含 `X-Request-Id`；调用方也可以传入该请求头用于链路定位。
 - 写操作会把 `X-Request-Id` 和当前认证用户名写入审计；未配置认证时操作者记为 `operator`。
-- 配置 HTTP Basic Authentication 后，所有请求都必须携带认证信息。
+- 配置 HTTP Basic Authentication 后，所有请求都必须携带认证信息。浏览器可先用 Basic Auth 调用 `POST /api/auth/session` 建立 12 小时的 HttpOnly 会话 Cookie，之后 artifact、iframe、媒体资源和 WebSocket 会自动复用 Cookie；命令行仍可直接使用 Basic Auth。
 - 带 `Origin` 的写请求必须与当前 Host 同源。
 - 平台不接受或保存 Agent、模型或编排配置。
 - 任务指令、执行命令、命令输出和运行事件按执行端返回的原文保存，不做字段级脱敏。
@@ -29,7 +29,7 @@ BASE_URL=http://127.0.0.1:8091
 | `201` | 任务或 Skill 创建成功 |
 | `202` | 任务运行命令或受控 runtime 回收作业已进入队列 |
 | `400` | 参数、JSON 或工作目录不合法 |
-| `401` | 未通过 HTTP Basic Authentication |
+| `401` | 未通过 HTTP Basic Authentication 或浏览器会话认证 |
 | `403` | 写请求来源不合法 |
 | `404` | 资源或接口不存在 |
 | `408` | 非日志 API 请求体在空闲阈值内没有传输进展 |
@@ -40,6 +40,22 @@ BASE_URL=http://127.0.0.1:8091
 | `503` | 执行能力或 Worker 当前不可用 |
 
 主要字符串字段上限：任务名称 200 字符，目标和备注各 256 KiB，工作目录 4096 字符，Turn 输入 512 KiB，幂等键 256 字符；Skill 名称 200 字符、分类 100 字符、描述 4096 字符、内容 768 KiB。请求体总上限仍为 1 MiB。
+
+## 浏览器会话认证
+
+远程部署仍以 HTTP Basic Authentication 作为凭据校验和命令行兼容方式。浏览器登录覆盖层会用一次 Basic Auth 请求建立 HttpOnly、`SameSite=Strict` 的 `codex_task_session` Cookie，有效期为 12 小时；密码不会写入 Cookie。会话 Cookie 可用于 API、原生 artifact 导航、HTML iframe、媒体资源和 WebSocket。
+
+### `POST /api/auth/session`
+
+请求必须携带有效 Basic Auth 或现有会话 Cookie。成功返回 `200` 并下发新的浏览器会话 Cookie；平台维护期间仍允许该登录请求。
+
+### `GET /api/auth/session`
+
+检查当前会话是否有效，返回 `{"ok":true}` 或 `{"ok":false}`。
+
+### `DELETE /api/auth/session`
+
+清除当前浏览器会话 Cookie。Basic Auth 客户端不受影响。
 
 ## 任务接口
 
@@ -300,9 +316,9 @@ Reset 保留 Task 的 ID、名称、目标、工作目录、备注、启停与�
 
 `WS /api/sessions/:id/codex-terminal/live?cols=100&rows=30`
 
-托管 Turn 直接把唯一的交互式 `codex` / `codex resume` TUI 进程接入 PTY；“Codex CLI”页签通过当前 Attempt 的只读输出 WebSocket 跟随同一 PTY，不会启动第二个 Codex 进程，也不会用 JSON 事件或后台 pytest 日志替代 CLI 内容。PTY 输出同时写入 Attempt stdout 和任务 transcript。runner 只从隔离 `CODEX_HOME` 的本次 rollout 增量读取结构化 `task_complete` / `turn_aborted` 事件作为 Turn 边界，并自动结束 TUI；Worker 随后从相同增量恢复 thread、Agent 消息和命令审计。显式交互 CLI 的最后一个浏览器连接断开后，默认保留 15 分钟供重连，随后自动结束；可用 `CODEX_INTERACTIVE_DISCONNECT_TIMEOUT_MS` 设置为 1000 至 86400000 毫秒，或设为 `0` 禁用自动结束。
+托管 Turn 直接把唯一的交互式 `codex` / `codex resume` TUI 进程接入 PTY；“Codex CLI”页签通过当前 Attempt 的只读输出 WebSocket 跟随同一 PTY，不会启动第二个 Codex 进程，也不会用 JSON 事件或后台 pytest 日志替代 CLI 内容。PTY 输出同时写入 Attempt stdout 和任务 transcript。runner 只从隔离 `CODEX_HOME` 的本次 rollout 增量读取结构化 `task_complete` / `turn_aborted` 事件作为 Turn 边界，并自动结束 TUI；Worker 随后从相同增量恢复 thread、Agent 消息和命令审计。显式交互 CLI 的最后一个浏览器连接断开后，默认保留 15 分钟供重连，随后自动结束；可用 `CODEX_INTERACTIVE_DISCONNECT_TIMEOUT_MS` 设置为 1000 至 86400000 毫秒，或设为 `0` 禁用自动结束。内存回放窗口默认 64 MiB，可用 `CODEX_INTERACTIVE_REPLAY_BYTES` 调整到 64 KiB 至 128 MiB；已结束任务的 transcript 不受该窗口限制，按完整字节校验后回放。
 
-托管 Turn 已结束且操作者显式点击“重连”后，页面才连接本端点并恢复任务绑定的 Codex thread；二进制帧是原始终端输出，文本控制帧用于 `status/error`，客户端文本消息支持现有的 `input/resize/interrupt/terminate` 操作。一个任务在任一时刻只允许一个 Codex CLI 进程，页面重连复用同一进程和内存回放窗口。
+托管 Turn 已结束且操作者显式点击“重连”后，页面才连接本端点并恢复任务绑定的 Codex thread；二进制帧是原始终端输出，文本控制帧用于 `status/error`，客户端文本消息支持现有的 `input/resize/interrupt/terminate` 操作。一个任务在任一时刻只允许一个 Codex CLI 进程，页面重连复用同一进程和内存回放窗口。页面 Codex CLI 内嵌视图最多追加 64 MiB 并保留 100,000 行滚动缓存，超过后提示使用完整原始输出入口；服务端 transcript 始终保存完整输出。
 
 `completed` 任务连接同一地址时只从 `data/sessions/<task>/interactive-cli/` 顺序校验并回放已封存 transcript，不解析 Bridge Runtime，也不会启动或重连 Codex；每个文件在发送首个字节前先按 manifest 完整校验，回放结束发送 `state=ended`。每个进程对应一个 `0600` 原始文件和一个 `0600` manifest，父目录为 `0700`。客户端中途断开会停止后续归档读取。需要继续执行时必须先显式调用 `/restore`。
 

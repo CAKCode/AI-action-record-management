@@ -1899,6 +1899,8 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(largeAttemptOutputHtml, /打开完整原始输出/);
   assert.doesNotMatch(largeAttemptOutputHtml, /data-action="view-attempt-output"/);
   assert.match(APP_SOURCE, /INLINE_ATTEMPT_OUTPUT_MAX_BYTES\s*=\s*5\s*\*\s*1024\s*\*\s*1024/);
+  assert.match(APP_SOURCE, /CODEX_CLI_DISPLAY_MAX_BYTES\s*=\s*64\s*\*\s*1024\s*\*\s*1024/);
+  assert.match(APP_SOURCE, /CODEX_CLI_SCROLLBACK_LINES\s*=\s*100000/);
   assert.match(APP_SOURCE, /abortAttemptOutputLoad\(\)[\s\S]*active\.controller\.abort\(\)/);
   responseOverrides.set('GET /api/sessions/inline-task/attempts/attempt-inline/stdout', { payload: 'raw session line\n' });
   vm.runInContext(`

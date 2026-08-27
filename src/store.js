@@ -3229,6 +3229,254 @@ function manifestReferences(content, extension) {
   return [...new Set(references)];
 }
 
+const DASH_TEMPLATE_VARIABLE = /\$(RepresentationID|Number|Bandwidth|Time|SubNumber)(?:%0(\d+)d)?\$/g;
+
+function escapeRegexPattern(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function decodeXmlAttributeValue(value) {
+  return String(value || '')
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&');
+}
+
+function xmlAttributeValue(attributes, name) {
+  const escapedName = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(
+    `\\b${escapedName}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`,
+    'i',
+  ).exec(String(attributes || ''));
+  return decodeXmlAttributeValue(match ? (match[1] ?? match[2] ?? '') : '');
+}
+
+function xmlEscapeAttribute(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function removeXmlAttributes(attributes, names) {
+  const namesPattern = names.map((name) => String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  return String(attributes || '').replace(
+    new RegExp(`\\s+(?:${namesPattern})\\s*=\\s*(?:"[^"]*"|'[^']*')`, 'gi'),
+    '',
+  );
+}
+
+function dashTemplatePattern(template, representation) {
+  const marker = '\u0000';
+  const value = String(template || '').replace(/\$\$/g, marker);
+  let pattern = '^';
+  let cursor = 0;
+  DASH_TEMPLATE_VARIABLE.lastIndex = 0;
+  for (const match of value.matchAll(DASH_TEMPLATE_VARIABLE)) {
+    pattern += escapeRegexPattern(value.slice(cursor, match.index).replaceAll(marker, '$'));
+    const variable = match[1];
+    const width = match[2] ? Number(match[2]) : null;
+    if (variable === 'RepresentationID') {
+      pattern += representation.id ? escapeRegexPattern(representation.id) : '[^/]+';
+    } else if (variable === 'Bandwidth') {
+      pattern += representation.bandwidth ? escapeRegexPattern(representation.bandwidth) : '\\d+';
+    } else if (width) {
+      pattern += `\\d{${width}}`;
+    } else {
+      pattern += '\\d+';
+    }
+    cursor = match.index + match[0].length;
+  }
+  pattern += escapeRegexPattern(value.slice(cursor).replaceAll(marker, '$'));
+  return new RegExp(pattern + '$');
+}
+
+function dashTemplateHasVariable(value) {
+  DASH_TEMPLATE_VARIABLE.lastIndex = 0;
+  return DASH_TEMPLATE_VARIABLE.test(String(value || ''));
+}
+
+function dashTemplateReferencePath(value) {
+  return String(value || '').split(/[?#]/, 1)[0];
+}
+
+function dashTemplateStaticPath(template, representation) {
+  return String(template || '').replace(/\$(RepresentationID|Bandwidth)\$/g, (_, variable) => {
+    if (variable === 'RepresentationID') return String(representation.id || '');
+    return String(representation.bandwidth || '');
+  });
+}
+
+async function dashTemplateFiles(template, representation, baseDirectory, containmentRoot) {
+  // `%0Nd` is DASH's formatting syntax, not URL escaping. Protect it while
+  // decoding ordinary percent-encoded path characters.
+  const protectedTemplate = String(template || '').replace(/%0(\d+)d/gi, '%250$1d');
+  const decodedTemplate = decodeLocalArtifactReference(protectedTemplate, 'DASH media template');
+  const directoryTemplate = path.posix.dirname(decodedTemplate);
+  const directoryReference = dashTemplateStaticPath(directoryTemplate, representation);
+  if (dashTemplateHasVariable(directoryReference)) {
+    throw statusError(`DASH media template has an unsupported directory variable: ${template}`, 409);
+  }
+  const directory = path.resolve(baseDirectory, directoryReference);
+  if (!pathContains(containmentRoot, directory)) {
+    throw statusError('DASH media template must remain inside the execution working directory', 409);
+  }
+  const pattern = dashTemplatePattern(path.posix.basename(decodedTemplate), representation);
+  let entries;
+  try {
+    entries = await fs.promises.readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw statusError(`DASH media template directory does not exist: ${template}`, 409);
+    }
+    throw error;
+  }
+  const files = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !pattern.test(entry.name)) continue;
+    const reference = path.posix.join(directoryReference, entry.name);
+    const resolvedPath = await resolvePytestMediaResource(
+      reference,
+      baseDirectory,
+      containmentRoot,
+    );
+    files.push({ reference, resolvedPath });
+  }
+  files.sort((left, right) => left.reference.localeCompare(right.reference, undefined, { numeric: true }));
+  return files;
+}
+
+function applyTextReplacements(content, replacements) {
+  return replacements
+    .sort((left, right) => right.index - left.index)
+    .reduce((result, replacement) => (
+      result.slice(0, replacement.index)
+      + replacement.value
+      + result.slice(replacement.index + replacement.length)
+    ), content);
+}
+
+async function rewriteDashManifest(
+  content,
+  manifestPath,
+  containmentRoot,
+  descriptorFor,
+  archiveDescriptor,
+  literalReplacements,
+  warnings,
+) {
+  const representationPattern = /<Representation\b([^>]*?)>([\s\S]*?)<\/Representation\s*>/gi;
+  const representationReplacements = [];
+  for (const representationMatch of content.matchAll(representationPattern)) {
+    const representation = {
+      id: xmlAttributeValue(representationMatch[1], 'id'),
+      bandwidth: xmlAttributeValue(representationMatch[1], 'bandwidth'),
+    };
+    const body = representationMatch[2];
+    const templatePattern = /<SegmentTemplate\b([^>]*?)(?:\/>|>([\s\S]*?)<\/SegmentTemplate\s*>)/gi;
+    const templateReplacements = [];
+    for (const templateMatch of body.matchAll(templatePattern)) {
+      const attributes = String(templateMatch[1] || '').replace(/\/\s*$/, '');
+      const inner = String(templateMatch[2] || '');
+      const media = xmlAttributeValue(attributes, 'media');
+      const initialization = xmlAttributeValue(attributes, 'initialization');
+      const mediaIsDynamic = dashTemplateHasVariable(media);
+      const initializationIsDynamic = dashTemplateHasVariable(initialization);
+      if (!mediaIsDynamic && !initializationIsDynamic) continue;
+
+      let mediaDescriptors = [];
+      let initializationDescriptor = null;
+      try {
+        if (mediaIsDynamic) {
+          const files = await dashTemplateFiles(
+            media,
+            representation,
+            path.dirname(manifestPath),
+            containmentRoot,
+          );
+          mediaDescriptors = [];
+          for (const file of files) {
+            const descriptor = await descriptorFor(file.reference, path.dirname(manifestPath));
+            await archiveDescriptor(descriptor);
+            mediaDescriptors.push(descriptor);
+          }
+          if (!mediaDescriptors.length) {
+            throw statusError(`DASH media template has no matching files: ${media}`, 409);
+          }
+        }
+        if (initializationIsDynamic) {
+          const files = await dashTemplateFiles(
+            initialization,
+            representation,
+            path.dirname(manifestPath),
+            containmentRoot,
+          );
+          if (!files.length) {
+            throw statusError(`DASH initialization template has no matching files: ${initialization}`, 409);
+          }
+          initializationDescriptor = await descriptorFor(
+            files[0].reference,
+            path.dirname(manifestPath),
+          );
+          await archiveDescriptor(initializationDescriptor);
+        }
+      } catch (error) {
+        warnings.push(`${media || initialization}: ${String(error.message || error)}`);
+        continue;
+      }
+
+      if (!mediaIsDynamic) {
+        if (initializationDescriptor) literalReplacements.set(initialization, initializationDescriptor.url);
+        continue;
+      }
+
+      const timeline = /<SegmentTimeline\b[\s\S]*?<\/SegmentTimeline\s*>/i.exec(inner)?.[0] || '';
+      const initializationUrl = initializationDescriptor?.url
+        || literalReplacements.get(initialization)
+        || initialization;
+      const children = [];
+      if (initializationUrl) {
+        children.push(`<Initialization sourceURL="${xmlEscapeAttribute(initializationUrl)}" />`);
+      }
+      if (timeline) children.push(timeline);
+      for (const descriptor of mediaDescriptors) {
+        children.push(`<SegmentURL media="${xmlEscapeAttribute(descriptor.url)}" />`);
+      }
+      const segmentList = `<SegmentList${removeXmlAttributes(attributes, ['media', 'initialization'])}>${children.join('')}</SegmentList>`;
+      templateReplacements.push({
+        index: templateMatch.index,
+        length: templateMatch[0].length,
+        value: segmentList,
+      });
+    }
+    if (templateReplacements.length) {
+      representationReplacements.push({
+        index: representationMatch.index,
+        length: representationMatch[0].length,
+        value: applyTextReplacements(body, templateReplacements),
+      });
+    }
+  }
+  if (!representationReplacements.length) return content;
+  let transformed = content;
+  for (const replacement of representationReplacements.sort((left, right) => right.index - left.index)) {
+    const original = content.slice(replacement.index, replacement.index + replacement.length);
+    const bodyStart = original.indexOf('>') + 1;
+    const bodyEnd = original.toLowerCase().lastIndexOf('</representation>');
+    const prefix = original.slice(0, bodyStart);
+    const suffix = original.slice(bodyEnd);
+    transformed = transformed.slice(0, replacement.index)
+      + prefix
+      + replacement.value
+      + suffix
+      + transformed.slice(replacement.index + replacement.length);
+  }
+  return transformed;
+}
+
 function replaceLiteralReferences(content, replacements) {
   let transformed = content;
   for (const [reference, replacement] of [...replacements.entries()]
@@ -3305,7 +3553,22 @@ async function archivePytestMediaResources(htmlContent, options) {
           warnings.push(`${reference}: ${String(error.message || error)}`);
         }
       }
-      const transformed = Buffer.from(replaceLiteralReferences(sourceManifest, replacements), 'utf8');
+      let transformedManifest = replaceLiteralReferences(sourceManifest, replacements);
+      if (descriptor.extension === '.mpd') {
+        transformedManifest = await rewriteDashManifest(
+          transformedManifest,
+          descriptor.resolvedPath,
+          options.containmentRoot,
+          descriptorFor,
+          archiveDescriptor,
+          replacements,
+          warnings,
+        );
+      }
+      const transformed = Buffer.from(
+        replaceLiteralReferences(transformedManifest, replacements),
+        'utf8',
+      );
       archived = await archiveBufferAtomically(transformed, descriptor.managedPath);
     } else {
       archived = await archiveFileAtomically({
@@ -3517,7 +3780,14 @@ function externalArtifactResourceUrl(taskId, attemptId, artifactKey, relativePat
   const base = `/api/sessions/${encodeURIComponent(taskId)}`
     + `/external-attempts/${encodeURIComponent(attemptId)}`
     + `/artifacts/${encodeURIComponent(artifactKey)}/resources/`;
-  return relativePath ? `${base}${relativePath.split('/').map(encodeURIComponent).join('/')}` : base;
+  const segments = String(relativePath || '').split('/');
+  // Browsers normalize literal `..` URL segments before sending the request.
+  // Encode the whole parent-relative path so the resource route can resolve it
+  // against the tracked execution directory instead of losing the prefix.
+  const encodedPath = segments.includes('..')
+    ? encodeURIComponent(String(relativePath))
+    : segments.map(encodeURIComponent).join('/');
+  return relativePath ? `${base}${encodedPath}` : base;
 }
 
 function externalArtifactPreviewHtml(content, taskId, attemptId, artifactKey) {
@@ -3545,7 +3815,8 @@ function externalArtifactMediaType(filePath) {
     ['.gif', 'image/gif'], ['.webp', 'image/webp'], ['.avif', 'image/avif'],
     ['.woff', 'font/woff'], ['.woff2', 'font/woff2'], ['.ttf', 'font/ttf'],
     ['.mp4', 'video/mp4'], ['.webm', 'video/webm'], ['.mp3', 'audio/mpeg'],
-    ['.m3u8', 'application/vnd.apple.mpegurl'], ['.m4s', 'video/iso.segment'],
+    ['.m3u8', 'application/vnd.apple.mpegurl'], ['.mpd', 'application/dash+xml'],
+    ['.m4s', 'video/iso.segment'],
     ['.htm', 'text/html; charset=utf-8'], ['.html', 'text/html; charset=utf-8'],
     ['.ts', 'video/mp2t'], ['.txt', 'text/plain; charset=utf-8'],
   ]).get(extension) || 'application/octet-stream';
@@ -3558,6 +3829,31 @@ function externalArtifactDeclaration(db, taskId, attemptId, artifactKey) {
   if (!row) return null;
   return parseJson(row.artifact_declarations_json, [])
     .find((artifact) => artifact && artifact.key === String(artifactKey || '')) || null;
+}
+
+function externalArtifactResourceRoot(db, taskId, attemptId, declaration) {
+  const fallbackRoot = path.dirname(path.resolve(declaration.path));
+  const row = db.prepare(`
+    SELECT meta_path FROM external_attempts WHERE task_id=? AND id=?
+  `).get(taskId, String(attemptId || ''));
+  if (!row?.meta_path) return fallbackRoot;
+  let metadata;
+  try {
+    metadata = parseTrackedMeta(readSmallTrackedArtifact(row.meta_path).content);
+  } catch {
+    return fallbackRoot;
+  }
+  const configuredRoot = String(
+    metadata.work_dir || metadata.working_directory || metadata.workingDirectory || '',
+  ).trim();
+  if (!path.isAbsolute(configuredRoot)) return fallbackRoot;
+  try {
+    const root = resolvedRegularDirectory(configuredRoot, 'Artifact execution working directory');
+    assertArtifactWorkingDirectory(root);
+    return pathContains(root, path.resolve(declaration.path)) ? root : fallbackRoot;
+  } catch {
+    return fallbackRoot;
+  }
 }
 
 async function archiveBufferAtomically(content, destinationPath) {
@@ -5389,10 +5685,16 @@ async function openExternalAttemptArtifactFile(taskId, attemptId, artifactKey, o
       const sourcePath = path.resolve(declaration.path);
       let preview = snapshot;
       try {
+        const containmentRoot = externalArtifactResourceRoot(
+          db,
+          normalizedTaskId,
+          attemptId,
+          declaration,
+        );
         const selfContained = await selfContainedPytestHtml(
           snapshot,
           sourcePath,
-          path.dirname(sourcePath),
+          containmentRoot,
           { includeLogs: false },
         );
         preview = externalArtifactPreviewHtml(
@@ -5435,8 +5737,8 @@ async function openExternalAttemptArtifactResourceFile(taskId, attemptId, artifa
     error.statusCode = 404;
     throw error;
   }
-  const root = path.dirname(path.resolve(declaration.path));
-  const sourcePath = path.resolve(root, relativePath);
+  const root = externalArtifactResourceRoot(db, normalizedTaskId, attemptId, declaration);
+  const sourcePath = path.resolve(path.dirname(path.resolve(declaration.path)), relativePath);
   if (!pathContains(root, sourcePath)) return null;
   let opened;
   try {
@@ -5464,6 +5766,7 @@ async function openExternalAttemptArtifactResourceFile(taskId, attemptId, artifa
     bytes: opened.bytes,
     fileName: path.basename(sourcePath),
     mediaType: externalArtifactMediaType(sourcePath),
+    resourcePath: relativePath,
   };
 }
 

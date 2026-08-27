@@ -43,19 +43,33 @@ function hideAuthOverlay() {
 function initAuthForm() {
   const form = document.getElementById('authForm');
   if (form) {
-    form.addEventListener('submit', (e) => {
+    form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const user = document.getElementById('authUser').value.trim();
       const pass = document.getElementById('authPass').value;
       if (!user || !pass) return;
+      const submit = form.querySelector('button[type="submit"]');
+      if (submit) submit.disabled = true;
       storeCredentials(user, pass);
-      hideAuthOverlay();
-      initialize();
+      try {
+        await api('/api/auth/session', { method: 'POST' });
+        document.getElementById('authPass').value = '';
+        hideAuthOverlay();
+        await initialize();
+      } catch (error) {
+        clearCredentials();
+        showAuthOverlay(error.message || 'Authentication failed');
+      } finally {
+        if (submit) submit.disabled = false;
+      }
     });
   }
   const logout = document.getElementById('authLogout');
   if (logout) {
-    logout.addEventListener('click', () => {
+    logout.addEventListener('click', async () => {
+      try {
+        await api('/api/auth/session', { method: 'DELETE' });
+      } catch {}
       clearCredentials();
       showAuthOverlay();
     });
@@ -158,6 +172,8 @@ let protectionPollTimer = null;
 const API_REQUEST_TIMEOUT_MS = 30000;
 const DASHBOARD_REQUEST_TIMEOUT_MS = 8000;
 const INLINE_ATTEMPT_OUTPUT_MAX_BYTES = 5 * 1024 * 1024;
+const CODEX_CLI_DISPLAY_MAX_BYTES = 64 * 1024 * 1024;
+const CODEX_CLI_SCROLLBACK_LINES = 100000;
 const ATTEMPT_OUTPUT_CHUNK_BYTES = 256 * 1024;
 const ATTEMPT_OUTPUT_POLL_INTERVAL_MS = 750;
 const ATTEMPT_OUTPUT_TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
@@ -378,11 +394,14 @@ async function api(path, options = {}) {
   }, timeoutMs);
   const config = {
     ...requestOptions,
+    credentials: requestOptions.credentials || 'same-origin',
     signal: controller.signal,
     headers: { ...(requestOptions.headers || {}) },
   };
   const authHeader = getAuthHeader();
-  if (authHeader) config.headers['Authorization'] = authHeader;
+  if (authHeader && !config.headers.Authorization && !config.headers.authorization) {
+    config.headers.Authorization = authHeader;
+  }
   const isBinaryBody = typeof Blob !== 'undefined' && config.body instanceof Blob;
   if (config.body && typeof config.body !== 'string' && !isBinaryBody) {
     config.headers['Content-Type'] = 'application/json';
@@ -3227,13 +3246,13 @@ function connectManagedCodexTerminalSocket(view, task) {
     if (state.codexTerminalView !== view || view.socket !== socket) return;
     if (typeof event.data !== 'string') {
       const bytes = new Uint8Array(event.data);
-      const remaining = Math.max(0, INLINE_ATTEMPT_OUTPUT_MAX_BYTES - view.offset);
+      const remaining = Math.max(0, CODEX_CLI_DISPLAY_MAX_BYTES - view.offset);
       const accepted = bytes.subarray(0, remaining);
       if (accepted.byteLength) {
         writeManagedCodexTerminalOutput(view, view.decoder.decode(accepted, { stream: true }));
         view.offset += accepted.byteLength;
       }
-      if (accepted.byteLength < bytes.byteLength || view.offset >= INLINE_ATTEMPT_OUTPUT_MAX_BYTES) {
+      if (accepted.byteLength < bytes.byteLength || view.offset >= CODEX_CLI_DISPLAY_MAX_BYTES) {
         writeManagedCodexTerminalOutput(view, view.decoder.decode(), true);
         view.ended = true;
         updateCodexTerminalStatus(view, 'ended', tr('inlineOutputLimit'));
@@ -3342,7 +3361,7 @@ function initializeCodexTerminal(task, managedStream = null) {
     cursorBlink: !managed,
     disableStdin: true,
     convertEol: false,
-    scrollback: 20000,
+    scrollback: CODEX_CLI_SCROLLBACK_LINES,
   };
   if (fixedReplay) {
     terminalOptions.cols = managedStream.cols;
@@ -5033,16 +5052,13 @@ window.addEventListener('pagehide', () => {
 }, { once: true });
 
 async function initialize() {
-  if (!getStoredCredentials()) {
-    showAuthOverlay();
-    return;
-  }
   applyFontSize();
   applyTranslations();
   try {
     await Promise.all([loadDashboard({ force: true }), loadSkills()]);
     await reconcilePersistedTaskOperationIntents();
   } catch (error) {
+    if (error?.status === 401) return;
     toast(`${tr('loadFailed')}: ${error.message}`, 'error');
   }
   scheduleDashboardPoll();

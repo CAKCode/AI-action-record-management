@@ -1129,6 +1129,118 @@ test('pytest HTML archival hosts entity-encoded MP4 and HLS media dependencies',
   )), true);
 });
 
+test('pytest HTML archival expands DASH segment templates into managed resources', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-dash-template-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-dash-template-worker');
+  const reportDirectory = path.join(projectDir, 'dash-template-report');
+  const videoDirectory = path.join(reportDirectory, 'videos');
+  const htmlPath = path.join(reportDirectory, 'pytest-result.html');
+  const prefix = 'dash-record';
+  const files = {
+    audioInit: `${prefix}_0_init.webm`,
+    audioOne: `${prefix}_0_000001.webm`,
+    audioTwo: `${prefix}_0_000002.webm`,
+    videoInit: `${prefix}_1_init.webm`,
+    videoOne: `${prefix}_1_000001.webm`,
+    videoTwo: `${prefix}_1_000002.webm`,
+  };
+  fs.mkdirSync(videoDirectory, { recursive: true });
+  for (const [key, fileName] of Object.entries(files)) {
+    fs.writeFileSync(path.join(videoDirectory, fileName), `${key}\n`, { mode: 0o600 });
+  }
+  const mpd = [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    '<MPD type="static" mediaPresentationDuration="PT2S">',
+    '  <Period>',
+    '    <AdaptationSet contentType="audio">',
+    '      <Representation id="0" bandwidth="69038" mimeType="audio/webm">',
+    `        <SegmentTemplate timescale="1000" initialization="${prefix}_$RepresentationID$_init.webm" media="${prefix}_$RepresentationID$_$Number%06d$.webm" startNumber="1">`,
+    '          <SegmentTimeline><S t="0" d="1000" /><S d="1000" /></SegmentTimeline>',
+    '        </SegmentTemplate>',
+    '      </Representation>',
+    '    </AdaptationSet>',
+    '    <AdaptationSet contentType="video">',
+    '      <Representation id="1" bandwidth="2466603" mimeType="video/webm">',
+    `        <SegmentTemplate timescale="1000" initialization="${prefix}_$RepresentationID$_init.webm" media="${prefix}_$RepresentationID$_$Number%06d$.webm" startNumber="1">`,
+    '          <SegmentTimeline><S t="0" d="1000" /><S d="1000" /></SegmentTimeline>',
+    '        </SegmentTemplate>',
+    '      </Representation>',
+    '    </AdaptationSet>',
+    '  </Period>',
+    '</MPD>',
+  ].join('\n');
+  const mpdPath = path.join(videoDirectory, 'stream.mpd');
+  fs.writeFileSync(mpdPath, mpd, { mode: 0o600 });
+  fs.writeFileSync(
+    htmlPath,
+    `<!doctype html><a href="videos/stream.mpd" data-src="videos/stream.mpd">DASH</a>`,
+    { mode: 0o600 },
+  );
+  const input = reportFixture({
+    reportKey: 'pytest-html:dash-template',
+    status: 'succeeded',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: 'pytest -v tests --html dash-template-report/pytest-result.html',
+      workingDirectory: projectDir,
+      status: 'succeeded',
+      exitCode: 0,
+    },
+  });
+  const { report: published } = publishArtifactReport(
+    taskId,
+    runtime,
+    input,
+    [{ key: 'normal', kind: 'pytest-html', path: htmlPath }],
+    { exitCode: 0 },
+  );
+
+  const archived = await store.archiveSkillReportArtifacts(taskId, published.id);
+  const [artifact] = archived.artifacts;
+  const database = getDatabase();
+  const resources = database.prepare(`
+    SELECT * FROM skill_report_artifact_resources
+    WHERE artifact_id=? ORDER BY file_name
+  `).all(artifact.id);
+  assert.deepEqual(resources.map((resource) => resource.file_name), [
+    files.audioOne,
+    files.audioTwo,
+    files.audioInit,
+    files.videoOne,
+    files.videoTwo,
+    files.videoInit,
+    'stream.mpd',
+  ].sort());
+
+  const manifestRow = resources.find((resource) => resource.file_name === 'stream.mpd');
+  const manifest = await store.openSkillReportArtifactResourceFile(
+    taskId,
+    published.id,
+    artifact.id,
+    manifestRow.id,
+  );
+  try {
+    const archivedManifest = await manifest.fileHandle.readFile('utf8');
+    assert.doesNotMatch(archivedManifest, /\$RepresentationID\$|\$Number%06d\$/);
+    assert.match(archivedManifest, /<SegmentList/);
+    assert.equal((archivedManifest.match(/<SegmentURL\b/g) || []).length, 4);
+    assert.equal((archivedManifest.match(/<Initialization\b/g) || []).length, 2);
+    for (const resource of resources.filter((item) => item.file_name !== 'stream.mpd')) {
+      assert.match(archivedManifest, new RegExp(`/resources/${resource.id}`));
+    }
+  } finally {
+    await manifest.fileHandle.close();
+  }
+
+  const archivedHtml = await store.openSkillReportArtifactFile(taskId, published.id, artifact.id);
+  try {
+    assert.match(await archivedHtml.fileHandle.readFile('utf8'), new RegExp(`/resources/${manifestRow.id}`));
+  } finally {
+    await archivedHtml.fileHandle.close();
+  }
+});
+
 test('multiple pytest HTML artifacts isolate media with identical file names', async () => {
   ensureReportSkill();
   const taskId = 'pytest-html-media-isolation-task';

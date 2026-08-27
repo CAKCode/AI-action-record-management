@@ -67,8 +67,17 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     + `/artifacts/${artifactId}/resources/${resourceId}`;
   const html = `<!doctype html><title>Managed artifact</title><iframe src="${resourceApiPath}"></iframe>`;
   const registeredLogReference = 'logs/sample.txt';
-  const registeredHtml = `<!doctype html><head><link href="assets/style.css" rel="stylesheet" type="text/css"><script src="assets/app.js"></script></head><body><main id="running">Running artifact</main><iframe src="${registeredLogReference}"></iframe></body>`;
+  const registeredVideoReference = '../videos/sample.mp4';
+  const registeredPlaylistReference = '../videos/sample.m3u8';
+  const registeredMpdReference = '../videos/sample.mpd';
+  const registeredHtml = `<!doctype html><head><link href="assets/style.css" rel="stylesheet" type="text/css"><script src="assets/app.js"></script></head><body><main id="running">Running artifact</main><iframe src="${registeredLogReference}"></iframe><a href="${registeredVideoReference}" data-src="${registeredVideoReference}">video</a><a href="${registeredPlaylistReference}" data-src="${registeredPlaylistReference}">playlist</a><a href="${registeredMpdReference}" data-src="${registeredMpdReference}">dash</a></body>`;
   const registeredLog = 'registered artifact log\n';
+  const registeredVideo = Buffer.from('registered video\n', 'utf8');
+  const registeredPlaylist = '#EXTM3U\n#EXTINF:1,\nsample.ts\n';
+  const registeredSegment = Buffer.from('registered segment\n', 'utf8');
+  const registeredMpd = '<MPD><Period><Representation id="0"><SegmentTemplate initialization="sample_$RepresentationID$_init.webm" media="sample_$RepresentationID$_$Number%06d$.webm" /></Representation></Period></MPD>';
+  const registeredMpdInit = Buffer.from('registered dash init\n', 'utf8');
+  const registeredMpdSegment = Buffer.from('registered dash segment\n', 'utf8');
   const media = Buffer.from('<!doctype html><style>body{color:white}</style><pre>0123456789</pre>', 'utf8');
   const markdown = '# Failure analysis\n\n- BUG: 1\n';
   const setup = [
@@ -86,19 +95,37 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     `const html = ${JSON.stringify(html)};`,
     `const registeredHtml = ${JSON.stringify(registeredHtml)};`,
     `const registeredLog = ${JSON.stringify(registeredLog)};`,
+    `const registeredVideo = Buffer.from(${JSON.stringify(registeredVideo.toString('base64'))}, 'base64');`,
+    `const registeredPlaylist = ${JSON.stringify(registeredPlaylist)};`,
+    `const registeredSegment = Buffer.from(${JSON.stringify(registeredSegment.toString('base64'))}, 'base64');`,
+    `const registeredMpd = ${JSON.stringify(registeredMpd)};`,
+    `const registeredMpdInit = Buffer.from(${JSON.stringify(registeredMpdInit.toString('base64'))}, 'base64');`,
+    `const registeredMpdSegment = Buffer.from(${JSON.stringify(registeredMpdSegment.toString('base64'))}, 'base64');`,
     `const media = Buffer.from(${JSON.stringify(media.toString('base64'))}, 'base64');`,
     `const markdown = ${JSON.stringify(markdown)};`,
     "store.saveSession(taskId, { name: taskId, objective: 'HTTP artifact contract.', workingDir: process.env.CODEX_TASK_WORKSPACE_ROOTS });",
-    "const registeredPath = path.join(process.env.CODEX_TASK_WORKSPACE_ROOTS, 'running.html');",
-    "const missingPath = path.join(process.env.CODEX_TASK_WORKSPACE_ROOTS, 'missing.html');",
-    "const registeredAssets = path.join(process.env.CODEX_TASK_WORKSPACE_ROOTS, 'assets');",
-    "const registeredLogs = path.join(process.env.CODEX_TASK_WORKSPACE_ROOTS, 'logs');",
+    "const registeredTaskDir = path.join(process.env.CODEX_TASK_WORKSPACE_ROOTS, 'task');",
+    "const registeredPath = path.join(registeredTaskDir, 'running.html');",
+    "const missingPath = path.join(registeredTaskDir, 'missing.html');",
+    "const registeredAssets = path.join(registeredTaskDir, 'assets');",
+    "const registeredLogs = path.join(registeredTaskDir, 'logs');",
+    "const registeredVideos = path.join(process.env.CODEX_TASK_WORKSPACE_ROOTS, 'videos');",
+    "const metaPath = path.join(registeredTaskDir, 'run.meta');",
+    "fs.mkdirSync(registeredTaskDir, { recursive: true, mode: 0o700 });",
     "fs.mkdirSync(registeredAssets, { recursive: true, mode: 0o700 });",
     "fs.mkdirSync(registeredLogs, { recursive: true, mode: 0o700 });",
+    "fs.mkdirSync(registeredVideos, { recursive: true, mode: 0o700 });",
     "fs.writeFileSync(registeredPath, registeredHtml, { mode: 0o600 });",
     "fs.writeFileSync(path.join(registeredAssets, 'style.css'), '#running { color: rgb(1, 2, 3); }', { mode: 0o600 });",
     "fs.writeFileSync(path.join(registeredAssets, 'app.js'), 'window.__runningArtifactReady = true;', { mode: 0o600 });",
     "fs.writeFileSync(path.join(registeredLogs, 'sample.txt'), registeredLog, { mode: 0o600 });",
+    "fs.writeFileSync(path.join(registeredVideos, 'sample.mp4'), registeredVideo, { mode: 0o600 });",
+    "fs.writeFileSync(path.join(registeredVideos, 'sample.m3u8'), registeredPlaylist, { mode: 0o600 });",
+    "fs.writeFileSync(path.join(registeredVideos, 'sample.ts'), registeredSegment, { mode: 0o600 });",
+    "fs.writeFileSync(path.join(registeredVideos, 'sample.mpd'), registeredMpd, { mode: 0o600 });",
+    "fs.writeFileSync(path.join(registeredVideos, 'sample_0_init.webm'), registeredMpdInit, { mode: 0o600 });",
+    "fs.writeFileSync(path.join(registeredVideos, 'sample_0_000001.webm'), registeredMpdSegment, { mode: 0o600 });",
+    "fs.writeFileSync(metaPath, JSON.stringify({ work_dir: process.env.CODEX_TASK_WORKSPACE_ROOTS }), { mode: 0o600 });",
     "const artifactDir = path.join(process.env.CODEX_DESK_DATA_DIR, 'sessions', taskId, 'skill-report-artifacts', reportId);",
     "fs.mkdirSync(artifactDir, { recursive: true, mode: 0o700 });",
     "const artifactPath = path.join(artifactDir, `${artifactId}.html`);",
@@ -114,8 +141,8 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     "const mediaHash = crypto.createHash('sha256').update(media).digest('hex');",
     "const now = new Date().toISOString();",
     "const db = getDatabase();",
-    "db.prepare(`INSERT INTO external_attempts(id, task_id, chain_key, generation, label, status, log_path, artifact_declarations_json, started_at, created_at, updated_at) VALUES (?, ?, ?, 1, ?, 'running', ?, ?, ?, ?, ?)` )",
-    "  .run(externalAttemptId, taskId, 'artifact-http', 'Running report', path.join(process.env.CODEX_TASK_WORKSPACE_ROOTS, 'run.log'), JSON.stringify([{ key: 'normal', kind: 'pytest-html', path: registeredPath }, { key: 'missing', kind: 'pytest-html', path: missingPath }]), now, now, now);",
+    "db.prepare(`INSERT INTO external_attempts(id, task_id, chain_key, generation, label, status, log_path, meta_path, artifact_declarations_json, started_at, created_at, updated_at) VALUES (?, ?, ?, 1, ?, 'running', ?, ?, ?, ?, ?, ?)` )",
+    "  .run(externalAttemptId, taskId, 'artifact-http', 'Running report', path.join(registeredTaskDir, 'run.log'), metaPath, JSON.stringify([{ key: 'normal', kind: 'pytest-html', path: registeredPath }, { key: 'missing', kind: 'pytest-html', path: missingPath }]), now, now, now);",
     "db.prepare(`INSERT INTO skill_reports(id, task_id, turn_id, attempt_id, report_key, revision, report_hash, schema_version, skill_id, skill_version, skill_content_hash, report_type, status, title, summary, payload_json, published_at) VALUES (?, ?, NULL, NULL, ?, 1, ?, 1, ?, 1, ?, ?, ?, ?, ?, ?, ?)`)",
     "  .run(reportId, taskId, 'head', hash, 'report-skill', hash, 'test-result', 'succeeded', 'Artifact head', 'Artifact HTTP contract.', '{}', now);",
     "db.prepare(`INSERT INTO skill_report_artifacts(id, task_id, report_id, artifact_key, label, kind, file_name, media_type, managed_path, bytes, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)",
@@ -156,9 +183,9 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
   const markdownUrl = `http://127.0.0.1:${port}/api/sessions/${taskId}/skill-reports/${reportId}/artifacts/${markdownArtifactId}`;
   const resourceUrl = `${artifactUrl}/resources/${resourceId}`;
   const registeredUrl = `http://127.0.0.1:${port}/api/sessions/${taskId}/external-attempts/${externalAttemptId}/artifacts/normal`;
-  const registeredStyleUrl = `${registeredUrl}/resources/assets/style.css`;
-  const registeredScriptUrl = `${registeredUrl}/resources/assets/app.js`;
-  const registeredLogUrl = `${registeredUrl}/resources/${registeredLogReference}`;
+    const registeredStyleUrl = `${registeredUrl}/resources/assets/style.css`;
+    const registeredScriptUrl = `${registeredUrl}/resources/assets/app.js`;
+    const registeredLogUrl = `${registeredUrl}/resources/${registeredLogReference}`;
   const missingRegisteredUrl = `http://127.0.0.1:${port}/api/sessions/${taskId}/external-attempts/${externalAttemptId}/artifacts/missing`;
   const unknownRegisteredUrl = `http://127.0.0.1:${port}/api/sessions/${taskId}/external-attempts/${externalAttemptId}/artifacts/unknown`;
   const authorization = `Basic ${Buffer.from('artifact-user:artifact-password').toString('base64')}`;
@@ -168,6 +195,22 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
   });
   try {
     await waitFor(artifactUrl, { headers: { authorization } });
+    const login = await fetch(`http://127.0.0.1:${port}/api/auth/session`, {
+      method: 'POST',
+      headers: { authorization },
+    });
+    assert.equal(login.status, 200);
+    const sessionCookie = (login.headers.get('set-cookie') || '').split(';', 1)[0];
+    assert.match(sessionCookie, /^codex_task_session=/);
+    const sessionFetch = (url, options = {}) => fetch(url, {
+      ...options,
+      headers: { cookie: sessionCookie, ...options.headers },
+    });
+    const cookieArtifactHead = await sessionFetch(artifactUrl, { method: 'HEAD' });
+    assert.equal(cookieArtifactHead.status, 200);
+    const cookieRegisteredLog = await sessionFetch(registeredLogUrl);
+    assert.equal(cookieRegisteredLog.status, 200);
+    assert.equal(await cookieRegisteredLog.text(), registeredLog);
     const head = await authenticatedFetch(artifactUrl, { method: 'HEAD' });
     assert.equal(head.status, 200);
     assert.equal(head.headers.get('content-type'), 'text/html; charset=utf-8');
@@ -220,6 +263,46 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
       /^[A-Za-z0-9_-]+$/,
     );
     assert.equal(registeredHead.headers.get('content-length'), String(Buffer.byteLength(registeredPreview)));
+    const signedRegisteredVideoPath = /href="([^\"]*resources\/[^\"]*%2Fvideos[^\"]*)"/.exec(registeredPreview)?.[1];
+    assert.ok(signedRegisteredVideoPath);
+    const signedRegisteredVideoUrl = new URL(signedRegisteredVideoPath, registeredUrl);
+    assert.match(signedRegisteredVideoUrl.pathname, /resources\/\.\.%2Fvideos%2Fsample\.mp4$/);
+    const registeredVideoResponse = await fetch(signedRegisteredVideoUrl);
+    assert.equal(registeredVideoResponse.status, 200);
+    assert.equal(await registeredVideoResponse.text(), registeredVideo.toString('utf8'));
+    const signedRegisteredPlaylistPath = /href="([^\"]*resources\/[^\"]*%2Fvideos[^\"]*sample\.m3u8[^\"]*)"/.exec(registeredPreview)?.[1];
+    assert.ok(signedRegisteredPlaylistPath);
+    const signedRegisteredPlaylistUrl = new URL(signedRegisteredPlaylistPath, registeredUrl);
+    const registeredPlaylistResponse = await fetch(signedRegisteredPlaylistUrl);
+    assert.equal(registeredPlaylistResponse.status, 200);
+    const servedPlaylist = await registeredPlaylistResponse.text();
+    const signedSegmentPath = servedPlaylist.split(/\r?\n/).find((line) => line.includes('/resources/'));
+    assert.ok(signedSegmentPath);
+    const registeredSegmentResponse = await fetch(new URL(signedSegmentPath, registeredUrl));
+    assert.equal(registeredSegmentResponse.status, 200);
+    assert.equal(await registeredSegmentResponse.text(), registeredSegment.toString('utf8'));
+    const signedRegisteredMpdPath = /href="([^\"]*resources\/[^\"]*%2Fvideos[^\"]*sample\.mpd(?:\?[^\"]*)?)"/.exec(registeredPreview)?.[1];
+    assert.ok(signedRegisteredMpdPath);
+    const registeredMpdResponse = await fetch(new URL(signedRegisteredMpdPath, registeredUrl));
+    assert.equal(registeredMpdResponse.status, 200);
+    const servedMpd = await registeredMpdResponse.text();
+    assert.doesNotMatch(servedMpd, /\$RepresentationID\$|\$Number%06d\$/);
+    const servedMpdInit = /initialization="([^\"]+)"/.exec(servedMpd)?.[1];
+    const servedMpdMedia = /media="([^\"]+)"/.exec(servedMpd)?.[1];
+    assert.ok(servedMpdInit);
+    assert.ok(servedMpdMedia);
+    const concreteMpdInit = servedMpdInit.replace(/%24RepresentationID%24/g, '0');
+    assert.equal(
+      await (await authenticatedFetch(new URL(concreteMpdInit, registeredUrl))).text(),
+      registeredMpdInit.toString('utf8'),
+    );
+    const concreteMpdMedia = servedMpdMedia
+      .replace(/%24RepresentationID%24/g, '0')
+      .replace(/%24Number%2506d%24/g, '000001');
+    assert.equal(
+      await (await authenticatedFetch(new URL(concreteMpdMedia, registeredUrl))).text(),
+      registeredMpdSegment.toString('utf8'),
+    );
     const registeredStyle = await authenticatedFetch(registeredStyleUrl);
     assert.equal(registeredStyle.status, 200);
     assert.equal(registeredStyle.headers.get('content-type'), 'text/css; charset=utf-8');

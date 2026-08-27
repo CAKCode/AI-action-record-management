@@ -32,6 +32,19 @@ data/
 
 数据库备份和平台恢复检查点按各自配置的保留数量轮转，不复用任务数据的 30 天窗口。恢复介质在其生命周期内可能继续包含已经从在线存储清理的数据，因此访问控制和介质销毁必须覆盖整个备份保留周期。
 
+## 分层备份策略
+
+| 数据 | 策略 |
+| --- | --- |
+| SQLite、WAL、平台运行数据 | 使用平台现有在线数据库备份和恢复检查点；不把媒体目录混入数据库备份。 |
+| 唯一媒体对象 | 使用外部按 SHA-256 内容寻址的增量备份；同一摘要只保留一份对象，清单保存原始路径和引用关系。 |
+| 项目代码 | 使用 Git；生成的视频副本不进入代码备份。 |
+| `videos/<run-id>` 临时目录 | 不进入长期备份，由独立 30 天清理任务处理；清理前先隔离 3 天。 |
+| `standard_videos` 标准库 | 单独规划备份和保留周期，媒体清理任务永不处理。 |
+| 平台已托管报告 | 使用平台从 `archivedAt` 起 30 天的保留策略；报告 artifact 资源不再被每个恢复检查点重复打包。 |
+
+唯一媒体对象的增量备份必须在平台外部执行，并以对象摘要为幂等键；本仓库的清理脚本只负责临时 `videos` 目录的生命周期，不会伪装成媒体备份或删除标准库。
+
 Worker 启动时及此后每小时执行一次保留检查，每批最多处理 50 个到期 Task。清理只在取得 `retention_cleanup` 平台维护租约后进行：任务文件先按创建代际原子改名暂存，SQLite 中该 Task、级联历史、任务审计和操作回执随后在事务内删除，提交成功后才清除暂存文件；Bridge Session record、Codex home、复制工作区、chatfile 和锁通过持久 `bridge_cleanup_jobs` 异步回收。文件暂存或事务失败会恢复原路径并保留任务；平台繁忙时延迟到下一轮。
 
 ## SQLite 数据
@@ -61,7 +74,7 @@ Worker 启动时及此后每小时执行一次保留检查，每批最多处理 
 
 Skill 报告按任务和 `reportKey` 维护追加式修订。立即重复发布相同内容返回已有修订；内容变化后再恢复为旧内容仍创建新修订，使 A -> B -> A 的业务时间线保持完整。每条修订冻结发布 Skill 的版本和内容哈希，并可关联当时的 Turn/Attempt。任务确认完成后不能再发布；删除未归档任务时报告随任务级联删除，已完成任务则在 30 天窗口内作为只读历史保留。
 
-`skill_reports`、`skill_report_artifacts` 和 `skill_report_artifact_resources` 属于在线数据库备份和平台恢复检查点的新版表计数，也会随完整数据目录备份恢复。报告正文只保存在 SQLite，不依赖 Attempt 日志或任务工作目录。External Attempt 登记路径及报告的 `registeredArtifacts` 只读投影会随数据库恢复，但运行中快照 URL 仍依赖原业务工作目录中的源文件；登记不会把源文件复制进备份，也不构成恢复保证。普通 Section 路径不会触发文件发现；平台只会在当前报告具备匹配 External Attempt/META 证据时补登记具体 pytest `--html` 输出。只有成功归档的 pytest HTML、Fail 分析 Markdown、超限时独立托管的日志文本及媒体子资源会复制到任务托管目录，登记大小和 SHA-256，并随平台数据目录和恢复检查点保留。测试分析模式按原始证据保存摘要、主命令、指标、字段、JSON、HTML 和内嵌日志中的 AK、SK、Token、Authorization、Cookie、密码及其他凭据值；检测到这些内容不会触发脱敏或终止任务。`sensitivity` 只影响前端默认折叠，不代表脱敏或访问控制。报告、日志、备份和恢复包应按高敏感业务数据限制访问。
+`skill_reports`、`skill_report_artifacts` 和 `skill_report_artifact_resources` 属于在线数据库备份的新版表计数。报告正文只保存在 SQLite，不依赖 Attempt 日志或任务工作目录。External Attempt 登记路径及报告的 `registeredArtifacts` 只读投影会随数据库恢复，但运行中快照 URL 仍依赖原业务工作目录中的源文件；登记不会把源文件复制进备份，也不构成恢复保证。普通 Section 路径不会触发文件发现；平台只会在当前报告具备匹配 External Attempt/META 证据时补登记具体 pytest `--html` 输出。只有成功归档的 pytest HTML、Fail 分析 Markdown、超限时独立托管的日志文本及媒体子资源会复制到任务托管目录，登记大小和 SHA-256。由于这些报告已经由平台按 30 天策略托管，新的平台恢复检查点不再重复打包 `data/sessions/*/skill-report-artifacts`；恢复数据库中的历史报告若超过在线保留范围，按部分业务恢复处理。测试分析模式按原始证据保存摘要、主命令、指标、字段、JSON、HTML 和内嵌日志中的 AK、SK、Token、Authorization、Cookie、密码及其他凭据值；检测到这些内容不会触发脱敏或终止任务。`sensitivity` 只影响前端默认折叠，不代表脱敏或访问控制。报告、日志、备份和恢复包应按高敏感业务数据限制访问。
 
 正常执行时，每个 Attempt 只启动一个交互式 `codex` / `codex resume` TUI，stdin/stdout/stderr 接入同一 PTY，并使用 inline 模式保留滚屏。PTY 原始字节先写入 Attempt stdout 和任务 transcript，再提供给实时终端；不经过 UTF-8 重编码、JSON 重组、摘要或截断，即使执行中断，已经写入的内容也保留。结构化审计不解析终端画面：runner 在隔离 `CODEX_HOME` 中记录启动前 rollout 大小，持续读取本次追加区间，以 `task_complete` / `turn_aborted` 作为 Turn 边界；TUI 结束后 Worker 再从同一区间恢复 Agent 回复和工具事件，并把命令输出写入 `command_executions.output`。Bridge 只负责创建/恢复会话和注入上下文。后台 pytest 的完整原始输出仍保留在 external attempt 登记的 `.log` 文件和“后台与调度”视图，不混入“Codex CLI”页签。旧版 `codex exec --json` Attempt 只在 UI 显示时做兼容格式化，原始文件保持不变。`latest.log` 只是每个 Turn 重置、最多 1 MiB 的事件尾部视图，不能替代 Attempt 原始输出。
 
@@ -142,7 +155,7 @@ Bridge runtime 同样在同步时递归收紧：普通目录为 `0700`，普通�
 
 ## 在线数据库备份
 
-平台默认每 24 小时调用 SQLite backup API 创建事务一致快照并保留最新 14 份。可通过 `CODEX_DESK_BACKUP_DIR`、`CODEX_DB_BACKUP_INTERVAL_HOURS` 和 `CODEX_DB_BACKUP_RETENTION` 调整；间隔设为 `0` 只关闭自动调度，手动 API 仍可使用。
+平台默认每 24 小时调用 SQLite backup API 创建事务一致快照并只保留最新 1 份。可通过 `CODEX_DESK_BACKUP_DIR`、`CODEX_DB_BACKUP_INTERVAL_HOURS` 和 `CODEX_DB_BACKUP_RETENTION` 调整；间隔设为 `0` 只关闭自动调度，手动 API 仍可使用。
 
 生成流程如下：
 
@@ -167,7 +180,7 @@ API 不返回备份主机路径。复验同时检查包内只能包含数据库�
 
 ## 平台恢复检查点
 
-平台恢复检查点用于保存可共同恢复的平台数据库、`CODEX_DESK_DATA_DIR` 附属文件和 `CODEX_DESK_RUNTIME_DIR`。默认每 24 小时自动创建并保留最新 3 份，可分别通过 `CODEX_RECOVERY_CHECKPOINT_INTERVAL_HOURS=0..8760` 和 `CODEX_RECOVERY_CHECKPOINT_RETENTION=1..30` 调整；间隔设为 `0` 只关闭自动调度。它不替代每日数据库备份，在平台升级、Skill 批量变更或其他受控维护窗口仍可显式创建：
+平台恢复检查点用于保存可共同恢复的平台数据库、`CODEX_DESK_DATA_DIR` 附属文件和 `CODEX_DESK_RUNTIME_DIR`。默认每 24 小时自动创建并只保留最新 1 份，可分别通过 `CODEX_RECOVERY_CHECKPOINT_INTERVAL_HOURS=0..8760` 和 `CODEX_RECOVERY_CHECKPOINT_RETENTION=1..30` 调整；间隔设为 `0` 只关闭自动调度。它不替代每日数据库备份，在平台升级、Skill 批量变更或其他受控维护窗口仍可显式创建：
 
 ```bash
 node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_task_api.js" recovery create
@@ -201,7 +214,7 @@ node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_t
 
 - `sqliteDatabase=true`、`platformDataFiles=true`、`platformRuntimeFiles=true`。
 - `taskWorkingDirectories=false`：不包含 `CODEX_TASK_WORKSPACE_ROOTS` 下的平台外任务工作目录；运行中 `registeredArtifacts` 的可打开源文件也不在覆盖范围内。
-- `externallyLocatedLogs=false`：不包含仍在 data/runtime 之外的活动日志、尚未归档或归档失败的 pytest 报告和其他业务产物；已经成功托管的终态 LOG、报告 artifact 及其资源包含在 `platformDataFiles` 内。
+- `externallyLocatedLogs=false`：不包含仍在 data/runtime 之外的活动日志、尚未归档或归档失败的 pytest 报告和其他业务产物；已经成功托管的终态 LOG 和运行证据在 `platformDataFiles` 内，但已托管报告 artifact 资源按 30 天在线保留，不重复进入恢复包。
 
 因此它应称为“平台恢复检查点”，不能称为“全业务恢复包”。外部工作产物需要独立备份，并记录与检查点接近的时间和版本。
 
@@ -230,16 +243,16 @@ node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_t
 
 不要在服务运行时覆盖主数据库，也不要把备份包内验证连接可能产生的临时 WAL/SHM 当作恢复输入。
 
-## 完整备份
+## 紧急离线备份
 
-1. 停止或完成所有活动任务。
-2. 停止 Web 服务和 Worker。
-3. 复制整个 `CODEX_DESK_DATA_DIR`。
-4. 同时复制整个 `CODEX_DESK_RUNTIME_DIR`。
-5. 记录应用版本和非敏感环境配置。
-6. 启动服务并执行健康检查。
+日常备份使用在线数据库备份和平台恢复检查点，不需要定期复制整个数据目录。只有在迁移或灾备演练等受控窗口，才执行一次离线副本：
 
-停服复制整个目录可以同时保留主库、WAL、原始日志和迁移来源。页面导出不包含这些数据，不能替代备份。
+1. 停止或完成所有活动任务，并停止 Web 服务和 Worker。
+2. 复制 SQLite 主库、WAL/SHM（若存在）、平台运行状态和原始日志；排除 `sessions/*/skill-report-artifacts`，避免重复保存已托管报告。
+3. 不复制 `CODEX_TASK_WORKSPACE_ROOTS` 下的项目工作目录和 `videos/<run-id>`；项目代码由 Git、唯一媒体对象由 SHA-256 增量备份、`standard_videos` 由独立备份负责。
+4. 记录应用版本和非敏感环境配置，启动服务并执行健康检查。
+
+页面导出不包含这些数据，不能替代在线数据库备份、恢复检查点或外部媒体备份。
 
 ## 完整恢复
 

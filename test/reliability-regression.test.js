@@ -79,6 +79,13 @@ test('the supervised npm command uses the host launcher rather than bypassing it
   assert.equal(packageJson.scripts['restart:supervised'], 'node bin/rolling-restart.js');
 });
 
+test('the supervised launcher isolates the authentication source from inherited task homes', () => {
+  const startScript = fs.readFileSync(path.join(ROOT_DIR, 'start-supervised.sh'), 'utf8');
+  assert.match(startScript, /CODEX_SOURCE_HOME=.*SOURCE_CODEX_HOME/);
+  assert.match(startScript, /CODEX_HOME=\"\$CODEX_SOURCE_HOME\"/);
+  assert.match(startScript, /export PORT HOST CODEX_SOURCE_HOME CODEX_HOME/);
+});
+
 test('the worker has no active task concurrency limit', () => {
   const serverSource = fs.readFileSync(path.join(ROOT_DIR, 'server.js'), 'utf8');
   const workerSource = fs.readFileSync(path.join(ROOT_DIR, 'worker.js'), 'utf8');

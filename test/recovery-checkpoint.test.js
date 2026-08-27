@@ -66,6 +66,11 @@ fs.writeFileSync(
   path.join(dataDir, 'sessions', 'task-a', 'external-attempt-output', 'external-a.log'),
   archivedExternalLog,
 );
+fs.mkdirSync(path.join(dataDir, 'sessions', 'task-a', 'skill-report-artifacts', 'report-a.resources'), { recursive: true });
+fs.writeFileSync(
+  path.join(dataDir, 'sessions', 'task-a', 'skill-report-artifacts', 'report-a.html'),
+  '<html>managed report</html>',
+);
 fs.mkdirSync(path.join(dataDir, 'agents'), { recursive: true });
 fs.writeFileSync(path.join(dataDir, 'agents', 'builder.json'), '{"legacy":true}');
 fs.mkdirSync(path.join(runtimeSessionDir, 'tmp'), { recursive: true });
@@ -123,6 +128,7 @@ test('recovery checkpoint is private, complete for platform roots, and omits tra
   assert.ok(archiveEntries.includes('runtime/platform-runtime.json'));
   assert.ok(archiveEntries.includes('data/sessions/task-a/attempt-output/attempt-a.stdout.log'));
   assert.ok(archiveEntries.includes('data/sessions/task-a/external-attempt-output/external-a.log'));
+  assert.equal(archiveEntries.some((entry) => entry.includes('skill-report-artifacts')), false);
   assert.equal(archiveEntries.some((entry) => entry.includes('/tmp/') || entry.endsWith('/tmp')), false);
   assert.equal(archiveEntries.some((entry) => entry.startsWith('runtime/bridge-sessions/locks')), false);
   assert.equal(archiveEntries.some((entry) => entry.startsWith('runtime/web-supervisor.lock')), false);
@@ -133,6 +139,7 @@ test('recovery checkpoint is private, complete for platform roots, and omits tra
   assert.equal(archiveEntries.some((entry) => entry.startsWith('data/agents')), false);
   assert.equal(firstCheckpoint.source.excluded.legacyMigration, 1);
   assert.equal(firstCheckpoint.source.excluded.bridgeCodexSessions, 1);
+  assert.equal(firstCheckpoint.source.excluded.platformReportArtifacts, 1);
 
   const extracted = path.join(tempDir, 'extracted');
   fs.mkdirSync(extracted);
@@ -548,6 +555,22 @@ test('invalid recovery scheduling configuration fails before service startup', (
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, new RegExp(name));
   }
+});
+
+test('recovery checkpoint retention defaults to one package', () => {
+  const environment = { ...process.env };
+  delete environment.CODEX_RECOVERY_CHECKPOINT_RETENTION;
+  const result = spawnSync(
+    process.execPath,
+    ['-e', "process.stdout.write(String(require('./src/recovery-checkpoint').CHECKPOINT_RETENTION))"],
+    {
+      cwd: ROOT_DIR,
+      env: environment,
+      encoding: 'utf8',
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '1');
 });
 
 test('automatic recovery defers active work, succeeds when idle, and resumes its due time after restart', () => {

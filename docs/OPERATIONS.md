@@ -184,10 +184,10 @@ npm run verify:data-protection
 | `CODEX_MIN_FREE_BYTES` | `536870912` | 数据、运行状态和任务工作盘允许启动新任务的最小可用字节数，设为 `0` 可关闭字节门槛 |
 | `CODEX_MIN_FREE_PERCENT` | `2` | 上述文件系统允许启动新任务的最小可用百分比，范围 `0..100`，设为 `0` 可关闭百分比门槛 |
 | `CODEX_DB_BACKUP_INTERVAL_HOURS` | `24` | 自动数据库备份间隔，整数小时；`0` 关闭自动调度 |
-| `CODEX_DB_BACKUP_RETENTION` | `14` | 成功发布后保留的最新数据库备份数，范围 `1..365` |
+| `CODEX_DB_BACKUP_RETENTION` | `1` | 成功发布后保留的最新数据库备份数，范围 `1..365` |
 | `CODEX_DB_BACKUP_MAX_DURATION_MINUTES` | `120` | 单次 SQLite 在线备份最长时间，范围 `1..1440`；超时或服务关停时取消并清理未发布临时包 |
 | `CODEX_RECOVERY_CHECKPOINT_INTERVAL_HOURS` | `24` | 自动平台恢复检查点间隔，整数小时；`0` 关闭自动调度 |
-| `CODEX_RECOVERY_CHECKPOINT_RETENTION` | `3` | 成功发布后保留的最新平台恢复检查点数，范围 `1..30` |
+| `CODEX_RECOVERY_CHECKPOINT_RETENTION` | `1` | 成功发布后保留的最新平台恢复检查点数，范围 `1..30` |
 | `CODEX_RELEASE_ID` | 空 | 非敏感发布标识，使用 `1..128` 位字母、数字、点、下划线或连字符；滚动重启会保留并验证替代实例报告相同标识 |
 | `CODEX_WEB_SUPERVISOR_LOG_MAX_BYTES` | `5242880` | `start-supervised.sh` 受管诊断日志的单文件字节上限，范围 `256..1073741824` |
 | `CODEX_WEB_SUPERVISOR_LOG_RETENTION` | `3` | 受管诊断日志的历史文件数，范围 `1..20`，不含当前文件 |
@@ -203,6 +203,7 @@ npm run verify:data-protection
 | `BRIDGE_CHATFILE_ROOT` | `<runtime>/bridge-chatfiles` | 平台管理的 Bridge chatfile 根目录 |
 | `CODEX_TASK_CGROUP_ROOT` | 从 `/proc/self/cgroup` 自动定位 | 可选的 cgroup v2 委派根；仅在自动定位不适用时覆盖 |
 | `CODEX_INTERACTIVE_DISCONNECT_TIMEOUT_MS` | `900000` | 最后一个交互终端连接断开后的保留时间；`0` 表示禁用自动结束 |
+| `CODEX_INTERACTIVE_REPLAY_BYTES` | `67108864` | 交互式 Codex CLI 断线重连的内存回放窗口，范围 `65536..134217728` 字节；完整历史仍由 transcript 保留 |
 | `SOURCE_CODEX_HOME` | 部署环境提供 | Codex Skill 来源 |
 | `WORKSPACE_CODEX_SKILLS_DIR` | `<项目>/.codex/skills` | 项目级 Codex Skill 来源 |
 | `CODEX_DESK_AUTH_USER` | 空 | HTTP 基础认证用户名 |
@@ -480,7 +481,7 @@ node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_t
 node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_task_api.js" recovery verify RECOVERY_ID
 ```
 
-创建前，持久维护租约会在同一 SQLite 事务中确认活动 Task、Attempt、Command、Schedule、External 和已认领 Bridge cleanup 数量都为 0。维护期间新写入 API 返回 `503` 和 `Retry-After`，Worker 不领取命令、到期调度或待回收作业，并停止写入心跳；读接口仍可用。Run、原子创建、停止、完成、恢复、重置和删除请求可以进入幂等检查，但只有 SQLite 已存在完全匹配的命令或回执时才返回原结果，未提交的新键仍在任何写入前返回 `503`。平台先在最长 10 分钟的静默窗口创建验证过的数据库快照，snapshot 期间不续写维护租约；若 snapshot 超时导致租约失效，检查点 fail closed，不会继续归档。该心跳静默只作用于恢复检查点，滚动重启的维护期仍会写心跳以验证替代 Worker。之后再归档 `CODEX_DESK_DATA_DIR` 的附属文件和合格的 `CODEX_DESK_RUNTIME_DIR` 内容，核对归档前后的 inode、大小和纳秒时间指纹，最后验证包布局、权限、SHA-256、数据库完整性、表计数和归档清单后原子发布。发布失败不会覆盖旧包，成功后按 `CODEX_RECOVERY_CHECKPOINT_RETENTION` 轮转。
+创建前，持久维护租约会在同一 SQLite 事务中确认活动 Task、Attempt、Command、Schedule、External 和已认领 Bridge cleanup 数量都为 0。维护期间新写入 API 返回 `503` 和 `Retry-After`，Worker 不领取命令、到期调度或待回收作业，并停止写入心跳；读接口仍可用。Run、原子创建、停止、完成、恢复、重置和删除请求可以进入幂等检查，但只有 SQLite 已存在完全匹配的命令或回执时才返回原结果，未提交的新键仍在任何写入前返回 `503`。平台先在最长 10 分钟的静默窗口创建验证过的数据库快照，snapshot 期间不续写维护租约；若 snapshot 超时导致租约失效，检查点 fail closed，不会继续归档。该心跳静默只作用于恢复检查点，滚动重启的维护期仍会写心跳以验证替代 Worker。之后再归档 `CODEX_DESK_DATA_DIR` 的附属文件和合格的 `CODEX_DESK_RUNTIME_DIR` 内容，明确排除 `sessions/*/skill-report-artifacts`，核对归档前后的 inode、大小和纳秒时间指纹，最后验证包布局、权限、SHA-256、数据库完整性、表计数和归档清单后原子发布。发布失败不会覆盖旧包，成功后按 `CODEX_RECOVERY_CHECKPOINT_RETENTION` 轮转。
 
 数据库备份和恢复检查点默认每 24 小时自动调度，并从各自最近有效包的 `completedAt` 续算，服务重启不会立即重复创建，也不会仅因当前有效包超过 retention 而删除任何包。健康状态中的 `nextRunAt` 会在调度器启动时直接恢复为下一次实际到期时间，不把内部启动检查计时暴露成业务截止时间。手工数据库备份或检查点成功后会立即把对应自动调度锚点移到新的 `completedAt`，无需等待旧 timer 到点自校正；该次成功发布也是执行保留数轮转的唯一时机。备份和检查点调度器重复初始化时会替换已有 timer；停止或重启前已进入异步阶段的旧回调不能恢复旧调度链，因此同一进程不会因重复启动调度器积累多条 timer。到期时若存在活动 Task、Attempt、Command、Schedule、External，或数据库备份、其他检查点、平台维护正在进行，本次记为 `recovery.checkpoint.deferred`，15 分钟后重试，不记为失败。真正的创建错误记为 `recovery.checkpoint.failed` 并按相同间隔重试；审计 payload 使用不含路径或业务文本的错误码，例如 `ENOSPC`、`EACCES`、`MAINTENANCE_LEASE_LOST`、`SNAPSHOT_INTEGRITY_FAILED` 或 `SOURCE_CHANGED_DURING_CHECKPOINT`。成功记为 `recovery.checkpoint.created`。同一连续延迟原因只写一次审计，避免轮询刷屏。可在受控变更窗口继续手工创建和复验；设置 `CODEX_RECOVERY_CHECKPOINT_INTERVAL_HOURS=0` 只关闭自动调度，不禁用手工 API。
 
@@ -488,14 +489,9 @@ node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_t
 
 每个检查点目录仅包含 `database.db`、`payload.tar.gz` 和 `manifest.json`。目录为 `0700`，文件为 `0600`。归档包含 Session 级 `auth.json`，可能保存 `OPENAI_API_KEY`，必须按凭据介质管理；API 不提供下载、文件列表或内容接口。SHA-256 用于损坏检测而不是来源签名，拥有检查点目录写权限的主体仍属于信任边界。
 
-平台恢复检查点不包含 `CODEX_TASK_WORKSPACE_ROOTS` 下的任务工作目录，也不包含位于平台数据和 runtime 之外的 pytest 日志、报告或其他业务产物。恢复包中的 `coverage.taskWorkingDirectories=false` 和 `coverage.externallyLocatedLogs=false` 是强制边界，不能把该包称为全业务备份。外部产物必须使用同一恢复点附近的独立备份。
+平台恢复检查点不包含 `CODEX_TASK_WORKSPACE_ROOTS` 下的任务工作目录，也不包含 `data/sessions/*/skill-report-artifacts` 或位于平台数据和 runtime 之外的 pytest 日志、报告和其他业务产物。恢复包中的 `coverage.taskWorkingDirectories=false` 和 `coverage.externallyLocatedLogs=false` 是强制边界，不能把该包称为全业务备份。外部产物必须使用同一恢复点附近的独立备份；唯一媒体对象按 SHA-256 去重增量备份，`videos/<run-id>` 不进入长期备份，`standard_videos` 单独备份。
 
-配置导出同样不是完整备份。完整备份包括同一时间点的：
-
-- 整个 `CODEX_DESK_DATA_DIR`，包含 SQLite、WAL 和原始日志。
-- 整个 `CODEX_DESK_RUNTIME_DIR`，包含未完成 Session 状态和 Skill 快照。
-
-一致的完整备份步骤：停止活动任务，停止服务，同时复制两个目录和需要保留的任务工作产物，然后再启动服务。停服后复制整个目录，不要只复制 `codex-tasks.db`。
+配置导出同样不是完整备份。日常保护边界为：SQLite/WAL/平台运行数据由在线数据库备份和恢复检查点负责；项目代码由 Git 负责；唯一媒体对象由 SHA-256 去重增量备份负责；`videos/<run-id>` 不进入长期备份；`standard_videos` 独立备份；已托管报告只按平台 30 天策略保留，不再次打包。需要离线副本时，按[紧急离线备份](DATA_AND_RECOVERY.md#紧急离线备份)执行，并明确排除已托管报告和临时视频目录。
 
 恢复 SQLite 在线备份时也必须先停服，先保存目标环境现状，再把已复验包中的 `database.db` 恢复为数据目录的 `codex-tasks.db`，删除旧 `-wal/-shm`，设置 `0600` 后启动。若没有同步恢复对应原始日志和 runtime，历史中的文件引用可能缺失，只能作为数据库级恢复使用。恢复后检查健康接口、任务状态、历史、工作日志、审计和一个非生产任务。详细步骤见[数据与恢复](DATA_AND_RECOVERY.md)。
 
@@ -520,3 +516,5 @@ node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_t
 任务执行数据和平台托管产物的保留期为 30 天，从 Task 明确完成归档的 `archivedAt` 开始计算；活动任务、失败、停止、等待输入、等待复核和等待后台结果的任务不按创建时间清理。完整命令、命令输出、结构化日志和审计保存在 SQLite 并建立索引，大体积结构化命令输出会完整保存，容量规划必须以实际任务输出为准。
 
 Worker 启动时及此后每小时自动检查一次，每批最多清理 50 个到期 Task。它先取得 `retention_cleanup` 维护租约；平台存在活动 Task、Attempt、Command、Schedule、External 或其他维护时，本轮记录延迟并留到下一次。执行时先按 Task 创建代际暂存托管文件，再在 SQLite 事务内删除 Task、级联历史、任务审计与操作回执，并把当前 Bridge Runtime 转入持久回收队列；暂存或事务失败会恢复文件并保留 Task。通过 `/api/health` 的 `taskRetention` 检查 `dueTasks`、`lastSuccessAt`、`lastDeferredReason`、`lastFailureCode` 和累计清理数。数据库备份和恢复检查点仍按各自的数量配置轮转；备份中包含的历史数据可能晚于在线数据清理时间，必须在备份保留周期结束后再销毁对应介质。
+
+pytest 生成的 `videos/<run-id>` 由独立的 `codex-media-retention.timer` 每 30 天滚动执行一次。生产单元必须配置明确的 `videos` 根目录并使用 `--apply`；首次部署先执行 dry-run。任务只扫描直接子目录，保护数据库仍引用的运行目录，先移动到 `.retention-quarantine/`，隔离 3 天后才永久删除；它不会触碰 `standard_videos`、SQLite/WAL、备份、恢复检查点或平台已托管报告。部署步骤见[媒体保留](MEDIA_RETENTION.md)。

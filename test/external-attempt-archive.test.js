@@ -137,6 +137,44 @@ test('concurrent publishers never overwrite an already published archive', async
     === crypto.createHash('sha256').update(published).digest('hex')));
 });
 
+test('concurrent archive verification tolerates transient hard-link metadata changes', async () => {
+  for (let iteration = 0; iteration < 100; iteration += 1) {
+    const paths = fixture(`concurrent-verify-${iteration}`);
+    const secondSource = path.join(path.dirname(paths.source), 'second.log');
+    fs.writeFileSync(paths.source, Buffer.alloc(1024 * 1024, 0x31), { mode: 0o600 });
+    fs.writeFileSync(secondSource, Buffer.alloc(1024 * 1024, 0x32), { mode: 0o600 });
+    let waiting = 0;
+    let release;
+    const barrier = new Promise((resolve) => { release = resolve; });
+    const beforePublish = async (stage) => {
+      if (stage !== 'before_publish') return;
+      waiting += 1;
+      if (waiting === 2) release();
+      await barrier;
+    };
+
+    try {
+      const results = await Promise.all([
+        archiveFileAtomically({
+          sourcePath: paths.source,
+          destinationPath: paths.destination,
+          faultInjector: beforePublish,
+        }),
+        archiveFileAtomically({
+          sourcePath: secondSource,
+          destinationPath: paths.destination,
+          faultInjector: beforePublish,
+        }),
+      ]);
+      const published = fs.readFileSync(paths.destination);
+      const publishedSha256 = crypto.createHash('sha256').update(published).digest('hex');
+      assert.ok(results.every((result) => result.sha256 === publishedSha256));
+    } finally {
+      fs.rmSync(path.dirname(paths.destination), { recursive: true, force: true });
+    }
+  }
+});
+
 test('a verified open handle keeps the validated inode when its path is replaced', async () => {
   const paths = fixture('verified-open-path-replacement');
   const verifiedContent = Buffer.from('validated terminal output\n', 'utf8');

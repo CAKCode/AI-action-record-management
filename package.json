@@ -9,6 +9,7 @@
     "restart:supervised": "node bin/rolling-restart.js",
     "redact:report-artifacts": "node bin/redact-skill-report-artifacts.js",
     "redact:historical-reports": "node bin/redact-historical-skill-reports.js",
+    "media:retention": "node bin/media-retention-cleanup.js",
     "verify:data-protection": "node bin/verify-data-protection.js",
     "dev": "node server.js",
     "worker": "node worker.js",

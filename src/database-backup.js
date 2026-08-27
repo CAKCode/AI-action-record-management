@@ -14,7 +14,7 @@ const {
 
 const BACKUP_FORMAT = 'codex-task-platform.sqlite-backup';
 const BACKUP_VERSION = 1;
-const DEFAULT_RETENTION = 14;
+const DEFAULT_RETENTION = 1;
 const DEFAULT_INTERVAL_HOURS = 24;
 const DEFAULT_MAX_DURATION_MINUTES = 120;
 const DEFAULT_RETRY_DELAY_MS = 15 * 60 * 1000;

@@ -1,0 +1,27 @@
+[Unit]
+Description=Codex generated media retention cleanup
+After=codex-task-sessions.service
+ConditionPathExists=/opt/codex-task-sessions/bin/media-retention-cleanup.js
+
+[Service]
+Type=oneshot
+User=codex-task-sessions
+Group=codex-task-sessions
+WorkingDirectory=/opt/codex-task-sessions
+Environment=NODE_ENV=production
+Environment=CODEX_DESK_DATA_DIR=/var/lib/codex-task-sessions/data
+Environment=CODEX_DESK_BACKUP_DIR=/var/lib/codex-task-sessions/backups
+Environment=CODEX_DESK_RUNTIME_DIR=/var/lib/codex-task-sessions/runtime
+# Replace these with explicit generated-media directories. Do not use the
+# project root, data directory, backup directory, runtime directory, or
+# standard_videos as a cleanup root.
+Environment=CODEX_MEDIA_CLEANUP_ROOTS=/var/lib/pytest-media/videos
+Environment=CODEX_MEDIA_RETENTION_DAYS=30
+Environment=CODEX_MEDIA_QUARANTINE_DAYS=3
+ExecStart=/usr/bin/node /opt/codex-task-sessions/bin/media-retention-cleanup.js --apply
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/pytest-media/videos /var/lib/codex-task-sessions/runtime
+PrivateTmp=true

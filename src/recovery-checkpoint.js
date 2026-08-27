@@ -30,7 +30,7 @@ const {
 
 const CHECKPOINT_FORMAT = 'codex-task-platform.recovery-checkpoint';
 const CHECKPOINT_VERSION = 1;
-const DEFAULT_RETENTION = 3;
+const DEFAULT_RETENTION = 1;
 const DEFAULT_INTERVAL_HOURS = 24;
 const DEFAULT_RETRY_DELAY_MS = 15 * 60 * 1000;
 const CHECKPOINT_ID_PATTERN = /^recovery-\d{8}T\d{9}Z-[a-f0-9]{8}$/;
@@ -46,6 +46,7 @@ const EXCLUDED_COUNT_KEYS = [
   'backupRecursive',
   'legacyMigration',
   'bridgeCodexSessions',
+  'platformReportArtifacts',
   'runtimeLocks',
   'runtimeTemp',
   'stagedTemporary',
@@ -245,6 +246,7 @@ function excludedSourcePath(role, relativePath) {
     const backupPrefix = relativeBackupPrefix();
     if (backupPrefix && (normalized === backupPrefix || normalized.startsWith(`${backupPrefix}/`))) return 'backup_recursive';
     if (normalized === 'agents' || normalized.startsWith('agents/')) return 'legacy_migration';
+    if (/^sessions\/[^/]+\/skill-report-artifacts(?:\/|$)/.test(normalized)) return 'platform_report_artifacts';
   }
   if (role === 'runtime') {
     if (normalized === 'bridge-sessions/.bridge-codex-home/sessions'
@@ -288,6 +290,7 @@ function collectInventory() {
     backupRecursive: 0,
     legacyMigration: 0,
     bridgeCodexSessions: 0,
+    platformReportArtifacts: 0,
     runtimeLocks: 0,
     runtimeTemp: 0,
     stagedTemporary: 0,
@@ -304,6 +307,7 @@ function collectInventory() {
         backup_recursive: 'backupRecursive',
         legacy_migration: 'legacyMigration',
         bridge_codex_session: 'bridgeCodexSessions',
+        platform_report_artifacts: 'platformReportArtifacts',
         runtime_lock: 'runtimeLocks',
         runtime_temp: 'runtimeTemp',
         staged_temporary: 'stagedTemporary',

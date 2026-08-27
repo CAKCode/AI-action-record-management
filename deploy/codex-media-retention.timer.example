@@ -1,0 +1,12 @@
+[Unit]
+Description=Run generated media retention every 30 days
+
+[Timer]
+OnBootSec=30min
+OnUnitActiveSec=30d
+Persistent=true
+RandomizedDelaySec=30min
+Unit=codex-media-retention.service
+
+[Install]
+WantedBy=timers.target

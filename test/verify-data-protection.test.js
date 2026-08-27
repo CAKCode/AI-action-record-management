@@ -110,6 +110,7 @@ test('data-protection verification gate authenticates and verifies every availab
     CODEX_ALLOW_ROOT_EXECUTION: '1',
     CODEX_DISABLE_WORKER: '1',
     CODEX_DB_BACKUP_INTERVAL_HOURS: '0',
+    CODEX_DB_BACKUP_RETENTION: '2',
     CODEX_RECOVERY_CHECKPOINT_INTERVAL_HOURS: '0',
     CODEX_DESK_AUTH_USER: 'gate-user',
     CODEX_DESK_AUTH_PASSWORD: 'gate-password',

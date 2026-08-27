@@ -11,7 +11,8 @@
 - 稳定执行：Web Supervisor、独立 Worker、任务租约、心跳、幂等命令和服务重启恢复。
 - 容量保护：数据、运行状态或任务工作盘空间不足时暂停领取新任务，恢复后原队列继续执行。
 - 在线备份：SQLite 一致性快照经过完整性、外键、SHA-256 和表计数复验后原子发布，支持定时执行与保留数轮转。
-- 平台恢复检查点：任务完全空闲时冻结写入，将已验证数据库、平台数据文件和平台管理的 Session runtime 原子打包并复验；外部 Codex Session home 不作为一致恢复源，默认保留 3 份。
+- 平台恢复检查点：任务完全空闲时冻结写入，将已验证数据库、平台数据文件和平台管理的 Session runtime 原子打包并复验；外部 Codex Session home 不作为一致恢复源，默认只保留最新 1 份。
+- 媒体分层：项目代码使用 Git；唯一媒体对象按 SHA-256 做外部增量去重备份；`videos/<run-id>` 每 30 天清理；`standard_videos` 独立备份；已托管报告不重复进入恢复检查点。
 - 后台续跑：PID/LOG/DONE/STATE/META 自动登记，Codex 释放后由持久化调度恢复同一 Session 创建新 Turn。
 - Step/Run 语义：业务步骤保持稳定；Rerun 是同一 Step 下的新 Run，技术 Retry 只增加同一 Run 的 External Attempt generation，避免把任务中的不同步骤误显示成 Rerun。
 - 准确终态：Worker 每秒核对后台 DONE/STATE/META，停止前再同步核对一次；已经结束的 pytest 保留真实 `succeeded/failed`，不会因为取消后续回查被改成 `cancelled`。
@@ -98,8 +99,10 @@ npm test
 | [API 参考](docs/API.md) | HTTP API、请求约束、响应字段和操作语义 |
 | [Skill 结构化报告](docs/SKILL_REPORTS.md) | 报告 Schema、发布协议和 artifact 规则 |
 | [数据与恢复](docs/DATA_AND_RECOVERY.md) | 数据布局、保留、备份、检查点和恢复步骤 |
+| [媒体保留](docs/MEDIA_RETENTION.md) | pytest 生成视频的 30 天隔离清理与恢复点去重 |
 | [安全说明](SECURITY.md) | 漏洞报告、凭据管理和部署安全边界 |
 | [systemd 服务样例](deploy/codex-task-sessions.service.example) | 生产服务单元参考 |
+| [媒体清理 systemd 样例](deploy/codex-media-retention.timer.example) | 30 天滚动媒体清理定时器 |
 
 ## 核心配置
 
@@ -110,9 +113,12 @@ npm test
 | `CODEX_DESK_DATA_DIR` | `./data` | SQLite、原始日志和迁移来源 |
 | `CODEX_DESK_BACKUP_DIR` | `<data>/backups` | 原子数据库备份包 |
 | `CODEX_DB_BACKUP_INTERVAL_HOURS` | `24` | 自动数据库备份间隔；`0` 表示关闭自动调度 |
-| `CODEX_DB_BACKUP_RETENTION` | `14` | 成功发布后保留的最新数据库备份数 |
+| `CODEX_DB_BACKUP_RETENTION` | `1` | 成功发布后保留的最新数据库备份数 |
 | `CODEX_RECOVERY_CHECKPOINT_INTERVAL_HOURS` | `24` | 自动平台恢复检查点间隔；`0` 表示关闭自动调度 |
-| `CODEX_RECOVERY_CHECKPOINT_RETENTION` | `3` | 成功发布后保留的最新平台恢复检查点数，范围 `1..30` |
+| `CODEX_RECOVERY_CHECKPOINT_RETENTION` | `1` | 成功发布后保留的最新平台恢复检查点数，范围 `1..30` |
+| `CODEX_MEDIA_CLEANUP_ROOTS` | 未配置 | 冒号分隔的明确 `videos` 目录；不允许使用 `/data/jenkins`、平台 data/runtime/backup 或 `standard_videos` |
+| `CODEX_MEDIA_RETENTION_DAYS` | `30` | 生成媒体目录保留天数 |
+| `CODEX_MEDIA_QUARANTINE_DAYS` | `3` | 清理前隔离天数 |
 | `CODEX_WEB_SUPERVISOR_LOG_MAX_BYTES` | `5242880` | 受管诊断日志单文件上限；默认另保留 3 个历史文件 |
 | `CODEX_WEB_SUPERVISOR_LOG_RETENTION` | `3` | 受管诊断日志历史文件数，范围 `1..20` |
 | `CODEX_WEB_SUPERVISOR_LOG_STDIO` | 未启用 | 设为 `1` 后由外部日志管理器接管标准输出 |
@@ -122,11 +128,13 @@ npm test
 | `CODEX_TASK_WORKSPACE_ROOTS` | 平台旁的独立任务目录 | 允许使用的工作目录根路径，Linux 使用 `:` 分隔多个目录 |
 | `CODEX_ALLOW_ROOT_EXECUTION` | 未启用 | 仅供隔离开发验证，生产环境禁止配置 |
 | `CODEX_TASK_REAL_CODEX_BIN` | 从 `PATH` 查找 `codex` | 真实 Codex CLI 的绝对路径 |
+| `CODEX_SOURCE_HOME` | `$HOME/.codex` | 任务隔离 Codex Home 的认证/配置来源；服务启动时不会继承外部任务级 `CODEX_HOME` |
 | `CODEX_TASK_BRIDGE_ROOT` | `/home/jenkins/connect2cli-bridge` | 包含 `workspace_bridge` 的 Bridge 源目录 |
 | `BRIDGE_PYTHON` | `python3` | Python `3.11+` 解释器 |
 | `CODEX_TASK_CGROUP_ROOT` | 自动定位 | 可选的 cgroup v2 委派根 |
 | `CODEX_API_MAX_CONCURRENCY` | `64` | 普通 API 同时占用的响应槽数，范围 `1..256`；Health/Ready 使用独立诊断通道 |
 | `CODEX_API_IDLE_TIMEOUT_MS` | `30000` | 非日志 API 请求体或响应无网络进展超时，范围 `1000..3600000` 毫秒 |
+| `CODEX_INTERACTIVE_REPLAY_BYTES` | `67108864` | 交互式 Codex CLI 断线重连的内存回放窗口，范围 `65536..134217728` 字节；完整历史仍从 transcript 回放 |
 | `SOURCE_CODEX_HOME` | 部署环境的 Codex Home | 只读发现 Codex Skill |
 | `WORKSPACE_CODEX_SKILLS_DIR` | `<项目>/.codex/skills` | 只读发现项目级 Codex Skill |
 | `CODEX_DESK_AUTH_USER` | 空 | 远程监听时必填 |

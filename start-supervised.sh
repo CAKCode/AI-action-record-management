@@ -30,6 +30,11 @@ fi
 PORT="${PORT:-8091}"
 HOST="${HOST:-127.0.0.1}"
 
-export PORT HOST
+# CODEX_HOME is the source used to provision isolated per-task homes. Never
+# inherit a task-specific CODEX_HOME from the shell that starts the service.
+CODEX_SOURCE_HOME="${CODEX_SOURCE_HOME:-${SOURCE_CODEX_HOME:-$HOME/.codex}}"
+CODEX_HOME="$CODEX_SOURCE_HOME"
+
+export PORT HOST CODEX_SOURCE_HOME CODEX_HOME
 
 exec node bin/web-launcher.js

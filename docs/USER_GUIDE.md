@@ -173,7 +173,7 @@ converter 场景中，一条命令可以同时关联 `converter-test`、`run-in-
 
 5 MiB 以上的单个输出流使用“打开完整原始输出”，避免自动把大日志载入页面；实时查看期间达到该上限时也会停止内嵌追加，完整内容继续由原始入口提供。内嵌视图使用本地加载的只读 xterm.js，支持 ANSI 样式、回车覆盖和终端滚动，不能向 Session 发送输入；浏览器不支持终端组件时自动退回纯文本。两种入口读取的是同一份 Attempt 原始文件，xterm 视图按 UTF-8 展示，原始入口保持服务器保存的完整字节流。
 
-“Codex CLI”页签是 Codex 终端的唯一入口。托管 Turn 运行时，它实时跟随该 Turn 唯一的交互式 `codex` / `codex resume` TUI PTY，不会启动第二个 Codex 进程，也不会显示 Attempt JSON 或后台 pytest 日志。runner 只按 rollout 的结构化 Turn 完成事件自动结束 TUI，不解析终端文字。托管进程退出后显示只读终端历史；只有操作者显式点击“重连”才会再次恢复同一 Codex Session。任务完成后再次打开该页签只校验并回放全部托管/交互 transcript，不启动 Codex，也不解析或连接原 Runtime；要重新执行已归档任务，必须先显式恢复任务，再重连或提交新 Turn。
+“Codex CLI”页签是 Codex 终端的唯一入口。托管 Turn 运行时，它实时跟随该 Turn 唯一的交互式 `codex` / `codex resume` TUI PTY，不会启动第二个 Codex 进程，也不会显示 Attempt JSON 或后台 pytest 日志。runner 只按 rollout 的结构化 Turn 完成事件自动结束 TUI，不解析终端文字。托管进程退出后显示只读终端历史；只有操作者显式点击“重连”才会再次恢复同一 Codex Session。任务完成后再次打开该页签只校验并回放全部托管/交互 transcript，不启动 Codex，也不解析或连接原 Runtime；要重新执行已归档任务，必须先显式恢复任务，再重连或提交新 Turn。页面最多追加 64 MiB、保留 100,000 行滚动缓存；超过页面上限时，Attempt 的“打开完整原始输出”入口仍可读取服务器保存的完整字节流。
 
 “任务摘要”根据已经持久化的执行证据自动选择展示方式，不新增任务类型字段，也不要求迁移现有 Task。存在 pytest 命令、`test-result` 报告或对应 Step/Run 证据时，继续按业务时间显示回归、部署、预约回查和最终结果；其他任务则显示当前任务状态、目标或最近结果、主要后台执行、任意类型的结构化报告和任务时间线。判断不依赖任务名称或工作目录，因此代码修改、文档、排障、部署和其他 Codex 工作都可以使用同一套 Task、Session 和 Turn 生命周期。
 

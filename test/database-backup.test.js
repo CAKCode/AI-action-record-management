@@ -22,6 +22,7 @@ process.env.CODEX_DESK_RUNTIME_DIR = runtimeDir;
 process.env.CODEX_DESK_BACKUP_DIR = backupDir;
 process.env.CODEX_TASK_WORKSPACE_ROOTS = workspaceDir;
 process.env.CODEX_DB_BACKUP_INTERVAL_HOURS = '0';
+process.env.CODEX_DB_BACKUP_RETENTION = '14';
 
 const store = require('../src/store');
 const { closeDatabase } = require('../src/database');
@@ -572,4 +573,20 @@ test('invalid backup scheduling and retention values fail during service configu
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, new RegExp(name));
   }
+});
+
+test('database backup retention defaults to one package', () => {
+  const environment = { ...process.env };
+  delete environment.CODEX_DB_BACKUP_RETENTION;
+  const result = spawnSync(
+    process.execPath,
+    ['-e', "process.stdout.write(String(require('./src/database-backup').BACKUP_RETENTION))"],
+    {
+      cwd: ROOT_DIR,
+      env: environment,
+      encoding: 'utf8',
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '1');
 });

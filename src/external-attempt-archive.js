@@ -4,6 +4,8 @@ const path = require('path');
 
 const COPY_CHUNK_BYTES = 1024 * 1024;
 const PROGRESS_INTERVAL_BYTES = 8 * 1024 * 1024;
+const EXISTING_ARCHIVE_VERIFY_ATTEMPTS = 4;
+const EXISTING_ARCHIVE_VERIFY_DELAY_MS = 10;
 
 function archiveError(message, code, cause = null) {
   const error = new Error(message, cause ? { cause } : undefined);
@@ -144,6 +146,24 @@ async function digestRegularFile(filePath, options = {}) {
   }
 }
 
+async function digestExistingArchive(filePath) {
+  let lastError;
+  for (let attempt = 1; attempt <= EXISTING_ARCHIVE_VERIFY_ATTEMPTS; attempt += 1) {
+    try {
+      return await digestRegularFile(filePath);
+    } catch (error) {
+      lastError = error;
+      if (error.code !== 'ARCHIVE_FILE_CHANGED' || attempt === EXISTING_ARCHIVE_VERIFY_ATTEMPTS) {
+        throw error;
+      }
+      // A concurrent publisher briefly changes hard-link metadata while it
+      // removes its temporary link. Retry the digest without weakening checks.
+      await new Promise((resolve) => setTimeout(resolve, EXISTING_ARCHIVE_VERIFY_DELAY_MS));
+    }
+  }
+  throw lastError;
+}
+
 async function fsyncDirectory(directory) {
   const flags = fs.constants.O_RDONLY
     | (fs.constants.O_DIRECTORY || 0)
@@ -171,7 +191,7 @@ async function archiveFileAtomically(options) {
   await assertArchiveDirectory(destinationDirectory);
   try {
     await fs.promises.lstat(destinationPath);
-    return await digestRegularFile(destinationPath);
+    return await digestExistingArchive(destinationPath);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
@@ -244,7 +264,7 @@ async function archiveFileAtomically(options) {
       published = true;
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      return await digestRegularFile(destinationPath);
+      return await digestExistingArchive(destinationPath);
     }
     await fsyncDirectory(destinationDirectory);
     await fs.promises.unlink(temporaryPath);

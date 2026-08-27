@@ -6,7 +6,8 @@ const { WebSocket } = require('ws');
 const { resolveBridgeSessionRuntime } = require('./bridge-runtime-cleanup');
 
 const DEFAULT_MAX_TERMINALS = 6;
-const DEFAULT_REPLAY_BYTES = 2 * 1024 * 1024;
+const DEFAULT_REPLAY_BYTES = 64 * 1024 * 1024;
+const MAX_REPLAY_BYTES = 128 * 1024 * 1024;
 const MAX_INPUT_BYTES = 64 * 1024;
 const MIN_COLS = 20;
 const MAX_COLS = 400;
@@ -77,9 +78,9 @@ function createCodexTerminalManager(options) {
     DEFAULT_MAX_TERMINALS,
   );
   const maxReplayBytes = boundedInteger(
-    options.maxReplayBytes,
+    options.maxReplayBytes ?? environment.CODEX_INTERACTIVE_REPLAY_BYTES,
     64 * 1024,
-    16 * 1024 * 1024,
+    MAX_REPLAY_BYTES,
     DEFAULT_REPLAY_BYTES,
   );
   const terminationTimeoutMs = boundedInteger(
@@ -153,7 +154,14 @@ function createCodexTerminalManager(options) {
     for (const [target, label] of [[runtime.cwdDir, 'workspace'], [runtime.codexHome, 'Codex home']]) {
       let stat;
       try { stat = fs.statSync(target); } catch {}
-      if (!stat?.isDirectory()) throw terminalError(`The task ${label} is not available`);
+      if (!stat?.isDirectory()) {
+        if (label === 'Codex home') {
+          throw terminalError(
+            'The task Codex Home has expired; run the task once to recreate its Runtime before reconnecting',
+          );
+        }
+        throw terminalError(`The task ${label} is not available`);
+      }
     }
     return runtime;
   }
@@ -447,5 +455,7 @@ function createCodexTerminalManager(options) {
 module.exports = {
   boundedInteger,
   createCodexTerminalManager,
+  DEFAULT_REPLAY_BYTES,
+  MAX_REPLAY_BYTES,
   resolveCodexBinary,
 };

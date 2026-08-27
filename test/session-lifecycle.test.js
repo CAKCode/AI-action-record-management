@@ -2408,11 +2408,42 @@ test('authentication and same-origin checks protect remote-capable deployments',
     });
     const unauthorized = await request('/api/health', {}, root);
     assert.equal(unauthorized.response.status, 401);
+    const unauthenticatedSession = await fetch(`${root}/api/auth/session`);
+    assert.equal(unauthenticatedSession.status, 200);
+    assert.deepEqual(await unauthenticatedSession.json(), { ok: false });
     const authorized = await waitFor(async () => {
       const result = await request('/api/health', { headers: { authorization } }, root);
       return result.payload.runtime.workerAvailable ? result : null;
     });
     assert.equal(authorized.response.status, 200);
+
+    const login = await fetch(`${root}/api/auth/session`, {
+      method: 'POST',
+      headers: { authorization },
+    });
+    assert.equal(login.status, 200);
+    assert.match(login.headers.get('set-cookie') || '', /codex_task_session=[^;]+/);
+    assert.match(login.headers.get('set-cookie') || '', /HttpOnly/);
+    assert.match(login.headers.get('set-cookie') || '', /SameSite=Strict/);
+    const sessionCookie = (login.headers.get('set-cookie') || '').split(';', 1)[0];
+    const cookieAuthorized = await fetch(`${root}/api/health`, {
+      headers: { cookie: sessionCookie },
+    });
+    assert.equal(cookieAuthorized.status, 200);
+    const sessionStatus = await fetch(`${root}/api/auth/session`, {
+      headers: { cookie: sessionCookie },
+    });
+    assert.deepEqual(await sessionStatus.json(), { ok: true });
+
+    const logout = await fetch(`${root}/api/auth/session`, {
+      method: 'DELETE',
+      headers: { cookie: sessionCookie },
+    });
+    assert.equal(logout.status, 200);
+    assert.match(logout.headers.get('set-cookie') || '', /codex_task_session=;/);
+    const unauthenticatedAfterLogout = await fetch(`${root}/api/health`);
+    assert.equal(unauthenticatedAfterLogout.status, 401);
+
     const authCreated = await request('/api/sessions', {
       method: 'POST',
       headers: { authorization, 'x-request-id': 'authenticated-create' },
