@@ -67,6 +67,7 @@ const MAX_ATTRIBUTION_REASON_LENGTH = 2000;
 const MAX_SKILL_REPORT_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_PYTEST_MEDIA_MANIFEST_BYTES = 8 * 1024 * 1024;
 const MAX_PYTEST_MEDIA_RESOURCES = 10000;
+const MAX_PYTEST_ARTIFACT_ALIAS_ENTRIES = 20000;
 const SCHEDULE_CLAIM_TTL_MS = 15000;
 const DEFAULT_EXTERNAL_CHECK_SECONDS = 300;
 const MIN_EXTERNAL_CHECK_SECONDS = 5;
@@ -3177,7 +3178,9 @@ async function resolvePytestMediaResource(reference, baseDirectory, containmentR
     stat = await fs.promises.lstat(resourcePath);
   } catch (error) {
     if (error.code === 'ENOENT') {
-      throw statusError(`Pytest HTML media does not exist: ${reference}`, 409);
+      const missing = statusError(`Pytest HTML media does not exist: ${reference}`, 409);
+      missing.pytestResourceMissing = true;
+      throw missing;
     }
     throw error;
   }
@@ -3189,6 +3192,69 @@ async function resolvePytestMediaResource(reference, baseDirectory, containmentR
     throw statusError('Pytest HTML media must remain inside the execution working directory', 409);
   }
   return resolvedPath;
+}
+
+async function hardLinkedPytestArtifactDirectories(sourcePath, containmentRoot) {
+  const resolvedSourcePath = path.resolve(sourcePath);
+  if (!pathContains(containmentRoot, resolvedSourcePath)) return [];
+  let sourceStat;
+  try {
+    sourceStat = await fs.promises.lstat(resolvedSourcePath);
+  } catch {
+    return [];
+  }
+  if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || Number(sourceStat.nlink) < 2) return [];
+
+  const directories = new Set();
+  let variableDirectory = path.dirname(resolvedSourcePath);
+  while (variableDirectory !== containmentRoot && pathContains(containmentRoot, variableDirectory)) {
+    const parent = path.dirname(variableDirectory);
+    if (!pathContains(containmentRoot, parent)) break;
+    const suffix = path.relative(variableDirectory, resolvedSourcePath);
+    let entries;
+    try {
+      entries = await fs.promises.readdir(parent, { withFileTypes: true });
+    } catch {
+      variableDirectory = parent;
+      continue;
+    }
+    if (entries.length <= MAX_PYTEST_ARTIFACT_ALIAS_ENTRIES) {
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const sibling = path.join(parent, entry.name);
+        if (sibling === variableDirectory) continue;
+        const candidate = path.join(sibling, suffix);
+        let candidateStat;
+        try {
+          candidateStat = await fs.promises.lstat(candidate);
+        } catch (error) {
+          if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;
+          throw error;
+        }
+        if (candidateStat.isFile()
+          && !candidateStat.isSymbolicLink()
+          && candidateStat.dev === sourceStat.dev
+          && candidateStat.ino === sourceStat.ino) {
+          directories.add(path.dirname(candidate));
+        }
+      }
+    }
+    variableDirectory = parent;
+  }
+  return [...directories].sort();
+}
+
+async function resolvePytestMediaResourceFromDirectories(reference, directories, containmentRoot) {
+  let missingError = null;
+  for (const directory of directories) {
+    try {
+      return await resolvePytestMediaResource(reference, directory, containmentRoot);
+    } catch (error) {
+      if (!error.pytestResourceMissing) throw error;
+      missingError ||= error;
+    }
+  }
+  throw missingError || statusError(`Pytest HTML media does not exist: ${reference}`, 409);
 }
 
 function mediaReferencesInHtml(html) {
@@ -3495,9 +3561,10 @@ async function archivePytestMediaResources(htmlContent, options) {
   const warnings = [];
 
   async function descriptorFor(reference, baseDirectory) {
-    const resolvedPath = await resolvePytestMediaResource(
+    const baseDirectories = Array.isArray(baseDirectory) ? baseDirectory : [baseDirectory];
+    const resolvedPath = await resolvePytestMediaResourceFromDirectories(
       reference,
-      baseDirectory,
+      baseDirectories,
       options.containmentRoot,
     );
     const existing = descriptors.get(resolvedPath);
@@ -3586,9 +3653,17 @@ async function archivePytestMediaResources(htmlContent, options) {
     options.artifactId,
   ), { label: 'Skill report artifact resource directory' });
   const replacements = new Map();
+  const artifactDirectories = [
+    path.dirname(options.sourcePath),
+    ...await hardLinkedPytestArtifactDirectories(options.sourcePath, options.containmentRoot),
+  ];
+  const logReferences = new Set(options.logReferences || []);
   for (const reference of mediaReferencesInHtml(referenceHtml, options.logReferences)) {
     try {
-      const descriptor = await descriptorFor(reference, path.dirname(options.sourcePath));
+      const descriptor = await descriptorFor(
+        reference,
+        logReferences.has(reference) ? artifactDirectories : path.dirname(options.sourcePath),
+      );
       await archiveDescriptor(descriptor);
       replacements.set(reference, descriptor.url);
     } catch (error) {

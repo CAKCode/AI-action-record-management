@@ -1410,6 +1410,69 @@ test('pytest HTML archival preserves referenced HTML logs as managed resources',
   assert.equal(fs.readFileSync(path.join(logDirectory, logName), 'utf8'), logContent);
 });
 
+test('pytest HTML archival resolves logs beside a hard-linked report alias', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-hardlink-log-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-hardlink-log-worker');
+  const taskDirectory = path.join(projectDir, 'hardlink-log-task');
+  const reportDirectory = path.join(taskDirectory, 'business-report', 'full');
+  const trackedDirectory = path.join(taskDirectory, 'tracked-attempt', 'full');
+  const logDirectory = path.join(reportDirectory, 'logs');
+  const reportName = 'pytest-result.html';
+  const logName = 'case___hardlink__123.html';
+  const reportPath = path.join(reportDirectory, reportName);
+  const trackedPath = path.join(trackedDirectory, reportName);
+  const logContent = '<!doctype html><pre>hard-linked report log</pre>';
+  const aliasOnlyVideo = path.join(taskDirectory, 'business-report', 'videos', 'alias-only.mp4');
+  const html = [
+    `<!doctype html><button onclick="openLog('logs/${logName}')">Log</button>`,
+    '<a href="../videos/alias-only.mp4">Video</a>',
+  ].join('');
+  fs.mkdirSync(logDirectory, { recursive: true });
+  fs.mkdirSync(trackedDirectory, { recursive: true });
+  fs.mkdirSync(path.dirname(aliasOnlyVideo), { recursive: true });
+  fs.writeFileSync(reportPath, html, { mode: 0o600 });
+  fs.linkSync(reportPath, trackedPath);
+  fs.writeFileSync(path.join(logDirectory, logName), logContent, { mode: 0o600 });
+  fs.writeFileSync(aliasOnlyVideo, Buffer.from('video'), { mode: 0o600 });
+  const input = reportFixture({
+    reportKey: 'pytest-html:hardlink-log',
+    status: 'succeeded',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: `pytest -v tests --html ${trackedPath}`,
+      workingDirectory: projectDir,
+      status: 'succeeded',
+      exitCode: 0,
+    },
+  });
+  const { report: published } = publishArtifactReport(
+    taskId, runtime, input,
+    [{ key: 'normal', kind: 'pytest-html', path: trackedPath }],
+    { exitCode: 0 },
+  );
+
+  const archived = await store.archiveSkillReportArtifacts(taskId, published.id);
+  const [artifact] = archived.artifacts;
+  const resources = getDatabase().prepare(`
+    SELECT * FROM skill_report_artifact_resources WHERE artifact_id=?
+  `).all(artifact.id);
+  assert.equal(resources.length, 1);
+  const [resource] = resources;
+  assert.ok(resource);
+  assert.equal(resource.file_name, logName);
+  const resourceUrl = `/api/sessions/${taskId}/skill-reports/${published.id}`
+    + `/artifacts/${artifact.id}/resources/${resource.id}`;
+  const opened = await store.openSkillReportArtifactFile(taskId, published.id, artifact.id);
+  try {
+    const archivedHtml = await opened.fileHandle.readFile('utf8');
+    assert.doesNotMatch(archivedHtml, new RegExp(`logs/${logName}`));
+    assert.match(archivedHtml, new RegExp(resourceUrl));
+  } finally {
+    await opened.fileHandle.close();
+  }
+});
+
 test('pytest HTML remains openable when referenced logs exceed the artifact size limit', async () => {
   ensureReportSkill();
   const taskId = 'pytest-html-large-logtxt-task';
