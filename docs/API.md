@@ -318,7 +318,7 @@ Reset 保留 Task 的 ID、名称、目标、工作目录、备注、启停与�
 
 托管 Turn 直接把唯一的交互式 `codex` / `codex resume` TUI 进程接入 PTY；“Codex CLI”页签通过当前 Attempt 的只读输出 WebSocket 跟随同一 PTY，不会启动第二个 Codex 进程，也不会用 JSON 事件或后台 pytest 日志替代 CLI 内容。PTY 输出同时写入 Attempt stdout 和任务 transcript。runner 只从隔离 `CODEX_HOME` 的本次 rollout 增量读取结构化 `task_complete` / `turn_aborted` 事件作为 Turn 边界，并自动结束 TUI；Worker 随后从相同增量恢复 thread、Agent 消息和命令审计。显式交互 CLI 的最后一个浏览器连接断开后，默认保留 15 分钟供重连，随后自动结束；可用 `CODEX_INTERACTIVE_DISCONNECT_TIMEOUT_MS` 设置为 1000 至 86400000 毫秒，或设为 `0` 禁用自动结束。内存回放窗口默认 64 MiB，可用 `CODEX_INTERACTIVE_REPLAY_BYTES` 调整到 64 KiB 至 128 MiB；已结束任务的 transcript 不受该窗口限制，按完整字节校验后回放。
 
-托管 Turn 已结束且操作者显式点击“重连”后，页面才连接本端点并恢复任务绑定的 Codex thread；二进制帧是原始终端输出，文本控制帧用于 `status/error`，客户端文本消息支持现有的 `input/resize/interrupt/terminate` 操作。一个任务在任一时刻只允许一个 Codex CLI 进程，页面重连复用同一进程和内存回放窗口。页面 Codex CLI 内嵌视图最多追加 64 MiB 并保留 100,000 行滚动缓存，超过后提示使用完整原始输出入口；服务端 transcript 始终保存完整输出。
+托管 Turn 已结束且操作者显式点击“重连”后，页面才连接本端点并恢复任务绑定的 Codex thread；二进制帧是原始终端输出，文本控制帧用于 `status/error`，客户端文本消息支持现有的 `input/resize/interrupt/terminate` 操作。一个任务在任一时刻只允许一个 Codex CLI 进程，页面重连复用同一进程和内存回放窗口。首次打开超大 Attempt 输出时从最新 64 MiB 开始追赶，随后持续消费全部新输出并保留最新 100,000 行滚动缓存；超过后由终端淘汰最旧行，不会关闭 WebSocket 或停止后续输出。服务端 stdout 和 transcript 始终保存完整输出。
 
 每个 Task 的 Codex 进程使用独立的 `CODEX_HOME`，认证和基础配置从服务启动时固定的
 `CODEX_SOURCE_HOME`（默认 `$HOME/.codex`）复制。服务不会把当前 Shell 中继承的旧任务级
@@ -481,7 +481,7 @@ curl -fsS "$BASE_URL/api/sessions/verify-release/steps"
 
 `GET /api/sessions/:id/external-attempts?limit=100&offset=0&status=running`
 
-返回该任务登记的外部执行代次。主要字段包括 `stepRunId`、`originTurnId`、`originAttemptId`、`generation`、`status`、`pid`、`commandPath`、`command`、`logPath`、`donePath`、`statePath`、`metaPath`、`artifactDeclarations`、`lastObservation` 和结构化 `result`。`artifactDeclarations` 包含启动时登记的稳定 key、kind 和源路径；页面只从中提取文件名，并通过按 key 寻址的受控端点打开文件，不把路径作为 URL 参数。终态日志托管信息位于 `archiveStatus`、`archivedLogPath`、`archivedLogBytes`、`archivedLogSha256`、`archivedAt`、`archiveAttemptCount`、`archiveNextRetryAt` 和 `archiveError`；周期校验信息位于 `archiveVerifyStatus`、`archiveVerifyError`、`archiveVerifyCount`、`archiveVerifiedAt` 和 `archiveVerifyNextAt`。`command` 从后台 runner 生成的普通 `.cmd` 文件读取，不进行改写。DONE/STATE/META 提供业务终态；受管 cgroup 或身份已校验的进程组仍有成员时，记录继续保持 `running`。META 同时支持 JSON 和 `key=value`。
+返回该任务登记的外部执行代次。主要字段包括 `stepRunId`、`originTurnId`、`originAttemptId`、`skillInvocationId`、`skills`、`generation`、`status`、`pid`、`commandPath`、`command`、`logPath`、`donePath`、`statePath`、`metaPath`、`artifactDeclarations`、`lastObservation` 和结构化 `result`。`skills` 优先来自登记时正在执行的 `codex-skill-use` invocation；旧记录使用 `executionEvidence.externalAttemptId` 精确关联的 Skill Report，其次使用已经绑定的来源命令归因，不按名称、路径或命令关键字猜测。`artifactDeclarations` 包含启动时登记的稳定 key、kind 和源路径；页面只从中提取文件名，并通过按 key 寻址的受控端点打开文件，不把路径作为 URL 参数。终态日志托管信息位于 `archiveStatus`、`archivedLogPath`、`archivedLogBytes`、`archivedLogSha256`、`archivedAt`、`archiveAttemptCount`、`archiveNextRetryAt` 和 `archiveError`；周期校验信息位于 `archiveVerifyStatus`、`archiveVerifyError`、`archiveVerifyCount`、`archiveVerifiedAt` 和 `archiveVerifyNextAt`。`command` 从后台 runner 生成的普通 `.cmd` 文件读取，不进行改写。DONE/STATE/META 提供业务终态；受管 cgroup 或身份已校验的进程组仍有成员时，记录继续保持 `running`。META 同时支持 JSON 和 `key=value`。
 
 `startedAt` 是当前 generation 的证据时间下界。后台启动输出与显式登记关联到唯一的来源命令后，该下界会收紧到来源命令的开始时间；服务启动时也会修复已有来源关联。DONE/STATE/META 修改时间早于该值时不会被当作当前结果，文件名会出现在 `result.ignoredStaleArtifacts`。一个 Step Run 只能属于一条 chain，一条 chain 也不能跨 Step Run；同一 Step Run 同时只允许一个活动 generation。技术 Retry 使用 `--step-run-id` 复用 Run 和 chain，业务 Rerun 则用 `--run-kind rerun --source-run-key <key>` 创建同 Step 下的新 Run。冲突登记返回 `409`。
 
@@ -530,7 +530,7 @@ curl -fsS -D - "$BASE_URL/api/sessions/verify-release/external-attempts/external
 
 `GET /api/sessions/:id/scheduled-jobs?limit=100&offset=0&status=pending,dispatched`
 
-返回持久化调度记录，包括 `generation`、`sequence`、`dueAt`、`status`、`attemptCount`、`maxAttempts`、`commandId` 和 `lastError`。`payload` 保存恢复同一 Session 所需的自包含检查上下文。
+返回持久化调度记录，包括 `generation`、`sequence`、`dueAt`、`status`、`attemptCount`、`maxAttempts`、`commandId`、`lastError` 和继承自关联后台执行的 `skills`。`payload` 保存恢复同一 Session 所需的自包含检查上下文。调度器自身不是业务 Skill，不创建伪造的 Skill 调用记录。
 
 ```bash
 curl -fsS "$BASE_URL/api/sessions/verify-release/scheduled-jobs?limit=100"
@@ -606,11 +606,21 @@ curl -fsS "$BASE_URL/api/sessions/verify-release/executions?limit=100&offset=0"
 
 `declaredSkillIds` 来自命令开头的 `codex-skill-use` 显式声明；`skills` 是考虑人工修正后的当前有效归因；`skillAttributionHistory` 按新到旧返回所有运行时关联和人工修正。每条归因都冻结 Skill 版本和完整内容哈希。`unresolvedSkillIds` 表示命令声明了任务快照中不存在的 ID；此类包装器调用会在执行前失败，平台不会将无效 ID 记为有效 Skill。
 
+### 查询自动 Skill 调用
+
+`GET /api/sessions/:id/skill-invocations?limit=100&offset=0&turnId=:turnId`
+
+返回 `codex-skill-use` 在本地执行子进程前后自动写入的调用记录。每条记录包含 `id`、Task/Turn/Attempt、父调用、冻结的 Skill ID/版本/内容哈希、可执行文件名、状态、退出码、信号和起止时间。记录由包装器直接写入 SQLite，不依赖 Agent 生成报告，也不解析 Codex 外层工具事件，因此不会增加模型调用或新的 Turn。
+
+```bash
+curl -fsS "$BASE_URL/api/sessions/verify-release/skill-invocations?limit=100&offset=0"
+```
+
 ### 查询任务 Skill 使用情况
 
 `GET /api/sessions/:id/skill-usage`
 
-返回任务冻结快照和当前有效 Skill 使用汇总。快照中的每个 Skill 包含 `version`、`contentHash`、`commandCount`、`lastUsedAt` 和 `correctionCount`；`attributedCommandCount` 是至少关联一个有效 Skill 的命令数。任务首次运行前尚无快照时，`snapshot` 为 `null`。
+返回任务冻结快照和当前有效 Skill 使用汇总。快照中的每个 Skill 包含 `version`、`contentHash`、`commandCount`、`invocationCount`、`lastUsedAt` 和 `correctionCount`；`attributedCommandCount` 是至少关联一个有效 Skill 的命令数，顶层 `invocationCount` 是包装器自动记录的调用总数。任务首次运行前尚无快照时，`snapshot` 为 `null`。
 
 ```bash
 curl -fsS "$BASE_URL/api/sessions/verify-release/skill-usage"
@@ -645,9 +655,9 @@ curl -fsS "$BASE_URL/api/sessions/verify-release/skill-reports?limit=100&offset=
 
 每条记录包含报告所属的 `sessionId`、`stepRunId`、`turnId`、`attemptId`，冻结的 `skillId`、`skillVersion`、`skillContentHash`，以及 `reportKey`、`revision`、`reportHash`、`reportType`、状态、摘要、指标和通用区块。`observedAt` 是业务结果的观察时间，`publishedAt` 是平台持久化时间。所有新报告使用 Schema v2，必须显式提交 `artifacts` 数组；运行中和终态 Run 报告都提交 `executionEvidence.externalAttemptId`，平台由此绑定 `stepRunId`。同一 `reportKey` 的 revision 不能跨 Step Run。API 用 `artifactDeclarations` 返回该报告正文的原始声明；用只读 `registeredArtifacts` 返回关联 External Attempt 已登记文件的 `key`、`kind`、`fileName`、`executionStatus` 和受控快照 `url`，不返回源路径；用 `artifacts` 返回已经成功托管的文件元数据、摘要和正式打开 URL。
 
-平台只消费显式声明，或在当前报告发布时从具体 pytest `--html` 输出做受约束的补登记；不会从摘要、普通 Section 字段或旧 Task 猜测文件。自动补登记要求 External Attempt 属于当前 Task、具备有效 Turn/Attempt 来源，并且报告工作目录与 META 权威工作目录一致且路径在其中。运行中即可投影登记项，只有终态归档阶段才要求 External Attempt 已终态并使用 META 的权威工作目录完成证据校验。每个已知 pytest HTML 仍应在 `codex-background-track register` 时通过可重复的 `--artifact pytest-html:<stable-key>:<absolute-path>` 登记，平台立即显示登记项并在源文件生成后提供只读快照，随后自动合并到终态报告；这同时支持直接 pytest 和 wrapper。同一执行可登记多份 HTML，终态报告还可追加 Fail 分析 Markdown；单个文件缺失、超过 64 MiB 或校验失败不会阻塞其他声明，持久化归档任务会重试并保留失败证据。已成功归档的文件仍可打开。多个独立 pytest 应使用各自的 external attempt 和 `reportKey`，允许在同一目录并行；不同报告及其同名媒体使用隔离的托管命名空间。旧 Task 不做历史 artifact 补录。
+平台只消费显式声明，或在当前报告发布时从具体 pytest `--html` 输出做受约束的补登记；不会从摘要、普通 Section 字段或旧 Task 猜测文件。自动补登记要求 External Attempt 属于当前 Task、具备有效 Turn/Attempt 来源，并且报告工作目录与 META 权威工作目录一致且路径在其中。运行中即可投影登记项，只有终态归档阶段才要求 External Attempt 已终态并使用 META 的权威工作目录完成证据校验。每个已知 pytest HTML 仍应在 `codex-background-track register` 时通过可重复的 `--artifact pytest-html:<stable-key>:<absolute-path>` 登记，平台立即显示登记项并在源文件生成后提供只读快照，随后自动合并到终态报告；这同时支持直接 pytest 和 wrapper。同一执行可登记多份 HTML，终态报告还可追加 Fail 分析 Markdown。`codex-skill-report` 在发布事务中取得新 artifact 作业的租约并同步归档，Worker 不会并发复制同一批媒体；发布进程退出后 Worker 可在租约到期时接管，复制和摘要校验期间持续续租。单个文件缺失、超过 64 MiB、目录清理失败或校验失败不会覆盖已经成功托管的文件，持久化作业会重试并保留失败证据。相同 Step Run 的后续修订会逐个复用声明和源文件 SHA-256 均未变化的 artifact；新增失败分析等其他 artifact 不会让原有媒体重新归档，同路径内容变化时仍正常生成新归档。多个独立 pytest 应使用各自的 external attempt 和 `reportKey`，允许在同一目录并行；不同报告及其同名媒体使用隔离的托管命名空间。旧 Task 不做历史 artifact 补录。
 
-报告引用的本地 `logs/*.txt` 在总量未超过 64 MiB artifact 上限时以内嵌只读文本形式归档；若内嵌全部唯一日志会使 HTML 超限，HTML 报告本体仍会归档并可打开，日志改为该 artifact 下的独立受认证文本资源，链接不会降级为 `Log omitted: artifact size limit` 占位。`cloud-recording-test` 或 `cloud-recording-gw-deploy` 已实际执行而未发布任何报告时，平台会在终态写入一份标记为 fallback 的受控报告，保留状态、退出码和已登记运行证据；它不能替代 Skill 应发布的运行中和完整终态修订。
+报告引用的本地 `logs/*.txt` 在总量未超过 64 MiB artifact 上限时以内嵌只读文本形式归档；若内嵌全部唯一日志会使 HTML 超限，HTML 报告本体仍会归档并可打开，日志改为该 artifact 下的独立受认证文本资源，链接不会降级为 `Log omitted: artifact size limit` 占位。独立日志资源不占用媒体清单和分片的 10,000 项额度，因此大型并发报告不会因视频资源先达到上限而漏掉后续 case 日志。`cloud-recording-test`、`cloud-recording-gw-deploy` 或 `rtsc-cicd-deploy` 已实际执行但最新报告仍为非终态时，平台会在 Task 进入待审核状态时写入一份标记为 fallback 的终态报告；测试兜底使用 External Attempt，部署兜底优先使用该 Skill 最后的非发布命令，避免后续 pytest 退出码污染部署状态。CICD/GW 上报契约只要求开始和结束两个 revision；业务轨迹只投影每个 `reportKey` 的首条开始和最后一条终态结束，已有中间 revision 继续保留在历史 API 中但不显示为业务节点。其他类型报告仍只投影最新 revision。
 
 ```json
 [
@@ -704,14 +714,50 @@ curl -fsS "$BASE_URL/api/sessions/verify-release/skill-reports?limit=100&offset=
 
 该端点以内联方式返回已经归档并通过完整性校验的报告 artifact，任务完成归档后仍可打开。pytest HTML 使用 CSP sandbox，不从原 pytest 工作目录读取；归档时已将安全的 pytest `logs/*.txt` 相对引用内嵌为文本数据，并把本地播放器脚本内嵌到 HTML，因此报告中的 `loc` 和媒体播放器不依赖原脚本目录。Fail 分析报告以 `text/markdown; charset=utf-8` 返回。`HEAD` 执行相同的归属和完整性校验，返回与 `GET` 一致的类型、长度、内联处置和安全响应头，但不读取或发送正文。托管文件缺失、路径归属不符或摘要不一致时返回 `409`。
 
+平台还会把历史 pytest-html video 报告中精确匹配的 jsDelivr HLS、FLV、DASH 和 Shaka
+脚本替换为平台随代码托管并经 SHA-256 校验的兼容内联资源；旧 HLS.js 1.5.15 URL 使用
+支持 HEVC MPEG-TS 解析的 1.7.1 资源。HTML CSP 允许这些内联脚本、
+媒体 Blob 以及播放器 Blob Worker，但不允许任意第三方脚本，因此播放不依赖客户端访问 CDN。
+
 `GET|HEAD /api/sessions/:id/skill-reports/:reportId/artifacts/:artifactId/resources/:resourceId`
 
 返回该 HTML artifact 归档的本地媒体子资源。HTML 中普通或 entity 编码的 `href`、`src`、
 `data-src` 会改写到此端点；MP4、MP3、M3U8、TS、M4S、FLV、WebM、MPD 等资源分别保留
-正确媒体类型。M3U8 的本地依赖和 MPD 显式引用也使用同一 artifact 的资源 URL。端点先校验
+正确媒体类型。AVIF、BMP、GIF、JPEG、PNG、SVG、WebP 图片链接和 pytest-html
+`data-jsonblob` 中结构化 `extras.image` 本地文件也会归档并改写。M3U8 的本地依赖和 MPD
+显式引用也使用同一 artifact 的资源 URL。端点先校验
 Task、报告、artifact、资源四级归属和文件摘要，支持 HEAD、完整 GET、单段 `Range: bytes=...`
 及 `206 Content-Range`；无效或不可满足的 Range 返回 `416`。每个 HTML artifact 拥有独立
 资源命名空间，同一 Task 多个 pytest/HTML 即使来自同一工作目录并使用同名文件也不会覆盖。
+平台读取历史 pytest-html logtxt 报告时，会把复用 iframe 的旧 Log 按钮精确升级为每次打开
+替换 iframe browsing context；新日志加载期间不会继续显示上一 case 的正文，归档文件本身不变。
+Audio、AV、Video M3U8 同时挂载时，共享的子清单和分片按解析后的真实路径去重；M3U8 标签中
+单双引号形式的本地 `URI=` 都会归档和改写。平台在托管 HTML 中为 M3U8、MPD 和 FLV 资源
+URL 附加格式 fragment；fragment 不进入 HTTP 请求和鉴权签名，仅用于兼容按 URL 后缀选择
+HLS、DASH 或 FLV 引擎的历史 pytest-html video 播放器。
+
+托管 pytest HTML 打开时，平台还会为每个顶层 M3U8 计算浏览器播放源。同一资源目录中存在
+同基名 MP4（优先精确基名，其次 `_0.mp4`）时直接复用该 MP4，不创建媒体副本；否则使用
+`GET|HEAD /api/sessions/:id/skill-reports/:reportId/artifacts/:artifactId/resources/:resourceId/playback`
+先使用原 HLS；仅在浏览器实际检测到首段视频缓冲缺失并跳到非零时间后，才通过
+`playback` 端点调用 FFmpeg，以 `-c copy` 无重新编码地封装成 MP4。生成结果按 M3U8 SHA-256 在当前 Task 的
+隐藏播放缓存中只保留一份，支持 HTTP Range，并随 Task 的删除或 30 天保留清理一起删除。
+原 M3U8、分片及报告展示名称保持不变；该兼容层也适用于已经归档的历史报告。
+
+`GET|POST /api/sessions/:id/skill-reports/:reportId/artifacts/:artifactId/viewed-media`
+
+读取或登记该 pytest HTML artifact 的共享视频已查看状态。`GET` 批量返回 `mediaKeys` 和包含
+`mediaKey`、`viewedAt` 的 `viewed` 数组；`POST` 接受 `{ "mediaKey": "..." }`，首次登记返回
+`201`，重复登记幂等返回 `200` 并保留首次 `viewedAt`。平台不记录查看人。归档 HTML 响应会
+注入平台适配器，在 sandbox 中通过当前 artifact 专属的写入能力令牌登记点击，并在打开或刷新
+报告时恢复所有电脑共享的 `(viewed)` 状态；能力令牌不能读取报告或修改其他 artifact。
+适配器优先使用 video 插件提供的 `data-media-key`，旧报告则回退到归档资源 ID。
+`pytest-html-video-viewed`、`pytest-html-video-request-viewed-state` 和
+`pytest-html-video-viewed-state` CustomEvent 构成后续 video 插件的低耦合交互协议。
+初次加载会恢复全部已查看链接；后续 DOM 变化只处理新增元素子树，标题、Loading 文本和播放器
+状态变化不会重新扫描整份报告。平台还会在读取时精确替换已知旧版 video Observer，使历史归档
+获得相同的增量行为，而不改写归档文件。
+状态保存在 SQLite，删除 artifact、报告或 Session 时通过外键级联清理。
 
 `sensitive` 区块和 `json` 区块在服务端规范化时会强制 `defaultExpanded=false`，前端也会再次强制折叠。这只是展示策略：API 仍返回完整内容，不提供字段级脱敏或访问隔离。测试分析模式会保留报告和 artifact 中的完整 AK、SK、Token、Authorization、Cookie、密码等测试证据，也不会因命中凭据特征而中断任务。部署方必须限制这些接口及备份数据的访问。报告生产规范和完整 Schema 见 [Skill 结构化报告](SKILL_REPORTS.md)。
 

@@ -57,7 +57,7 @@ test('dry run protects active work and leaves all source directories untouched',
   const activeRun = writeRun(activeVideos, 'active-run', 31 * DAY_MS, nowMs);
   const db = new Database(item.dbPath);
   db.prepare('INSERT INTO tasks(id, status, working_dir) VALUES (?, ?, ?)')
-    .run('active-task', 'running', activeRoot);
+    .run('active-task', 'running', activeRun);
   db.close();
 
   try {
@@ -75,6 +75,41 @@ test('dry run protects active work and leaves all source directories untouched',
     assert.equal(result.roots[0].candidateCount, 0);
     assert.equal(result.roots[1].skipped[0].reason, 'active_or_pending_reference');
     assert.equal(fs.existsSync(activeRun), true);
+  } finally {
+    cleanupFixture(item);
+  }
+});
+
+test('a broad active project root does not hide unrelated old runs and recent child output stays protected', () => {
+  const item = fixture();
+  const nowMs = Date.parse('2026-08-24T00:00:00.000Z');
+  const oldRun = writeRun(item.videos, 'old-unrelated-run', 31 * DAY_MS, nowMs);
+  const recentOutputRun = writeRun(item.videos, 'recent-output-run', 31 * DAY_MS, nowMs);
+  fs.utimesSync(
+    path.join(recentOutputRun, 'clip.mp4'),
+    new Date(nowMs - DAY_MS),
+    new Date(nowMs - DAY_MS),
+  );
+  const db = new Database(item.dbPath);
+  db.prepare('INSERT INTO tasks(id, status, working_dir) VALUES (?, ?, ?)')
+    .run('project-root-task', 'running', path.dirname(item.videos));
+  db.close();
+
+  try {
+    const result = runCleanup({
+      roots: [item.videos],
+      dataDir: item.dataDir,
+      runtimeDir: item.runtimeDir,
+      backupDir: path.join(item.dataDir, 'backups'),
+      dbPath: item.dbPath,
+      auditPath: path.join(item.runtimeDir, 'audit.ndjson'),
+      lockPath: path.join(item.runtimeDir, 'cleanup.lock'),
+      nowMs,
+    });
+    assert.deepEqual(result.roots[0].candidates.map((candidate) => candidate.path), [oldRun]);
+    assert.equal(result.roots[0].skipped.some((entry) => (
+      entry.sourcePath === recentOutputRun && entry.reason === 'contains_recent_output'
+    )), true);
   } finally {
     cleanupFixture(item);
   }

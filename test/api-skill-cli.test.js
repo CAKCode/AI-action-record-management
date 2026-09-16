@@ -164,6 +164,13 @@ test.before(async () => {
       }]));
       return;
     }
+    if (request.url === '/api/sessions/task-1/skill-invocations?limit=20&offset=5&turnId=turn-1') {
+      response.end(JSON.stringify([{
+        id: 'skill-invocation-1', status: 'succeeded',
+        skills: [{ skillId: 'cloud-recording-test', version: 1 }],
+      }]));
+      return;
+    }
     if (request.url === '/api/sessions') {
       response.end(JSON.stringify([{ id: 'large-output', notes: 'x'.repeat(4 * 1024 * 1024) }]));
       return;
@@ -332,6 +339,14 @@ test('API Skill CLI sends typed authenticated requests and preserves failure sem
   assert.equal(reports.status, 0, reports.stderr);
   assert.equal(JSON.parse(reports.stdout)[0].revision, 2);
   assert.equal(requests.at(-1).url, '/api/sessions/task-1/skill-reports?limit=20&offset=5&history=1');
+
+  const invocations = await runCli([
+    '--compact', 'task', 'skill-invocations', 'task-1',
+    '--limit', '20', '--offset', '5', '--turn-id', 'turn-1',
+  ]);
+  assert.equal(invocations.status, 0, invocations.stderr);
+  assert.equal(JSON.parse(invocations.stdout)[0].id, 'skill-invocation-1');
+  assert.equal(requests.at(-1).url, '/api/sessions/task-1/skill-invocations?limit=20&offset=5&turnId=turn-1');
 
   const requestCount = requests.length;
   const unconfirmed = await runCli(['task', 'delete', 'task-1']);

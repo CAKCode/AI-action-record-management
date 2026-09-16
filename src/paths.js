@@ -25,7 +25,7 @@ const WORKSPACE_CODEX_SKILLS_DIR = process.env.WORKSPACE_CODEX_SKILLS_DIR
   ? path.resolve(process.env.WORKSPACE_CODEX_SKILLS_DIR)
   : path.join(ROOT_DIR, '.codex', 'skills');
 const SKILL_SNAPSHOTS_DIR = path.join(RUNTIME_DIR, 'skill-snapshots');
-const DEFAULT_TASK_WORKSPACE_ROOT = path.join(path.dirname(ROOT_DIR), '.connect2cli-task-workspaces');
+const DEFAULT_TASK_WORKSPACE_ROOT = path.dirname(ROOT_DIR);
 const TASK_WORKSPACE_ROOTS = String(process.env.CODEX_TASK_WORKSPACE_ROOTS || DEFAULT_TASK_WORKSPACE_ROOT)
   .split(path.delimiter)
   .map((entry) => entry.trim())

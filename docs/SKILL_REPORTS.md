@@ -30,7 +30,7 @@ codex-skill-use cloud-recording-test -- \
 
 每份报告都必须显式包含 `artifacts` 数组；没有文件时使用 `[]`。运行中和终态 Run 报告都把 `codex-background-track register` 返回的 `TRACKING_ID` 写入 `executionEvidence.externalAttemptId`；平台由此写入并返回 `stepRunId`。启动时已经知道的每份 HTML 应同时通过可重复的 `--artifact pytest-html:<stable-key>:<absolute-path>` 登记到 External Attempt。若运行中报告遗漏了这一步，平台会在 `primaryExecution.command` 含有具体 pytest `--html` 输出、且报告工作目录与 External Attempt 的 META 工作目录一致时安全补登记；不满足这些条件不会猜测文件。运行中报告发布后，平台立即以 `registeredArtifacts` 返回登记项的安全展示字段和受控快照 URL，不返回源路径；平台再把登记项自动合并进每一版终态报告并归档。终态才生成的 Fail Markdown 由终态报告显式追加。报告 revision、后台执行和 artifact 必须属于同一 Step Run。
 
-`cloud-recording-test` 和 `cloud-recording-gw-deploy` 在终态时如已被命令归因使用、但尚未发布任何报告，平台会生成一份 `platform-fallback:*` 报告，避免业务报告页为空。该报告明确标注为兜底，只包含平台已经持久化的任务状态、退出码与后台证据；Skill 仍必须发布运行中和完整的终态修订，才能提供业务指标、失败明细和产物声明。
+`cloud-recording-test`、`cloud-recording-gw-deploy` 和 `rtsc-cicd-deploy` 在 Task 进入待审核状态时，如已有 `codex-skill-use` 自动 invocation 或旧命令归因、但最新报告仍是 `pending`、`running` 或 `unknown`，平台会生成一份 `platform-fallback:*` 终态报告，避免业务轨迹缺少结论。测试兜底使用关联的 External Attempt 状态；部署兜底优先使用该 Skill 最后的非 `codex-skill-report` invocation，旧数据再使用命令归因，避免后续 pytest 的退出码覆盖部署结果。该报告明确标注为兜底，只包含平台已经持久化的状态与退出码。CICD/GW 每个 `reportKey` 只要求开始和结束两个 revision；业务轨迹只投影首条开始和最后一条终态结束，历史中间 revision 仍保留用于审计但不再显示为业务节点。其他报告仍只投影最新 revision。
 
 ## Schema v2
 
@@ -84,17 +84,63 @@ Section 仍可展示路径，但不参与归档。每个不超过 64 MiB 的普�
 查看不依赖原任务目录；该日志同样必须是执行目录内的普通文件，单文件不得超过 64 MiB。
 同一日志被重复引用时只归档一份，避免大规模失败报告将日志重复内嵌后超过 HTML 上限。
 若内嵌全部唯一日志会使 HTML 超过 64 MiB，平台将日志作为该 HTML artifact 的独立受认证
-文本资源归档并改写链接，而不是写入 `Log omitted: artifact size limit` 占位。
+文本资源归档并改写链接，而不是写入 `Log omitted: artifact size limit` 占位。独立日志资源
+不占用媒体清单和分片的 10,000 项额度，媒体达到上限也不会使后续 case 日志退回项目相对路径。
+Log 弹窗每次打开都会替换 iframe browsing context，再加载当前 case 的日志；这避免慢响应期间
+短暂显示上一 case 的 iframe 内容。平台也会在读取时升级已归档报告中的旧按钮，无需重新归档。
 
 HTML 中 `href`、`src` 或 `data-src` 引用的本地 MP4、MP3、M3U8、TS、M4S、FLV、WebM、
-MPD 等音视频资源会复制到该 HTML artifact 独有的资源命名空间，并改写为受控资源 URL；
-pytest-html `data-jsonblob` 中经过 HTML entity 编码的链接也会处理。本地播放器脚本会内嵌到
-托管 HTML。M3U8 清单及其本地子清单、分片、初始化段和密钥会递归归档；MPD 中显式列出的
+MPD，以及 AVIF、BMP、GIF、JPEG、PNG、SVG、WebP 图片会复制到该 HTML artifact 独有的
+资源命名空间，并改写为受控资源 URL；pytest-html `data-jsonblob` 中经过 HTML entity 编码的
+链接和结构化 `extras.image` 本地文件引用也会处理。本地播放器脚本会内嵌到
+托管 HTML；历史报告中精确匹配受支持版本的 jsDelivr HLS、FLV、DASH 和 Shaka 脚本也会由
+平台内置、摘要校验的兼容资源替换，不依赖查看报告的电脑访问外网。旧 HLS.js 1.5.15 URL
+使用支持 HEVC MPEG-TS 解析的 1.7.1 资源；最终 HEVC 解码仍取决于客户端浏览器和系统。
+M3U8 清单及其本地子清单、分片、初始化段和密钥会递归归档；MPD 中显式列出的
 本地资源会归档。资源端点支持 HEAD 和单段 HTTP Range，浏览器可以拖动和按需读取媒体。
+Audio、AV 和 Video M3U8 可以同时作为 HTML 顶层链接；同一路径又被其他清单引用时，每个
+artifact 只归档一份唯一资源。M3U8 标签内单双引号形式的本地 `URI=` 都会递归解析和改写。
+托管 HTML 返回时会根据资源登记信息为 M3U8、MPD 和 FLV 链接附加不参与 HTTP 请求的格式
+fragment，使依赖原文件后缀选择播放器的历史报告继续进入 HLS、DASH 或 FLV 播放分支；新版
+video 插件同时使用独立的 `data-media-format`，不再依赖托管 URL 的命名形式。
+平台服务托管 HTML 时会为 M3U8 注入浏览器兼容播放源：同一资源目录存在同基名 MP4 时直接
+复用已有 MP4；没有配套 MP4 时先使用原 HLS，仅当浏览器检测到首段视频缓冲缺失并自动跳到
+非零时间后，才由 FFmpeg 使用 stream copy 按需封装一份 MP4。封装结果按
+原 M3U8 SHA-256 缓存在当前 Task 的 `skill-report-artifacts/.playback-cache`，并发请求共享同一
+生成任务，后续请求复用同一文件。缓存不写入 SQLite、不作为新的报告资源或长期媒体副本，
+会随 Task 删除和 30 天保留清理一起移除。此逻辑在读取时注入，因此历史归档不需要重新发布。
+如果 HTML 因测试包装器或平台命名规范被硬链接到别名目录，平台先按 HTML 声明目录解析，
+仅在引用文件不存在时，回退到与该 HTML 具有相同 inode 的真实目录；回退仍只归档引用图中的
+清单和分片，不扫描或复制整个 `videos` 目录。为避免歧义，测试插件应让 HTML、`videos/` 和
+`logs/` 位于同一 Run 根目录，并登记最终真实 HTML 路径。推荐调用方式为
+`--html task/<run-id>/report/result.html --html-video-source-dir ../videos`；video 插件从源目录
+复制到该 Run 的 `videos/`，平台只从这份项目副本归档。
 资源必须是执行目录内的普通文件；某个资源已经丢失时，平台保留原链接并写入
 `skill.report.artifact.media_partial` 工作日志，不阻塞 HTML 报告本体和其他可用资源归档。
 每份 HTML 使用独立命名空间，即使同一 Task 的多个 pytest 在同一个工作目录并行执行、
 生成同名媒体文件，各报告也不会在托管存储中互相覆盖。
+
+对于遵循 `task/<run-id>/report/result.html` 布局的 Run，平台在 HTML 和全部媒体依赖归档成功、
+没有 `media_partial` 警告，并确认 `videos` 中每个文件都已登记为同一 Step Run 的托管资源后，
+删除该 Run 的项目临时目录 `task/<run-id>/videos`。未挂载文件会让整个目录保留并产生
+`skill.report.project_media_cleanup_deferred` 工作日志。这只删除项目本地副本；平台不从此路径
+推导或删除 `/data/jenkins/videos` 等源目录。目录检查或删除失败由 artifact 作业按原租约重试；
+不符合该布局的历史报告不自动清理项目文件。
+
+`codex-skill-report` 在发布新报告的同一事务中取得其 artifact 作业租约并完成归档，Worker 不会
+并发复制同一份媒体；发布进程异常退出后，Worker 在租约到期时接管。相同 `reportKey` 的后续
+修订中的每个 artifact 如果 Step Run、key、kind、绝对路径和源文件 SHA-256 与历史修订一致，
+会直接复用最近一次完整归档的 artifact URL；即使本次修订新增失败分析等其他 artifact，
+未变化的 HTML 和媒体也不会重复归档。相同路径的 HTML 内容发生变化时仍创建新的独立归档。
+
+平台托管报告的 video viewed 状态以 HTML artifact 为作用域存入 SQLite，不区分查看人。任意
+电脑点击后，其他电脑重新打开或刷新同一 artifact 即会显示 `(viewed)`。平台适配器兼容旧版
+`.vm_video_link`，并约定新版 video 插件为链接提供稳定 `data-media-key`，点击时发送
+`pytest-html-video-viewed` CustomEvent；平台通过 `pytest-html-video-viewed-state` 批量回传状态。
+Viewed 状态初次恢复后，平台和新版 video 插件都只检查新增 DOM 子树；播放器标题和加载文字
+变化不会触发全报告链接扫描。平台在服务历史 artifact 时会精确替换已知旧版 video Observer，
+因此旧报告无需重归档。
+直接打开本地 HTML 仍由插件自己的浏览器存储处理，不依赖平台接口。
 
 同一 Task 的多个独立后台 pytest 应先登记为明确的 Step Run，再分别使用各自的 `TRACKING_ID` 和 `reportKey` 上报，可以在同一目录并行执行。Step 是 `normal`、`long` 等稳定范围；Rerun 是同 Step 下的新 Run；技术 Retry 复用 `STEP_RUN_ID`，只增加 External Attempt generation。一个受控后台命令内连续执行多个 pytest，或一次执行产生多个 HTML 时，启动登记重复提交 `--artifact`，终态报告统一继承。不同报告和不同 HTML artifact 的托管目录相互隔离。
 

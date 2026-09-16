@@ -172,7 +172,7 @@ let protectionPollTimer = null;
 const API_REQUEST_TIMEOUT_MS = 30000;
 const DASHBOARD_REQUEST_TIMEOUT_MS = 8000;
 const INLINE_ATTEMPT_OUTPUT_MAX_BYTES = 5 * 1024 * 1024;
-const CODEX_CLI_DISPLAY_MAX_BYTES = 64 * 1024 * 1024;
+const CODEX_CLI_INITIAL_REPLAY_MAX_BYTES = 64 * 1024 * 1024;
 const CODEX_CLI_SCROLLBACK_LINES = 100000;
 const ATTEMPT_OUTPUT_CHUNK_BYTES = 256 * 1024;
 const ATTEMPT_OUTPUT_POLL_INTERVAL_MS = 750;
@@ -222,11 +222,11 @@ const messages = {
     filterCurrent: '当前任务', filterRunning: '工作中', filterHistory: '历史记录',
     skillsNote: '任务首次启动时冻结平台 Skill 与 Codex Skill 快照，恢复时保持版本一致。', newSkill: '新建 Skill', importSkillZip: '导入 ZIP',
     taskId: '任务 ID', eventType: '事件类型', searchAudit: '搜索操作内容', filter: '筛选', persistentSession: '持久 Session',
-    businessSummary: '任务摘要', agentRecords: 'Agent 记录', worklog: 'Agent 工作记录', taskTerminal: 'Codex CLI', commands: 'Agent 命令', background: '后台与调度', operations: '操作审计', continuePlaceholder: '输入启动或恢复这个任务的指令',
+    businessSummary: '任务摘要', agentRecords: 'Agent 记录', worklog: 'Agent 工作记录', skillInvocations: 'Skill 调用', noSkillInvocations: '本 Session 暂无自动记录的 Skill 调用。', taskTerminal: 'Codex CLI', commands: 'Agent 命令', background: '后台与调度', operations: '操作审计', continuePlaceholder: '输入启动或恢复这个任务的指令',
     cliConnecting: '正在连接', cliConnected: '已连接', cliDisconnected: '连接已断开', cliEnded: 'CLI 已结束', cliReconnect: '重新连接', cliInterrupt: '中断', cliClear: '清屏', cliTerminate: '结束 CLI', cliReadOnly: '只读', cliUnlockInput: '解锁输入', cliInputUnlocked: '允许输入',
     interactiveCliConflict: '该任务仍有正在运行的 Codex CLI。请在任务详情的「Codex CLI」页签点击「结束 CLI」，然后重新{operation}。', taskOperationRunning: '启动任务', taskOperationDeleting: '删除任务', taskOperationCompleting: '完成任务', taskOperationResetting: '重置上下文', taskOperationRetry: '执行此操作',
     businessCommands: '主要执行', businessExecution: '业务执行', executionRuns: '执行记录', repeatedRuns: '重复执行', primarySkill: '实际执行 Skill',
-    businessTimeline: '业务轨迹', taskTimeline: '任务轨迹', businessResult: '业务结果', regressionCommands: 'pytest 回归命令', currentStage: '当前阶段', currentStatus: '当前状态', taskCreated: '任务已创建', structuredResult: '结构化结果', requestReceived: '收到提测报告', testExecutionStarted: '执行测试', deploymentCompleted: '部署完成', initialRegression: '首轮回归', regressionRerun: 'Rerun', followupBooked: '预约回查', initialCompleted: '首轮完成', rerunCompleted: 'Rerun 完成', failureAnalysis: 'Fail 分析', failureAnalysisCompleted: 'Fail 分析完成', failureAnalysisPending: '已检测到 analyze-failures 执行，等待结构化分析结论。', failureAnalysisUnreported: '已使用 analyze-failures，结构化分析结论尚未登记。', runInProgress: '第 {number} 次 pytest 正在执行。', finalResult: '最终结果', currentResult: '当前结果', waitingForTestResult: '等待业务测试结果', noPytestRuns: '暂无 pytest 回归记录', scheduledFor: '回查时间', startedAtShort: '开始', finishedAtShort: '结束', pytestCommand: 'PYTEST COMMAND', skillUsed: '使用 Skill', cicdDeployment: 'CI/CD 部署', gwDeployment: 'GW 部署', serviceDeployment: '服务部署', exitCodeSummary: '退出码 {code}', testRunNumber: '第 {number} 次回归',
+    businessTimeline: '业务轨迹', taskTimeline: '任务轨迹', businessResult: '业务结果', regressionCommands: 'pytest 回归命令', currentStage: '当前阶段', currentStatus: '当前状态', taskCreated: '任务已创建', structuredResult: '结构化结果', requestReceived: '收到提测报告', testExecutionStarted: '执行测试', deploymentStarted: '开始', deploymentFinished: '结束', deploymentCompleted: '部署完成', initialRegression: '首轮回归', regressionRerun: 'Rerun', followupBooked: '预约回查', initialCompleted: '首轮完成', rerunCompleted: 'Rerun 完成', failureAnalysis: 'Fail 分析', failureAnalysisCompleted: 'Fail 分析完成', failureAnalysisPending: '已检测到 analyze-failures 执行，等待结构化分析结论。', failureAnalysisUnreported: '已使用 analyze-failures，结构化分析结论尚未登记。', runInProgress: '第 {number} 次 pytest 正在执行。', finalResult: '最终结果', currentResult: '当前结果', waitingForTestResult: '等待业务测试结果', noPytestRuns: '暂无 pytest 回归记录', scheduledFor: '回查时间', startedAtShort: '开始', finishedAtShort: '结束', pytestCommand: 'PYTEST COMMAND', skillUsed: '使用 Skill', cicdDeployment: 'CI/CD 部署', gwDeployment: 'GW 部署', serviceDeployment: '服务部署', exitCodeSummary: '退出码 {code}', testRunNumber: '第 {number} 次回归',
     overviewTitle: '持久任务总览', overviewSubtitle: '一个任务对应一个独立、可恢复、可审计的 Codex Session。',
     tasksTitle: '任务 Session', tasksSubtitle: '每轮执行后等待确认；只有明确完成的 Session 才进入只读历史。',
     skillsTitle: 'Skills 管理', skillsSubtitle: '管理平台 Skill，并查看当前 Codex Runtime 可发现的内置 Skills。',
@@ -262,11 +262,11 @@ const messages = {
     filterCurrent: 'Current', filterRunning: 'Running', filterHistory: 'History',
     skillsNote: 'A versioned snapshot of managed and built-in Codex skills is frozen on the first task turn.', newSkill: 'New Skill', importSkillZip: 'Import ZIP',
     taskId: 'Task ID', eventType: 'Event type', searchAudit: 'Search operations', filter: 'Filter', persistentSession: 'Persistent Session',
-    businessSummary: 'Task Summary', agentRecords: 'Agent Records', worklog: 'Agent Worklog', taskTerminal: 'Codex CLI', commands: 'Agent Commands', background: 'Background & Schedule', operations: 'Operation Audit', continuePlaceholder: 'Enter instructions to start or recover this task',
+    businessSummary: 'Task Summary', agentRecords: 'Agent Records', worklog: 'Agent Worklog', skillInvocations: 'Skill Invocations', noSkillInvocations: 'No automatically recorded Skill invocation exists for this Session.', taskTerminal: 'Codex CLI', commands: 'Agent Commands', background: 'Background & Schedule', operations: 'Operation Audit', continuePlaceholder: 'Enter instructions to start or recover this task',
     cliConnecting: 'Connecting', cliConnected: 'Connected', cliDisconnected: 'Disconnected', cliEnded: 'CLI ended', cliReconnect: 'Reconnect', cliInterrupt: 'Interrupt', cliClear: 'Clear', cliTerminate: 'End CLI', cliReadOnly: 'Read only', cliUnlockInput: 'Unlock input', cliInputUnlocked: 'Input enabled',
     interactiveCliConflict: 'This task has an active Codex CLI. Open the Codex CLI tab, select End CLI, then try to {operation} again.', taskOperationRunning: 'start the task', taskOperationDeleting: 'delete the task', taskOperationCompleting: 'complete the task', taskOperationResetting: 'reset the context', taskOperationRetry: 'perform this operation',
     businessCommands: 'Primary Executions', businessExecution: 'Business execution', executionRuns: 'Runs', repeatedRuns: 'Repeated', primarySkill: 'Executing Skill',
-    businessTimeline: 'Business Timeline', taskTimeline: 'Task Timeline', businessResult: 'Business result', regressionCommands: 'pytest regression commands', currentStage: 'Current stage', currentStatus: 'Current status', taskCreated: 'Task created', structuredResult: 'Structured result', requestReceived: 'Test request received', testExecutionStarted: 'Test execution started', deploymentCompleted: 'Deployment completed', initialRegression: 'Initial regression', regressionRerun: 'Rerun', followupBooked: 'Follow-up scheduled', initialCompleted: 'Initial run completed', rerunCompleted: 'Rerun completed', failureAnalysis: 'Failure analysis', failureAnalysisCompleted: 'Failure analysis completed', failureAnalysisPending: 'analyze-failures is active; waiting for the structured analysis result.', failureAnalysisUnreported: 'analyze-failures was used; no structured analysis result has been recorded yet.', runInProgress: 'pytest run #{number} is in progress.', finalResult: 'Final result', currentResult: 'Current result', waitingForTestResult: 'Waiting for business test result', noPytestRuns: 'No pytest regression recorded', scheduledFor: 'Check at', startedAtShort: 'Started', finishedAtShort: 'Finished', pytestCommand: 'PYTEST COMMAND', skillUsed: 'Skill', cicdDeployment: 'CI/CD deployment', gwDeployment: 'GW deployment', serviceDeployment: 'Service deployment', exitCodeSummary: 'Exit code {code}', testRunNumber: 'Regression #{number}',
+    businessTimeline: 'Business Timeline', taskTimeline: 'Task Timeline', businessResult: 'Business result', regressionCommands: 'pytest regression commands', currentStage: 'Current stage', currentStatus: 'Current status', taskCreated: 'Task created', structuredResult: 'Structured result', requestReceived: 'Test request received', testExecutionStarted: 'Test execution started', deploymentStarted: 'Started', deploymentFinished: 'Finished', deploymentCompleted: 'Deployment completed', initialRegression: 'Initial regression', regressionRerun: 'Rerun', followupBooked: 'Follow-up scheduled', initialCompleted: 'Initial run completed', rerunCompleted: 'Rerun completed', failureAnalysis: 'Failure analysis', failureAnalysisCompleted: 'Failure analysis completed', failureAnalysisPending: 'analyze-failures is active; waiting for the structured analysis result.', failureAnalysisUnreported: 'analyze-failures was used; no structured analysis result has been recorded yet.', runInProgress: 'pytest run #{number} is in progress.', finalResult: 'Final result', currentResult: 'Current result', waitingForTestResult: 'Waiting for business test result', noPytestRuns: 'No pytest regression recorded', scheduledFor: 'Check at', startedAtShort: 'Started', finishedAtShort: 'Finished', pytestCommand: 'PYTEST COMMAND', skillUsed: 'Skill', cicdDeployment: 'CI/CD deployment', gwDeployment: 'GW deployment', serviceDeployment: 'Service deployment', exitCodeSummary: 'Exit code {code}', testRunNumber: 'Regression #{number}',
     overviewTitle: 'Persistent Task Overview', overviewSubtitle: 'Each task owns one independent, recoverable, auditable Codex session.',
     tasksTitle: 'Task Sessions', tasksSubtitle: 'Every turn waits for review; only explicitly completed sessions become read-only history.',
     skillsTitle: 'Skills', skillsSubtitle: 'Manage platform skills and inspect built-in skills discoverable by the Codex runtime.',
@@ -1024,7 +1024,38 @@ function skillReportSection(section) {
   </details>`;
 }
 
-function reportArtifactLinks(artifacts, registeredArtifacts = [], reportStatus = '') {
+function reportArtifactNameFromPath(value) {
+  const pathParts = String(value || '').split(/[\\/]/).filter(Boolean);
+  const fileName = pathParts.at(-1) || '';
+  if (/^result\.html?$/i.test(fileName) && pathParts.length >= 3 && pathParts.at(-2) === 'report') {
+    return `${pathParts.at(-3)}.html`;
+  }
+  return fileName;
+}
+
+function reportArtifactDisplayName(artifact, declarations, fallbackLabel) {
+  const fileName = String(artifact?.fileName || '').trim() || tr(fallbackLabel);
+  const displayFileName = String(artifact?.displayFileName || '').trim();
+  if (displayFileName) return displayFileName;
+  const artifactKey = String(artifact?.key || '').trim();
+  if (artifact?.kind !== 'pytest-html' || !/^result\.html?$/i.test(fileName)) return fileName;
+  const declaration = (declarations || []).find((candidate) => (
+    candidate?.kind === artifact.kind && String(candidate.key || '') === artifactKey
+  ));
+  return reportArtifactNameFromPath(declaration?.path) || (artifactKey ? `${artifactKey}.html` : fileName);
+}
+
+function reportArtifactViewerUrl(artifactUrl, displayName) {
+  const parameters = new URLSearchParams({ artifact: artifactUrl, title: displayName });
+  return `/report-viewer.html?${parameters}`;
+}
+
+function reportArtifactLinks(
+  artifacts,
+  registeredArtifacts = [],
+  reportStatus = '',
+  artifactDeclarations = [],
+) {
   const groups = [
     { kind: 'pytest-html', label: 'pytestHtmlReport', action: 'openHtmlReport' },
     { kind: 'failure-analysis-markdown', label: 'failureAnalysisReport', action: 'openMarkdownReport' },
@@ -1040,12 +1071,16 @@ function reportArtifactLinks(artifacts, registeredArtifacts = [], reportStatus =
     if (!reports.length && !registrations.length) return '';
     return `<div class="report-artifacts">
       <span>${escapeHtml(tr(group.label))}</span>
-      ${reports.map((artifact) => `<a href="${escapeHtml(artifact.url)}" target="_blank" rel="noopener"><strong>${escapeHtml(artifact.fileName || tr(group.label))}</strong><small>${escapeHtml(formatBytes(artifact.bytes || 0))}</small><b>${escapeHtml(tr(group.action))}</b></a>`).join('')}
+      ${reports.map((artifact) => {
+    const displayName = reportArtifactDisplayName(artifact, artifactDeclarations, group.label);
+    return `<a href="${escapeHtml(reportArtifactViewerUrl(artifact.url, displayName))}" target="_blank" rel="noopener"><strong>${escapeHtml(displayName)}</strong><small>${escapeHtml(formatBytes(artifact.bytes || 0))}</small><b>${escapeHtml(tr(group.action))}</b></a>`;
+  }).join('')}
       ${registrations.map((artifact) => {
     const running = artifact.executionStatus === 'running' || reportStatus === 'running';
-    const content = `<strong>${escapeHtml(artifact.fileName || tr(group.label))}</strong><b>${escapeHtml(tr(running ? 'artifactRegisteredRunning' : 'artifactRegisteredPending'))}</b>`;
+    const displayName = reportArtifactDisplayName(artifact, artifactDeclarations, group.label);
+    const content = `<strong>${escapeHtml(displayName)}</strong><b>${escapeHtml(tr(running ? 'artifactRegisteredRunning' : 'artifactRegisteredPending'))}</b>`;
     return artifact.url
-      ? `<a class="report-artifact-pending" href="${escapeHtml(artifact.url)}" target="_blank" rel="noopener">${content}</a>`
+      ? `<a class="report-artifact-pending" href="${escapeHtml(reportArtifactViewerUrl(artifact.url, displayName))}" target="_blank" rel="noopener">${content}</a>`
       : `<div class="report-artifact-pending">${content}</div>`;
   }).join('')}
     </div>`;
@@ -1070,11 +1105,18 @@ function reportsWithRegisteredArtifacts(reports, externalAttempts) {
       const fileName = artifactFileName(artifact.path);
       if (!key || !fileName) continue;
       const identity = `${artifact.kind}\0${key}`;
-      if (!registered.has(identity)) {
+      const existing = registered.get(identity);
+      const displayFileName = reportArtifactNameFromPath(artifact.path);
+      if (existing) {
+        if (displayFileName && displayFileName !== existing.fileName) {
+          registered.set(identity, { ...existing, displayFileName });
+        }
+      } else {
         registered.set(identity, {
           key,
           kind: artifact.kind,
           fileName,
+          ...(displayFileName !== fileName ? { displayFileName } : {}),
           executionStatus: attempt.status,
         });
       }
@@ -1527,6 +1569,42 @@ function deploymentCategory(value) {
   return '';
 }
 
+function businessTimelineReports(reports) {
+  const deploymentGroups = groupedBy(
+    (reports || []).filter((report) => deploymentCategory(report)),
+    (report) => report.reportKey || report.id,
+  );
+  const deploymentReports = deploymentGroups.flatMap((group) => {
+    const revisions = [...group].sort((left, right) => (
+      (Number(left.revision) || 0) - (Number(right.revision) || 0)
+      || Date.parse(left.publishedAt || 0) - Date.parse(right.publishedAt || 0)
+    ));
+    const first = revisions[0];
+    const latest = revisions.at(-1);
+    const firstIsTerminal = !['pending', 'running', 'unknown'].includes(first.status);
+    const latestIsTerminal = !['pending', 'running', 'unknown'].includes(latest.status);
+    if (firstIsTerminal) return [{ ...latest, deploymentBoundary: 'finished' }];
+    if (first === latest) return [{ ...first, deploymentBoundary: 'started' }];
+    return [
+      { ...first, deploymentBoundary: 'started' },
+      ...(latestIsTerminal ? [{ ...latest, deploymentBoundary: 'finished' }] : []),
+    ];
+  });
+  const latestOtherReports = latestReportRevisions(reports)
+    .filter((report) => !deploymentCategory(report));
+  return [...latestOtherReports, ...deploymentReports].sort((left, right) => (
+    (Date.parse(left.observedAt || left.publishedAt || 0)
+      - Date.parse(right.observedAt || right.publishedAt || 0))
+      || (Number(left.revision) || 0) - (Number(right.revision) || 0)
+  ));
+}
+
+function deploymentTimelineTitle(report) {
+  const category = deploymentCategory(report);
+  const boundary = report.deploymentBoundary === 'finished' ? 'deploymentFinished' : 'deploymentStarted';
+  return `${tr(category)} · ${tr(boundary)}`;
+}
+
 function isFailureAnalysisReport(report) {
   const source = `${report?.skillId || ''} ${report?.reportType || ''}`.toLowerCase();
   const hasFailureSection = (report?.sections || []).some((section) => (
@@ -1705,7 +1783,12 @@ function businessRegressionHtml(run, index) {
     </header>
     <div class="business-regression-meta"><span>${escapeHtml(tr('startedAtShort'))}</span><time datetime="${escapeHtml(run.startedAt || '')}">${escapeHtml(formatTimelineTime(run.startedAt))}</time>${skills}</div>
     <div class="business-regression-command"><span>${escapeHtml(tr('pytestCommand'))}</span><pre><b aria-hidden="true">$</b> ${escapeHtml(run.command)}</pre></div>
-    ${reportArtifactLinks(run.report?.artifacts, run.report?.registeredArtifacts, run.report?.status)}
+    ${reportArtifactLinks(
+      run.report?.artifacts,
+      run.report?.registeredArtifacts,
+      run.report?.status,
+      run.report?.artifactDeclarations,
+    )}
     ${completion}
   </article>`;
 }
@@ -1874,14 +1957,14 @@ function generalTaskSummaryTimeline(task, reports, externalAttempts, scheduledJo
     tone: 'info',
   }];
   const executionsById = new Map((executions || []).map((execution) => [execution.id, execution]));
+  const timelineReports = businessTimelineReports(reports);
 
-  for (const report of latestReportRevisions(reports).sort((left, right) => (
-    Date.parse(left.observedAt || left.publishedAt || 0) - Date.parse(right.observedAt || right.publishedAt || 0)
-  ))) {
+  for (const report of timelineReports) {
+    const category = deploymentCategory(report);
     events.push({
       at: report.observedAt || report.publishedAt || task.updatedAt,
       sortOrder: 30,
-      title: report.title || tr('structuredResult'),
+      title: category ? deploymentTimelineTitle(report) : (report.title || tr('structuredResult')),
       detail: report.summary || reportMetricSummary(report) || tr('structuredResult'),
       status: normalizedExecutionStatus(report.status, report.primaryExecution?.exitCode),
       skillIds: [report.skillId].filter(Boolean),
@@ -1929,7 +2012,7 @@ function generalTaskSummaryTimeline(task, reports, externalAttempts, scheduledJo
     </header>
     ${businessExecutionList(reports, externalAttempts)}
     <section class="business-milestones">
-      <div class="business-summary-section-head"><span class="section-label">${escapeHtml(tr('taskTimeline'))}</span><strong>${events.length}</strong></div>
+      <div class="business-summary-section-head"><span class="section-label">${escapeHtml(tr(timelineReports.some(deploymentCategory) ? 'businessTimeline' : 'taskTimeline'))}</span><strong>${events.length}</strong></div>
       <ol class="business-timeline">${businessTimelineHtml(events)}</ol>
     </section>
   </section>`;
@@ -1962,24 +2045,20 @@ function businessSummaryTimeline(task, reports, externalAttempts, scheduledJobs,
       skillIds: run.skillIds,
     });
   });
-  const latestDeploymentReports = new Map();
-  for (const report of [...(reports || [])].sort((left, right) => (
-    Date.parse(left.publishedAt || 0) - Date.parse(right.publishedAt || 0)
-  ))) {
-    if (deploymentCategory(report)) latestDeploymentReports.set(report.reportKey, report);
-  }
-  for (const report of latestDeploymentReports.values()) {
+  const deploymentReports = businessTimelineReports(reports)
+    .filter((report) => deploymentCategory(report));
+  for (const report of deploymentReports) {
     events.push({
       at: report.observedAt || report.publishedAt,
       sortOrder: 20,
-      title: tr(deploymentCategory(report)),
+      title: deploymentTimelineTitle(report),
       detail: report.summary,
       status: normalizedExecutionStatus(report.status),
       skillIds: [report.skillId],
     });
   }
 
-  const deploymentReportSkills = new Set([...latestDeploymentReports.values()].map((report) => report.skillId));
+  const deploymentReportSkills = new Set(deploymentReports.map((report) => report.skillId));
   for (const execution of executions || []) {
     const deploymentSkillIds = executionSkillIds(execution).filter((skillId) => deploymentCategory({ skillId }));
     if (!deploymentSkillIds.length || deploymentSkillIds.some((skillId) => deploymentReportSkills.has(skillId))) continue;
@@ -2112,7 +2191,12 @@ function skillReportList(reports) {
       <p class="business-report-summary">${escapeHtml(report.summary)}</p>
       ${metrics}
       <div class="business-report-meta"><span>${escapeHtml(tr('reportRevision'))} #${Number(report.revision || 0)}</span>${observed}<span>${escapeHtml(tr('reportPublishedAt'))} <time>${escapeHtml(formatTime(report.publishedAt))}</time></span></div>
-      ${reportArtifactLinks(report.artifacts, report.registeredArtifacts, report.status)}
+      ${reportArtifactLinks(
+      report.artifacts,
+      report.registeredArtifacts,
+      report.status,
+      report.artifactDeclarations,
+    )}
       <div class="report-sections">${(report.sections || []).map(skillReportSection).join('')}</div>
       <details class="report-raw"><summary>${escapeHtml(tr('reportRawPayload'))}</summary><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre></details>
     </article>`;
@@ -2140,13 +2224,18 @@ function shortHash(value) {
   return hash ? hash.slice(0, 12) : '-';
 }
 
+function skillChipsHtml(skills, showEmpty = false) {
+  if (!skills?.length) {
+    return showEmpty ? `<span class="attribution-empty">${escapeHtml(tr('noAttributedSkills'))}</span>` : '';
+  }
+  return skills.map((skill) => `<span class="attribution-chip" title="${escapeHtml(`${tr('contentHash')}: ${skill.contentHash || '-'}`)}"><strong>${escapeHtml(skill.skillId)}</strong><code>v${Number(skill.version || 0)} · ${escapeHtml(shortHash(skill.contentHash))}</code></span>`).join('');
+}
+
 function skillAttributionBlock(execution) {
   const skills = execution.skills || [];
   const history = execution.skillAttributionHistory || [];
   const unresolved = execution.unresolvedSkillIds || [];
-  const chips = skills.length
-    ? skills.map((skill) => `<span class="attribution-chip" title="${escapeHtml(`${tr('contentHash')}: ${skill.contentHash}`)}"><strong>${escapeHtml(skill.skillId)}</strong><code>v${Number(skill.version)} · ${escapeHtml(shortHash(skill.contentHash))}</code></span>`).join('')
-    : `<span class="attribution-empty">${escapeHtml(tr('noAttributedSkills'))}</span>`;
+  const chips = skillChipsHtml(skills, true);
   const unresolvedNotice = unresolved.length
     ? `<div class="attribution-warning"><span>${escapeHtml(tr('unresolvedSkills'))}</span><code>${escapeHtml(unresolved.join(', '))}</code></div>`
     : '';
@@ -2232,11 +2321,33 @@ function executionList(executions) {
   return `<div class="execution-turn-list">${turns.map(executionTurnGroup).join('')}</div>`;
 }
 
-function agentRecordsList(worklogEvents, executions) {
+function skillInvocationList(invocations) {
+  if (!invocations.length) return `<div class="empty-state">${escapeHtml(tr('noSkillInvocations'))}</div>`;
+  return `<div class="execution-list skill-invocation-list">${invocations.map((invocation) => `
+    <article class="execution-item skill-invocation-item">
+      <div class="execution-head">
+        <div><code>${escapeHtml(invocation.id)}</code><span class="status-badge ${escapeHtml(invocation.status)}">${escapeHtml(tr(invocation.status))}</span></div>
+        <time>${escapeHtml(formatTime(invocation.finishedAt || invocation.startedAt))}</time>
+      </div>
+      <div class="execution-meta">
+        <span>${escapeHtml(tr('attempt'))} <code>${escapeHtml(invocation.attemptId || '-')}</code></span>
+        <span>${escapeHtml(tr('exitCode'))} <code>${invocation.exitCode == null ? '-' : Number(invocation.exitCode)}</code></span>
+        ${invocation.signal ? `<span>${escapeHtml(tr('signal'))} <code>${escapeHtml(invocation.signal)}</code></span>` : ''}
+        ${invocation.commandName ? `<span>${escapeHtml(tr('fullCommand'))} <code>${escapeHtml(invocation.commandName)}</code></span>` : ''}
+      </div>
+      <div class="attribution-chips">${skillChipsHtml(invocation.skills, true)}</div>
+    </article>`).join('')}</div>`;
+}
+
+function agentRecordsList(worklogEvents, executions, invocations = []) {
   return `<div class="agent-records">
     <section class="agent-record-section">
       <header class="agent-record-section-head"><h3>${escapeHtml(tr('worklog'))}</h3></header>
       <div class="event-list">${worklogEventList(worklogEvents)}</div>
+    </section>
+    <section class="agent-record-section">
+      <header class="agent-record-section-head"><h3>${escapeHtml(tr('skillInvocations'))}</h3></header>
+      ${skillInvocationList(invocations)}
     </section>
     <section class="agent-record-section">
       <header class="agent-record-section-head"><h3>${escapeHtml(tr('commands'))}</h3></header>
@@ -3079,10 +3190,12 @@ function managedCodexTerminalStream(task, attempts = [], externalAttempts = []) 
   const attempt = runningAttempt || attempts[0];
   if (attempt) {
     const outputFormat = attempt.stdoutFormat === 'codex-jsonl' ? 'codex-jsonl' : 'raw';
+    const stdoutBytes = Math.max(0, Number(attempt.stdoutBytes || 0));
     return {
       kind: 'attempt',
       id: attempt.id,
       outputFormat,
+      initialOffset: Math.max(0, stdoutBytes - CODEX_CLI_INITIAL_REPLAY_MAX_BYTES),
       ...(outputFormat === 'raw' ? {
         cols: MANAGED_CODEX_TERMINAL_COLUMNS,
         rows: MANAGED_CODEX_TERMINAL_ROWS,
@@ -3246,18 +3359,8 @@ function connectManagedCodexTerminalSocket(view, task) {
     if (state.codexTerminalView !== view || view.socket !== socket) return;
     if (typeof event.data !== 'string') {
       const bytes = new Uint8Array(event.data);
-      const remaining = Math.max(0, CODEX_CLI_DISPLAY_MAX_BYTES - view.offset);
-      const accepted = bytes.subarray(0, remaining);
-      if (accepted.byteLength) {
-        writeManagedCodexTerminalOutput(view, view.decoder.decode(accepted, { stream: true }));
-        view.offset += accepted.byteLength;
-      }
-      if (accepted.byteLength < bytes.byteLength || view.offset >= CODEX_CLI_DISPLAY_MAX_BYTES) {
-        writeManagedCodexTerminalOutput(view, view.decoder.decode(), true);
-        view.ended = true;
-        updateCodexTerminalStatus(view, 'ended', tr('inlineOutputLimit'));
-        try { socket.close(1000, 'Inline output limit reached'); } catch {}
-      }
+      writeManagedCodexTerminalOutput(view, view.decoder.decode(bytes, { stream: true }));
+      view.offset += bytes.byteLength;
       return;
     }
     let message;
@@ -3389,7 +3492,7 @@ function initializeCodexTerminal(task, managedStream = null) {
     inputUnlocked: false,
     reconnectAttempts: 0,
     reconnectTimer: null,
-    offset: 0,
+    offset: managed ? Number(managedStream.initialOffset || 0) : 0,
     decoder: null,
     outputFormatter: null,
     outputPositioned: false,
@@ -3500,6 +3603,7 @@ function backgroundTrackingList(externalAttempts, scheduledJobs) {
         ${job.finishedAt && job.dueAt ? `<span>${escapeHtml(tr('scheduledDueAt'))} <time datetime="${escapeHtml(job.dueAt)}">${escapeHtml(formatTimelineTime(job.dueAt))}</time></span>` : ''}
         ${job.commandId ? `<span>COMMAND <code>${escapeHtml(job.commandId)}</code></span>` : ''}
       </div>
+      ${job.skills?.length ? `<div class="attribution-chips">${skillChipsHtml(job.skills)}</div>` : ''}
       ${presentation.detail ? `<div class="execution-context"><span>${escapeHtml(presentation.detailLabel)}</span><p>${escapeHtml(presentation.detail)}</p></div>` : ''}
     </article>`;
   };
@@ -3531,6 +3635,7 @@ function backgroundTrackingList(externalAttempts, scheduledJobs) {
           ${timing.finishedAt && timing.startedAt ? `<span>${escapeHtml(tr('processStartedAt'))} <time datetime="${escapeHtml(timing.startedAt)}">${escapeHtml(formatTimelineTime(timing.startedAt))}</time></span>` : ''}
           ${platformConfirmation}
         </div>
+        ${attempt.skills?.length ? `<div class="attribution-chips">${skillChipsHtml(attempt.skills)}</div>` : ''}
         <div class="execution-context tracking-paths">
           <span>${escapeHtml(tr('commandPath'))}</span><code>${escapeHtml(attempt.commandPath || '-')}</code>
           <span>${escapeHtml(tr('logPath'))}</span><code>${escapeHtml(attempt.logPath || '-')}</code>
@@ -4306,6 +4411,16 @@ async function loadOptionalSkillReports(taskId, signal, options = {}) {
   return Array.isArray(reports) ? reports : [];
 }
 
+async function loadOptionalSkillInvocations(taskId, signal, options = {}) {
+  const limit = Number(options.limit || 100);
+  const offset = Number(options.offset || 0);
+  const invocations = await api(
+    `/api/sessions/${encodeURIComponent(taskId)}/skill-invocations?limit=${limit}&offset=${offset}`,
+    { signal, acceptedStatuses: [404] },
+  );
+  return Array.isArray(invocations) ? invocations : [];
+}
+
 function updateBackgroundTabAvailability(externalAttempts, scheduledJobs) {
   const tab = $('#detailTabs [data-tab="background"]');
   if (!tab) return;
@@ -4393,17 +4508,23 @@ async function loadTaskConsole(options = {}) {
       return;
     }
     if (detailTab === 'agent-records') {
-      const [worklogPage, executionPage] = await Promise.all([
+      const [worklogPage, invocationPage, executionPage] = await Promise.all([
         api(`/api/sessions/${encodeURIComponent(taskId)}/worklogs?limit=${state.detailPageSize + 1}&offset=${state.detailOffset}`, { signal: controller.signal }),
+        loadOptionalSkillInvocations(taskId, controller.signal, {
+          limit: state.detailPageSize + 1,
+          offset: state.detailOffset,
+        }),
         api(`/api/sessions/${encodeURIComponent(taskId)}/executions?limit=${state.detailPageSize + 1}&offset=${state.detailOffset}`, { signal: controller.signal }),
       ]);
       if (controller.signal.aborted || state.currentTaskId !== taskId || state.detailTab !== detailTab) return;
       state.detailHasOlder = worklogPage.length > state.detailPageSize
+        || invocationPage.length > state.detailPageSize
         || executionPage.length > state.detailPageSize;
       const worklogEvents = worklogPage.slice(-state.detailPageSize);
+      const invocations = invocationPage.slice(0, state.detailPageSize);
       const executions = executionPage.slice(0, state.detailPageSize);
       state.currentExecutions = executions;
-      renderTaskConsoleHtml(output, detailPage(agentRecordsList(worklogEvents, executions)));
+      renderTaskConsoleHtml(output, detailPage(agentRecordsList(worklogEvents, executions, invocations)));
       return;
     }
     if (detailTab === 'background') {

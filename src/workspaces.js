@@ -1,9 +1,6 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  ROOT_DIR,
-  DATA_DIR,
-  RUNTIME_DIR,
   TASK_WORKSPACE_ROOTS,
 } = require('./paths');
 const { ensureDir } = require('./utils');
@@ -37,16 +34,6 @@ function resolveWorkingDir(value) {
   });
   if (!allowed) throw workspaceError('Working directory is outside the configured task workspace roots');
 
-  const forbidden = [ROOT_DIR, DATA_DIR, RUNTIME_DIR].map((entry) => {
-    try {
-      return fs.realpathSync(entry);
-    } catch {
-      return path.resolve(entry);
-    }
-  });
-  if (forbidden.some((entry) => pathContains(entry, resolved) || pathContains(resolved, entry))) {
-    throw workspaceError('Working directory must be isolated from platform source, data, and runtime directories');
-  }
   return resolved;
 }
 

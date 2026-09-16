@@ -2,10 +2,11 @@
 
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const YAML = require('yaml');
-const { archiveSkillReportArtifacts, publishSkillReport } = require('../../src/store');
+const { processSkillReportArtifactJob, publishSkillReport } = require('../../src/store');
 const { closeDatabase } = require('../../src/database');
 const { MAX_REPORT_BYTES } = require('../../src/skill-report');
 
@@ -67,8 +68,18 @@ async function main() {
     }
     const input = readReport(options.file);
     assertActiveSkill(input);
-    const published = publishSkillReport(taskId, input, { turnId, attemptId });
-    const report = await archiveSkillReportArtifacts(taskId, published.id);
+    const artifactJobOwner = `skill-report-cli:${process.pid}:${crypto.randomUUID()}`;
+    const published = publishSkillReport(taskId, input, {
+      turnId,
+      attemptId,
+      artifactJobOwner,
+    });
+    let report = published;
+    if (!published.idempotent && published.artifactDeclarations.length && !published.artifacts.length) {
+      const result = await processSkillReportArtifactJob(published.id, artifactJobOwner);
+      if (!result.ok) throw new Error(result.error || 'Skill report artifact archival failed');
+      report = result.report;
+    }
     process.stdout.write([
       `SKILL_REPORT_ID=${report.id}`,
       `STEP_RUN_ID=${report.stepRunId}`,

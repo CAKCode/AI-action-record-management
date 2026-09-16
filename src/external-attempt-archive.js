@@ -101,6 +101,7 @@ async function openDigestedRegularFile(filePath, options = {}) {
   const hash = crypto.createHash('sha256');
   const buffer = Buffer.allocUnsafe(COPY_CHUNK_BYTES);
   let position = 0;
+  let nextProgressAt = PROGRESS_INTERVAL_BYTES;
   try {
     while (position < Number(before.size)) {
       throwIfReadAborted(options.signal);
@@ -109,6 +110,10 @@ async function openDigestedRegularFile(filePath, options = {}) {
       if (!bytesRead) throw archiveError('Managed archive ended before its recorded size', 'ARCHIVE_FILE_CHANGED');
       hash.update(buffer.subarray(0, bytesRead));
       position += bytesRead;
+      if (position >= nextProgressAt) {
+        await options.onProgress?.({ bytes: position, expectedBytes: Number(before.size) });
+        nextProgressAt = position + PROGRESS_INTERVAL_BYTES;
+      }
     }
     const after = await handle.stat({ bigint: true });
     let pathAfter;
@@ -146,11 +151,11 @@ async function digestRegularFile(filePath, options = {}) {
   }
 }
 
-async function digestExistingArchive(filePath) {
+async function digestExistingArchive(filePath, options = {}) {
   let lastError;
   for (let attempt = 1; attempt <= EXISTING_ARCHIVE_VERIFY_ATTEMPTS; attempt += 1) {
     try {
-      return await digestRegularFile(filePath);
+      return await digestRegularFile(filePath, options);
     } catch (error) {
       lastError = error;
       if (error.code !== 'ARCHIVE_FILE_CHANGED' || attempt === EXISTING_ARCHIVE_VERIFY_ATTEMPTS) {
@@ -191,7 +196,7 @@ async function archiveFileAtomically(options) {
   await assertArchiveDirectory(destinationDirectory);
   try {
     await fs.promises.lstat(destinationPath);
-    return await digestExistingArchive(destinationPath);
+    return await digestExistingArchive(destinationPath, { onProgress });
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
@@ -264,7 +269,7 @@ async function archiveFileAtomically(options) {
       published = true;
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      return await digestExistingArchive(destinationPath);
+      return await digestExistingArchive(destinationPath, { onProgress });
     }
     await fsyncDirectory(destinationDirectory);
     await fs.promises.unlink(temporaryPath);

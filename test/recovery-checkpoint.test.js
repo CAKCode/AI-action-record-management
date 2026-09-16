@@ -187,6 +187,7 @@ test('v1 checkpoints remain verifiable when later optional counters are absent',
   delete manifest.database.tableCounts.skill_reports;
   delete manifest.database.tableCounts.skill_report_artifacts;
   delete manifest.database.tableCounts.skill_report_artifact_resources;
+  delete manifest.database.tableCounts.skill_report_artifact_media_views;
   delete manifest.database.tableCounts.skill_report_artifact_jobs;
   delete manifest.source.excluded.legacyMigration;
   delete manifest.source.excluded.bridgeCodexSessions;
@@ -198,6 +199,7 @@ test('v1 checkpoints remain verifiable when later optional counters are absent',
   assert.equal(Object.hasOwn(record.database.tableCounts, 'skill_reports'), false);
   assert.equal(Object.hasOwn(record.database.tableCounts, 'skill_report_artifacts'), false);
   assert.equal(Object.hasOwn(record.database.tableCounts, 'skill_report_artifact_resources'), false);
+  assert.equal(Object.hasOwn(record.database.tableCounts, 'skill_report_artifact_media_views'), false);
   assert.equal(Object.hasOwn(record.database.tableCounts, 'skill_report_artifact_jobs'), false);
   assert.equal(Object.hasOwn(record.source.excluded, 'legacyMigration'), false);
   assert.equal(Object.hasOwn(record.source.excluded, 'bridgeCodexSessions'), false);

@@ -40,12 +40,66 @@ if (unknown.length) fail(`Skill not present in this task snapshot: ${unknown.joi
 
 const [command, ...args] = process.argv.slice(separator + 1);
 const executable = BUNDLED_COMMANDS.has(command) ? path.join(__dirname, command) : command;
+const runtimeContext = {
+  taskId: String(process.env.CODEX_TASK_ID || ''),
+  turnId: String(process.env.CODEX_TASK_TURN_ID || ''),
+  attemptId: String(process.env.CODEX_TASK_ATTEMPT_ID || ''),
+};
+const managedInvocation = Object.values(runtimeContext).every(Boolean);
+let invocationId = '';
+
+function invocationWarning(action, error) {
+  process.stderr.write(`codex-skill-use: could not record invocation ${action}: ${error.message}\n`);
+}
+
+function closeInvocationDatabase() {
+  try { require('../../src/database').closeDatabase(); } catch {}
+}
+
+if (managedInvocation) {
+  try {
+    const invocation = require('../../src/store').startSkillInvocation({
+      ...runtimeContext,
+      parentInvocationId: process.env.CODEX_SKILL_INVOCATION_ID,
+      skillIds,
+      commandName: path.basename(command),
+    });
+    invocationId = invocation.id;
+  } catch (error) {
+    invocationWarning('start', error);
+  } finally {
+    closeInvocationDatabase();
+  }
+}
+
 const child = spawn(executable, args, {
   stdio: 'inherit',
-  env: { ...process.env, CODEX_ACTIVE_SKILL_IDS: skillIds.join(',') },
+  env: {
+    ...process.env,
+    CODEX_ACTIVE_SKILL_IDS: skillIds.join(','),
+    ...(invocationId ? { CODEX_SKILL_INVOCATION_ID: invocationId } : {}),
+  },
 });
-child.on('error', (error) => fail(`cannot start ${command}: ${error.message}`, 127));
+let invocationFinished = false;
+
+function finishInvocation(exitCode, signal = '') {
+  if (!invocationId || invocationFinished) return;
+  invocationFinished = true;
+  try {
+    require('../../src/store').finishSkillInvocation(invocationId, { exitCode, signal });
+  } catch (error) {
+    invocationWarning('finish', error);
+  } finally {
+    closeInvocationDatabase();
+  }
+}
+
+child.on('error', (error) => {
+  finishInvocation(127);
+  fail(`cannot start ${command}: ${error.message}`, 127);
+});
 child.on('exit', (code, signal) => {
+  finishInvocation(code, signal);
   if (signal) {
     try {
       process.kill(process.pid, signal);

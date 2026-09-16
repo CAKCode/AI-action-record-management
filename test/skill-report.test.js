@@ -472,6 +472,414 @@ test('terminal pytest reports archive concrete --html output inside the executio
   }
 });
 
+test('pytest HTML viewed media state is shared, idempotent, and cascades with its Task', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-viewed-media-task';
+  const taskRuntime = createRunningTask(taskId, 'pytest-html-viewed-media-worker');
+  const reportPath = path.join(projectDir, 'pytest-html-viewed-media.html');
+  fs.writeFileSync(
+    reportPath,
+    '<!doctype html><a class="vm_video_link" data-media-key="video:one">Video</a>',
+    { mode: 0o600 },
+  );
+  const input = reportFixture({
+    reportKey: 'pytest-html:viewed-media',
+    status: 'succeeded',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: `pytest -v tests --html ${reportPath}`,
+      workingDirectory: projectDir,
+      status: 'succeeded',
+      exitCode: 0,
+    },
+  });
+  const { report } = publishArtifactReport(
+    taskId,
+    taskRuntime,
+    input,
+    [{ key: 'normal', kind: 'pytest-html', path: reportPath }],
+    { exitCode: 0 },
+  );
+  const [artifact] = (await store.archiveSkillReportArtifacts(taskId, report.id)).artifacts;
+
+  assert.deepEqual(store.listSkillReportArtifactMediaViews(taskId, report.id, artifact.id), []);
+  const first = store.markSkillReportArtifactMediaViewed(
+    taskId,
+    report.id,
+    artifact.id,
+    'video:one',
+  );
+  assert.equal(first.created, true);
+  assert.match(first.viewedAt, /^\d{4}-\d{2}-\d{2}T/);
+  const repeated = store.markSkillReportArtifactMediaViewed(
+    taskId,
+    report.id,
+    artifact.id,
+    'video:one',
+  );
+  assert.deepEqual(repeated, { ...first, created: false });
+  assert.deepEqual(store.listSkillReportArtifactMediaViews(taskId, report.id, artifact.id), [{
+    mediaKey: 'video:one',
+    viewedAt: first.viewedAt,
+  }]);
+  assert.throws(
+    () => store.markSkillReportArtifactMediaViewed(taskId, report.id, artifact.id, ''),
+    (error) => error.statusCode === 400,
+  );
+
+  const db = getDatabase();
+  db.prepare('DELETE FROM tasks WHERE id=?').run(taskId);
+  assert.equal(db.prepare(`
+    SELECT COUNT(*) AS count FROM skill_report_artifact_media_views WHERE artifact_id=?
+  `).get(artifact.id).count, 0);
+});
+
+test('successful archive removes the project Run video copy but keeps the source copy', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-project-media-cleanup-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-project-media-cleanup-worker');
+  const runRoot = path.join(projectDir, 'task', 'run-media-cleanup');
+  const reportDirectory = path.join(runRoot, 'report');
+  const projectVideoDirectory = path.join(runRoot, 'videos', 'case-1');
+  const sourceVideoDirectory = path.join(tempDir, 'jenkins-videos', 'run-media-cleanup', 'case-1');
+  const htmlPath = path.join(reportDirectory, 'result.html');
+  const projectVideoPath = path.join(projectVideoDirectory, 'clip.mp4');
+  const sourceVideoPath = path.join(sourceVideoDirectory, 'clip.mp4');
+  const video = Buffer.from('source video bytes\n', 'utf8');
+  fs.mkdirSync(reportDirectory, { recursive: true });
+  fs.mkdirSync(projectVideoDirectory, { recursive: true });
+  fs.mkdirSync(sourceVideoDirectory, { recursive: true });
+  fs.writeFileSync(sourceVideoPath, video, { mode: 0o600 });
+  fs.copyFileSync(sourceVideoPath, projectVideoPath);
+  fs.writeFileSync(
+    htmlPath,
+    '<!doctype html><a href="../videos/case-1/clip.mp4">Video</a>',
+    { mode: 0o600 },
+  );
+  const input = reportFixture({
+    reportKey: 'pytest-html:project-media-cleanup',
+    status: 'succeeded',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: 'pytest -v tests --html task/run-media-cleanup/report/result.html',
+      workingDirectory: projectDir,
+      status: 'succeeded',
+      exitCode: 0,
+    },
+  });
+  const { report: published } = publishArtifactReport(
+    taskId,
+    runtime,
+    input,
+    [{ key: 'normal', kind: 'pytest-html', path: htmlPath }],
+    { exitCode: 0 },
+  );
+
+  const archived = await store.archiveSkillReportArtifacts(taskId, published.id);
+  const [artifact] = archived.artifacts;
+  assert.equal(artifact.fileName, 'run-media-cleanup.html');
+  const resources = getDatabase().prepare(`
+    SELECT * FROM skill_report_artifact_resources WHERE artifact_id=?
+  `).all(artifact.id);
+  assert.deepEqual(resources.map((resource) => resource.file_name), ['clip.mp4']);
+  assert.equal(fs.existsSync(path.join(runRoot, 'videos')), false);
+  assert.deepEqual(fs.readFileSync(sourceVideoPath), video);
+  assert.equal(store.listSessionWorklogs(taskId).some((entry) => (
+    entry.kind === 'skill.report.project_media_cleaned'
+  )), true);
+});
+
+test('incomplete media archive keeps the project Run video copy for retry', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-project-media-partial-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-project-media-partial-worker');
+  const runRoot = path.join(projectDir, 'task', 'run-media-partial');
+  const reportDirectory = path.join(runRoot, 'report');
+  const projectVideoDirectory = path.join(runRoot, 'videos', 'case-1');
+  const htmlPath = path.join(reportDirectory, 'result.html');
+  const projectVideoPath = path.join(projectVideoDirectory, 'clip.mp4');
+  fs.mkdirSync(reportDirectory, { recursive: true });
+  fs.mkdirSync(projectVideoDirectory, { recursive: true });
+  fs.writeFileSync(projectVideoPath, 'project video bytes\n', { mode: 0o600 });
+  fs.writeFileSync(
+    htmlPath,
+    '<!doctype html><a href="../videos/case-1/clip.mp4">Video</a>'
+      + '<a href="../videos/case-1/missing.mp4">Missing</a>',
+    { mode: 0o600 },
+  );
+  const input = reportFixture({
+    reportKey: 'pytest-html:project-media-partial',
+    status: 'succeeded',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: 'pytest -v tests --html task/run-media-partial/report/result.html',
+      workingDirectory: projectDir,
+      status: 'succeeded',
+      exitCode: 0,
+    },
+  });
+  const { report: published } = publishArtifactReport(
+    taskId,
+    runtime,
+    input,
+    [{ key: 'normal', kind: 'pytest-html', path: htmlPath }],
+    { exitCode: 0 },
+  );
+
+  await store.archiveSkillReportArtifacts(taskId, published.id);
+  assert.equal(fs.existsSync(projectVideoDirectory), true);
+  assert.equal(store.listSessionWorklogs(taskId).some((entry) => (
+    entry.kind === 'skill.report.project_media_cleaned'
+  )), false);
+});
+
+test('unmounted project media is retained instead of being deleted after a partial reference archive', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-unmounted-project-media-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-unmounted-project-media-worker');
+  const runRoot = path.join(projectDir, 'task', 'run-unmounted-media');
+  const reportDirectory = path.join(runRoot, 'report');
+  const projectVideoDirectory = path.join(runRoot, 'videos', 'case-1');
+  const htmlPath = path.join(reportDirectory, 'result.html');
+  fs.mkdirSync(reportDirectory, { recursive: true });
+  fs.mkdirSync(projectVideoDirectory, { recursive: true });
+  fs.writeFileSync(path.join(projectVideoDirectory, 'mounted.mp4'), 'mounted video\n', { mode: 0o600 });
+  fs.writeFileSync(path.join(projectVideoDirectory, 'unmounted.mp4'), 'unmounted video\n', { mode: 0o600 });
+  fs.writeFileSync(
+    htmlPath,
+    '<!doctype html><a href="../videos/case-1/mounted.mp4">Video</a>',
+    { mode: 0o600 },
+  );
+  const input = reportFixture({
+    reportKey: 'pytest-html:unmounted-project-media',
+    status: 'succeeded',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: 'pytest -v tests --html task/run-unmounted-media/report/result.html',
+      workingDirectory: projectDir,
+      status: 'succeeded',
+      exitCode: 0,
+    },
+  });
+  const { report: published } = publishArtifactReport(
+    taskId,
+    runtime,
+    input,
+    [{ key: 'normal', kind: 'pytest-html', path: htmlPath }],
+    { exitCode: 0 },
+  );
+
+  const archived = await store.archiveSkillReportArtifacts(taskId, published.id);
+  assert.equal(archived.artifacts.length, 1);
+  assert.equal(fs.existsSync(path.join(projectVideoDirectory, 'mounted.mp4')), true);
+  assert.equal(fs.existsSync(path.join(projectVideoDirectory, 'unmounted.mp4')), true);
+  const deferred = store.listSessionWorklogs(taskId).find((entry) => (
+    entry.kind === 'skill.report.project_media_cleanup_deferred'
+  ));
+  assert.equal(deferred?.payload?.unarchivedCount, 1);
+  assert.match(deferred?.payload?.unarchivedResourceKeys?.[0] || '', /unmounted\.mp4$/);
+});
+
+test('a later report revision reuses an identical archived artifact after project media cleanup', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-artifact-revision-reuse-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-artifact-revision-reuse-worker');
+  const runRoot = path.join(projectDir, 'task', 'run-revision-reuse');
+  const reportDirectory = path.join(runRoot, 'report');
+  const projectVideoDirectory = path.join(runRoot, 'videos', 'case-1');
+  const htmlPath = path.join(reportDirectory, 'result.html');
+  fs.mkdirSync(reportDirectory, { recursive: true });
+  fs.mkdirSync(projectVideoDirectory, { recursive: true });
+  fs.writeFileSync(path.join(projectVideoDirectory, 'clip.mp4'), 'revision video\n', { mode: 0o600 });
+  fs.writeFileSync(htmlPath, '<!doctype html><a href="../videos/case-1/clip.mp4">Video</a>', { mode: 0o600 });
+  const artifacts = [{ key: 'normal', kind: 'pytest-html', path: htmlPath }];
+  const input = reportFixture({
+    reportKey: 'pytest-html:artifact-revision-reuse',
+    status: 'succeeded',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: 'pytest -v tests --html task/run-revision-reuse/report/result.html',
+      workingDirectory: projectDir,
+      status: 'succeeded',
+      exitCode: 0,
+    },
+  });
+  const { report: first, external } = publishArtifactReport(
+    taskId, runtime, input, artifacts, { exitCode: 0 },
+  );
+  const archivedFirst = await store.archiveSkillReportArtifacts(taskId, first.id);
+  assert.equal(fs.existsSync(path.join(runRoot, 'videos')), false);
+
+  const revised = store.publishSkillReport(taskId, {
+    ...input,
+    summary: 'Revised summary with the same immutable pytest artifact.',
+    executionEvidence: { externalAttemptId: external.id },
+    artifacts,
+  }, { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+  assert.equal(revised.revision, 2);
+  assert.deepEqual(revised.artifacts, []);
+  const archivedRevision = await store.archiveSkillReportArtifacts(taskId, revised.id);
+  assert.deepEqual(archivedRevision.artifacts, archivedFirst.artifacts);
+  assert.equal(getDatabase().prepare(`
+    SELECT status FROM skill_report_artifact_jobs WHERE report_id=?
+  `).get(revised.id).status, 'completed');
+
+  fs.mkdirSync(projectVideoDirectory, { recursive: true });
+  fs.writeFileSync(path.join(projectVideoDirectory, 'clip.mp4'), 'changed revision video\n', { mode: 0o600 });
+  fs.writeFileSync(
+    htmlPath,
+    '<!doctype html><title>Changed report</title><a href="../videos/case-1/clip.mp4">Video</a>',
+    { mode: 0o600 },
+  );
+  const changed = store.publishSkillReport(taskId, {
+    ...input,
+    summary: 'A new revision whose source HTML also changed.',
+    executionEvidence: { externalAttemptId: external.id },
+    artifacts,
+  }, { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+  const archivedChanged = await store.archiveSkillReportArtifacts(taskId, changed.id);
+  assert.notEqual(archivedChanged.artifacts[0].id, archivedFirst.artifacts[0].id);
+  assert.equal(fs.existsSync(path.join(runRoot, 'videos')), false);
+});
+
+test('a later report revision reuses unchanged HTML when failure analysis is added', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-partial-artifact-reuse-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-partial-artifact-reuse-worker');
+  const reportDirectory = path.join(projectDir, 'partial-artifact-reuse');
+  const mediaDirectory = path.join(reportDirectory, 'videos');
+  const htmlPath = path.join(reportDirectory, 'result.html');
+  const markdownPath = path.join(reportDirectory, 'failure-analysis.md');
+  fs.mkdirSync(mediaDirectory, { recursive: true });
+  fs.writeFileSync(path.join(mediaDirectory, 'clip.mp4'), 'revision video\n', { mode: 0o600 });
+  fs.writeFileSync(htmlPath, '<!doctype html><a href="videos/clip.mp4">Video</a>', { mode: 0o600 });
+  const htmlArtifact = { key: 'normal', kind: 'pytest-html', path: htmlPath };
+  const input = reportFixture({
+    reportKey: 'pytest-html:partial-artifact-reuse',
+    status: 'failed',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: `pytest -v tests --html ${JSON.stringify(htmlPath)}`,
+      workingDirectory: projectDir,
+      status: 'failed',
+      exitCode: 1,
+    },
+  });
+  const { report: first, external } = publishArtifactReport(
+    taskId, runtime, input, [htmlArtifact], { exitCode: 1 },
+  );
+  const archivedFirst = await store.archiveSkillReportArtifacts(taskId, first.id);
+  const [firstHtml] = archivedFirst.artifacts;
+  const firstResourceCount = getDatabase().prepare(`
+    SELECT COUNT(*) AS count FROM skill_report_artifact_resources WHERE task_id=?
+  `).get(taskId).count;
+
+  fs.writeFileSync(markdownPath, '# Failure analysis\n', { mode: 0o600 });
+  const revised = store.publishSkillReport(taskId, {
+    ...input,
+    summary: 'Added failure analysis without changing the pytest report.',
+    executionEvidence: { externalAttemptId: external.id },
+    artifacts: [
+      htmlArtifact,
+      { key: 'failure-analysis', kind: 'failure-analysis-markdown', path: markdownPath },
+    ],
+  }, { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+  const archivedRevision = await store.archiveSkillReportArtifacts(taskId, revised.id);
+  const revisedHtml = archivedRevision.artifacts.find((artifact) => artifact.key === 'normal');
+  const markdown = archivedRevision.artifacts.find((artifact) => artifact.key === 'failure-analysis');
+
+  assert.equal(revisedHtml.id, firstHtml.id);
+  assert.equal(markdown.kind, 'failure-analysis-markdown');
+  assert.equal(getDatabase().prepare(`
+    SELECT COUNT(*) AS count FROM skill_report_artifact_resources WHERE task_id=?
+  `).get(taskId).count, firstResourceCount);
+  assert.deepEqual(getDatabase().prepare(`
+    SELECT artifact_key FROM skill_report_artifacts WHERE report_id=? ORDER BY artifact_key
+  `).all(revised.id), [{ artifact_key: 'failure-analysis' }]);
+});
+
+test('a publishing CLI owner prevents the Worker from archiving the same report concurrently', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-owned-artifact-job-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-owned-artifact-job-worker');
+  const htmlPath = path.join(projectDir, 'owned-artifact-job.html');
+  fs.writeFileSync(htmlPath, '<!doctype html><title>Owned artifact</title>', { mode: 0o600 });
+  const external = registerArtifactExecution(
+    taskId,
+    runtime,
+    projectDir,
+    'pytest -v tests --html owned-artifact-job.html',
+    { artifacts: [{ key: 'normal', kind: 'pytest-html', path: htmlPath }] },
+  );
+  const owner = 'skill-report-cli:test-owner';
+  const published = store.publishSkillReport(taskId, reportFixture({
+    reportKey: 'pytest-html:owned-artifact-job',
+    executionEvidence: { externalAttemptId: external.id },
+    artifacts: [{ key: 'normal', kind: 'pytest-html', path: htmlPath }],
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: 'pytest -v tests --html owned-artifact-job.html',
+      workingDirectory: projectDir,
+    },
+  }), {
+    turnId: runtime.turn.id,
+    attemptId: runtime.attemptId,
+    artifactJobOwner: owner,
+  });
+
+  assert.equal(store.claimSkillReportArtifactJobs('different-worker', 100)
+    .some((job) => job.report_id === published.id), false);
+  const processed = await store.processSkillReportArtifactJob(published.id, owner);
+  assert.equal(processed.ok, true);
+  assert.equal(processed.report.artifacts.length, 1);
+});
+
+test('project media cleanup failures keep the artifact job retryable', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-project-media-cleanup-retry-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-project-media-cleanup-retry-worker');
+  const runRoot = path.join(projectDir, 'task', 'run-media-cleanup-retry');
+  const reportDirectory = path.join(runRoot, 'report');
+  const videosTarget = path.join(tempDir, 'project-media-cleanup-retry-target');
+  const htmlPath = path.join(reportDirectory, 'result.html');
+  fs.mkdirSync(reportDirectory, { recursive: true });
+  fs.mkdirSync(videosTarget, { recursive: true });
+  fs.symlinkSync(videosTarget, path.join(runRoot, 'videos'));
+  fs.writeFileSync(htmlPath, '<!doctype html><title>Cleanup retry</title>', { mode: 0o600 });
+  const external = registerArtifactExecution(
+    taskId,
+    runtime,
+    projectDir,
+    'pytest -v tests --html task/run-media-cleanup-retry/report/result.html',
+    { artifacts: [{ key: 'normal', kind: 'pytest-html', path: htmlPath }] },
+  );
+  const owner = 'artifact-worker:cleanup-retry';
+  const published = store.publishSkillReport(taskId, reportFixture({
+    reportKey: 'pytest-html:project-media-cleanup-retry',
+    executionEvidence: { externalAttemptId: external.id },
+    artifacts: [{ key: 'normal', kind: 'pytest-html', path: htmlPath }],
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: 'pytest -v tests --html task/run-media-cleanup-retry/report/result.html',
+      workingDirectory: projectDir,
+    },
+  }), {
+    turnId: runtime.turn.id,
+    attemptId: runtime.attemptId,
+    artifactJobOwner: owner,
+  });
+
+  const processed = await store.processSkillReportArtifactJob(published.id, owner);
+  assert.equal(processed.ok, false);
+  assert.equal(processed.exhausted, false);
+  const job = getDatabase().prepare(`
+    SELECT status, last_error FROM skill_report_artifact_jobs WHERE report_id=?
+  `).get(published.id);
+  assert.equal(job.status, 'retry');
+  assert.match(job.last_error, /Could not clean 1 archived project media directory/);
+  assert.equal(fs.lstatSync(path.join(runRoot, 'videos')).isSymbolicLink(), true);
+});
+
 test('stop reconciles terminal evidence and archives registered wrapper HTML artifacts', async () => {
   ensureReportSkill();
   const taskId = 'stop-terminal-artifact-reconciliation-task';
@@ -1125,8 +1533,269 @@ test('pytest HTML archival hosts entity-encoded MP4 and HLS media dependencies',
   }
   assert.equal(store.listSessionWorklogs(taskId).some((entry) => (
     entry.kind === 'skill.report.artifact.media_partial'
-      && entry.payload?.warningCount === 1
+    && entry.payload?.warningCount === 1
   )), true);
+});
+
+test('pytest HTML archival hosts video-manager links and structured image extras', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-image-media-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-image-media-worker');
+  const runDirectory = path.join(projectDir, 'task', 'image-media');
+  const reportDirectory = path.join(runDirectory, 'report');
+  const videoDirectory = path.join(runDirectory, 'videos', 'case-images');
+  const assetDirectory = path.join(reportDirectory, 'assets');
+  const htmlPath = path.join(reportDirectory, 'result.html');
+  fs.mkdirSync(reportDirectory, { recursive: true });
+  fs.mkdirSync(videoDirectory, { recursive: true });
+  fs.mkdirSync(assetDirectory, { recursive: true });
+  const imageTypes = new Map([
+    ['fixture.bmp', 'image/bmp'],
+    ['fixture.gif', 'image/gif'],
+    ['fixture.jpeg', 'image/jpeg'],
+    ['fixture.jpg', 'image/jpeg'],
+    ['fixture.png', 'image/png'],
+    ['fixture.svg', 'image/svg+xml'],
+    ['fixture.webp', 'image/webp'],
+  ]);
+  for (const fileName of imageTypes.keys()) {
+    fs.writeFileSync(path.join(videoDirectory, fileName), `image:${fileName}\n`, { mode: 0o600 });
+  }
+  fs.writeFileSync(path.join(assetDirectory, 'extra.png'), 'image:extra.png\n', { mode: 0o600 });
+  const links = [...imageTypes.keys()].map((fileName) => (
+    `<a class="vm_video_link" data-src="../videos/case-images/${fileName}"`
+      + ` data-media-type="image" data-media-format="${path.extname(fileName).slice(1)}">${fileName}</a>`
+  )).join('');
+  const jsonBlob = JSON.stringify({
+    row: links,
+    tests: {
+      'image-case': [{
+        extras: [{
+          name: 'Structured image extra',
+          format_type: 'image',
+          content: 'assets/extra.png',
+          mime_type: 'image/png',
+          extension: 'png',
+        }],
+        result: 'Passed',
+      }],
+    },
+  }).replace(/&/g, '&amp;').replace(/"/g, '&#34;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  fs.writeFileSync(
+    htmlPath,
+    `<!doctype html><div id="data-container" data-jsonblob="${jsonBlob}"></div>`,
+    { mode: 0o600 },
+  );
+  const input = reportFixture({
+    reportKey: 'pytest-html:image-media',
+    status: 'succeeded',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: 'pytest tests --html task/image-media/report/result.html',
+      workingDirectory: projectDir,
+      status: 'succeeded',
+      exitCode: 0,
+    },
+  });
+  const { report: published } = publishArtifactReport(
+    taskId,
+    runtime,
+    input,
+    [{ key: 'normal', kind: 'pytest-html', path: htmlPath }],
+    { exitCode: 0 },
+  );
+
+  const archived = await store.archiveSkillReportArtifacts(taskId, published.id);
+  const [artifact] = archived.artifacts;
+  const resources = getDatabase().prepare(`
+    SELECT * FROM skill_report_artifact_resources
+    WHERE artifact_id=? ORDER BY file_name
+  `).all(artifact.id);
+  assert.deepEqual(resources.map((resource) => resource.file_name), [
+    'extra.png',
+    ...[...imageTypes.keys()].sort(),
+  ]);
+  for (const resource of resources) {
+    assert.equal(
+      resource.media_type,
+      resource.file_name === 'extra.png' ? 'image/png' : imageTypes.get(resource.file_name),
+    );
+  }
+  const opened = await store.openSkillReportArtifactFile(taskId, published.id, artifact.id);
+  try {
+    const content = await opened.fileHandle.readFile('utf8');
+    assert.doesNotMatch(content, /\.\.\/videos\/case-images\//);
+    assert.doesNotMatch(content, /assets\/extra\.png/);
+    for (const resource of resources) {
+      assert.match(content, new RegExp(`/resources/${resource.id}`));
+    }
+  } finally {
+    await opened.fileHandle.close();
+  }
+  assert.equal(store.listSessionWorklogs(taskId).some((entry) => (
+    entry.kind === 'skill.report.artifact.media_partial'
+  )), false);
+  assert.equal(fs.existsSync(path.join(runDirectory, 'videos')), false);
+  assert.equal(fs.existsSync(path.join(assetDirectory, 'extra.png')), true);
+});
+
+test('pytest HTML archival deduplicates linked audio, AV, and video HLS playlists', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-shared-hls-bundle-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-shared-hls-bundle-worker');
+  const runDirectory = path.join(projectDir, 'task', 'shared-hls-bundle');
+  const reportDirectory = path.join(runDirectory, 'report');
+  const videoDirectory = path.join(runDirectory, 'videos', 'case-media');
+  const htmlPath = path.join(reportDirectory, 'result.html');
+  fs.mkdirSync(reportDirectory, { recursive: true });
+  fs.mkdirSync(videoDirectory, { recursive: true });
+  fs.writeFileSync(path.join(videoDirectory, 'audio.ts'), 'audio segment\n', { mode: 0o600 });
+  fs.writeFileSync(path.join(videoDirectory, 'video.ts'), 'video segment\n', { mode: 0o600 });
+  fs.writeFileSync(
+    path.join(videoDirectory, 'audio.m3u8'),
+    '#EXTM3U\n#EXTINF:1.0,\naudio.ts\n#EXT-X-ENDLIST\n',
+    { mode: 0o600 },
+  );
+  fs.writeFileSync(
+    path.join(videoDirectory, 'video.m3u8'),
+    '#EXTM3U\n#EXTINF:1.0,\nvideo.ts\n#EXT-X-ENDLIST\n',
+    { mode: 0o600 },
+  );
+  fs.writeFileSync(
+    path.join(videoDirectory, 'av.m3u8'),
+    '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",URI=\'audio.m3u8\'\n'
+      + '#EXT-X-STREAM-INF:AUDIO="audio",BANDWIDTH=1\nvideo.m3u8\n',
+    { mode: 0o600 },
+  );
+  const html = [
+    '<!doctype html><div id="data-container" data-jsonblob="{&#34;row&#34;:&#34;',
+    '&lt;a class=\&#34;vm_video_link\&#34; data-src=\&#34;../videos/case-media/audio.m3u8\&#34;&gt;Audio&lt;/a&gt;',
+    '&lt;a class=\&#34;vm_video_link\&#34; data-src=\&#34;../videos/case-media/av.m3u8\&#34;&gt;AV&lt;/a&gt;',
+    '&lt;a class=\&#34;vm_video_link\&#34; data-src=\&#34;../videos/case-media/video.m3u8\&#34;&gt;Video&lt;/a&gt;',
+    '&#34;}"></div>',
+  ].join('');
+  fs.writeFileSync(htmlPath, html, { mode: 0o600 });
+  const input = reportFixture({
+    reportKey: 'pytest-html:shared-hls-bundle',
+    status: 'succeeded',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: 'pytest tests --html task/shared-hls-bundle/report/result.html',
+      workingDirectory: projectDir,
+      status: 'succeeded',
+      exitCode: 0,
+    },
+  });
+  const { report: published } = publishArtifactReport(
+    taskId,
+    runtime,
+    input,
+    [{ key: 'normal', kind: 'pytest-html', path: htmlPath }],
+    { exitCode: 0 },
+  );
+
+  const archived = await store.archiveSkillReportArtifacts(taskId, published.id);
+  const [artifact] = archived.artifacts;
+  const resources = getDatabase().prepare(`
+    SELECT * FROM skill_report_artifact_resources
+    WHERE artifact_id=? ORDER BY file_name
+  `).all(artifact.id);
+  assert.deepEqual(resources.map((resource) => resource.file_name), [
+    'audio.m3u8', 'audio.ts', 'av.m3u8', 'video.m3u8', 'video.ts',
+  ]);
+  assert.equal(new Set(resources.map((resource) => resource.managed_path)).size, 5);
+  const byName = Object.fromEntries(resources.map((resource) => [resource.file_name, resource]));
+  const openManagedText = async (fileName) => {
+    const opened = await store.openSkillReportArtifactResourceFile(
+      taskId,
+      published.id,
+      artifact.id,
+      byName[fileName].id,
+    );
+    try {
+      return await opened.fileHandle.readFile('utf8');
+    } finally {
+      await opened.fileHandle.close();
+    }
+  };
+  const avManifest = await openManagedText('av.m3u8');
+  assert.doesNotMatch(avManifest, /URI='audio\.m3u8'/);
+  assert.match(avManifest, new RegExp(`/resources/${byName['audio.m3u8'].id}`));
+  assert.match(avManifest, new RegExp(`/resources/${byName['video.m3u8'].id}`));
+  assert.match(await openManagedText('audio.m3u8'), new RegExp(`/resources/${byName['audio.ts'].id}`));
+  assert.match(await openManagedText('video.m3u8'), new RegExp(`/resources/${byName['video.ts'].id}`));
+  assert.equal(store.listSessionWorklogs(taskId).some((entry) => (
+    entry.kind === 'skill.report.artifact.media_partial'
+  )), false);
+  assert.equal(fs.existsSync(path.join(runDirectory, 'videos')), false);
+});
+
+test('pytest HTML archival resolves media from the real directory behind a hard-link alias', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-hard-link-media-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-hard-link-media-worker');
+  const canonicalDirectory = path.join(projectDir, 'cr-full-then-mix-gw53-20260827-123540', 'full');
+  const aliasDirectory = path.join(projectDir, 'cr_full_then_mix_gw53_full_20260827_123939_714699634', 'full');
+  const canonicalVideoDirectory = path.join(
+    projectDir,
+    'cr-full-then-mix-gw53-20260827-123540',
+    'videos',
+    'recording-run',
+  );
+  const canonicalHtmlPath = path.join(canonicalDirectory, 'pytest-result.html');
+  const aliasHtmlPath = path.join(aliasDirectory, 'pytest-result.html');
+  const manifestPath = path.join(canonicalVideoDirectory, 'stream.m3u8');
+  const segmentPath = path.join(canonicalVideoDirectory, 'segment.ts');
+  fs.mkdirSync(canonicalDirectory, { recursive: true });
+  fs.mkdirSync(aliasDirectory, { recursive: true });
+  fs.mkdirSync(canonicalVideoDirectory, { recursive: true });
+  fs.writeFileSync(segmentPath, 'segment bytes\n', { mode: 0o600 });
+  fs.writeFileSync(manifestPath, '#EXTM3U\n#EXTINF:1.0,\nsegment.ts\n#EXT-X-ENDLIST\n', { mode: 0o600 });
+  fs.writeFileSync(
+    canonicalHtmlPath,
+    '<!doctype html><a href="../videos/recording-run/stream.m3u8">HLS</a>',
+    { mode: 0o600 },
+  );
+  fs.linkSync(canonicalHtmlPath, aliasHtmlPath);
+
+  const input = reportFixture({
+    reportKey: 'pytest-html:hard-link-media',
+    status: 'succeeded',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: 'pytest -v tests --html cr_full_then_mix_gw53_full_20260827_123939_714699634/full/pytest-result.html',
+      workingDirectory: projectDir,
+      status: 'succeeded',
+      exitCode: 0,
+    },
+  });
+  const { report: published } = publishArtifactReport(
+    taskId,
+    runtime,
+    input,
+    [{ key: 'normal', kind: 'pytest-html', path: aliasHtmlPath }],
+    { exitCode: 0 },
+  );
+
+  const archived = await store.archiveSkillReportArtifacts(taskId, published.id);
+  const [artifact] = archived.artifacts;
+  const resources = getDatabase().prepare(`
+    SELECT * FROM skill_report_artifact_resources
+    WHERE artifact_id=? ORDER BY file_name
+  `).all(artifact.id);
+  assert.deepEqual(resources.map((resource) => resource.file_name), ['segment.ts', 'stream.m3u8']);
+  assert.equal(store.listSessionWorklogs(taskId).some((entry) => (
+    entry.kind === 'skill.report.artifact.media_partial'
+  )), false);
+
+  const openedHtml = await store.openSkillReportArtifactFile(taskId, published.id, artifact.id);
+  try {
+    const content = await openedHtml.fileHandle.readFile('utf8');
+    assert.doesNotMatch(content, /\.\.\/videos\/recording-run\/stream\.m3u8/);
+    assert.match(content, new RegExp(`/resources/${resources.find((resource) => resource.file_name === 'stream.m3u8').id}`));
+  } finally {
+    await openedHtml.fileHandle.close();
+  }
 });
 
 test('pytest HTML archival expands DASH segment templates into managed resources', async () => {
@@ -1410,7 +2079,82 @@ test('pytest HTML archival preserves referenced HTML logs as managed resources',
   assert.equal(fs.readFileSync(path.join(logDirectory, logName), 'utf8'), logContent);
 });
 
-test('pytest HTML archival resolves logs beside a hard-linked report alias', async () => {
+test('pytest HTML log resources remain complete when media reaches its resource limit', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-log-media-budget-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-log-media-budget-worker');
+  const reportDirectory = path.join(projectDir, 'log-media-budget-report');
+  const logDirectory = path.join(reportDirectory, 'logs');
+  const mediaDirectory = path.join(reportDirectory, 'media');
+  const htmlPath = path.join(reportDirectory, 'pytest-result.html');
+  const logNames = ['case-one.html', 'case-two.html'];
+  const mediaNames = ['clip-one.mp4', 'clip-two.mp4'];
+  fs.mkdirSync(logDirectory, { recursive: true });
+  fs.mkdirSync(mediaDirectory, { recursive: true });
+  for (const logName of logNames) {
+    fs.writeFileSync(
+      path.join(logDirectory, logName),
+      `<!doctype html><pre>${logName}</pre>`,
+      { mode: 0o600 },
+    );
+  }
+  for (const mediaName of mediaNames) {
+    fs.writeFileSync(path.join(mediaDirectory, mediaName), mediaName, { mode: 0o600 });
+  }
+  const html = [
+    '<!doctype html><html><body>',
+    ...mediaNames.map((mediaName) => `<a data-src="media/${mediaName}">${mediaName}</a>`),
+    ...logNames.map((logName) => `<button onclick="openLog('logs/${logName}')">Log</button>`),
+    '</body></html>',
+  ].join('');
+  fs.writeFileSync(htmlPath, html, { mode: 0o600 });
+  const input = reportFixture({
+    reportKey: 'pytest-html:log-media-budget',
+    status: 'failed',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: 'pytest -v tests --html log-media-budget-report/pytest-result.html',
+      workingDirectory: projectDir,
+      status: 'failed',
+      exitCode: 1,
+    },
+  });
+  const { report: published } = publishArtifactReport(
+    taskId,
+    runtime,
+    input,
+    [{ key: 'normal', kind: 'pytest-html', path: htmlPath }],
+  );
+
+  const archived = await store.archiveSkillReportArtifacts(taskId, published.id, {
+    mediaResourceLimit: 1,
+  });
+  const [artifact] = archived.artifacts;
+  const resources = getDatabase().prepare(`
+    SELECT * FROM skill_report_artifact_resources WHERE artifact_id=? ORDER BY file_name
+  `).all(artifact.id);
+  assert.deepEqual(resources.map((resource) => resource.file_name), [
+    'case-one.html', 'case-two.html', 'clip-one.mp4',
+  ]);
+  const opened = await store.openSkillReportArtifactFile(taskId, published.id, artifact.id);
+  try {
+    const archivedHtml = await opened.fileHandle.readFile('utf8');
+    for (const logName of logNames) {
+      assert.doesNotMatch(archivedHtml, new RegExp(`logs/${logName}`));
+    }
+    assert.doesNotMatch(archivedHtml, /media\/clip-one\.mp4/);
+    assert.match(archivedHtml, /media\/clip-two\.mp4/);
+  } finally {
+    await opened.fileHandle.close();
+  }
+  const warning = store.listSessionWorklogs(taskId).find((entry) => (
+    entry.kind === 'skill.report.artifact.media_partial'
+  ));
+  assert.equal(warning?.payload?.warningCount, 1);
+  assert.match(warning?.payload?.warnings?.[0] || '', /clip-two\.mp4/);
+});
+
+test('pytest HTML archival resolves logs and media beside a hard-linked report alias', async () => {
   ensureReportSkill();
   const taskId = 'pytest-html-hardlink-log-task';
   const runtime = createRunningTask(taskId, 'pytest-html-hardlink-log-worker');
@@ -1418,22 +2162,27 @@ test('pytest HTML archival resolves logs beside a hard-linked report alias', asy
   const reportDirectory = path.join(taskDirectory, 'business-report', 'full');
   const trackedDirectory = path.join(taskDirectory, 'tracked-attempt', 'full');
   const logDirectory = path.join(reportDirectory, 'logs');
+  const scriptDirectory = path.join(reportDirectory, 'assets', 'video');
   const reportName = 'pytest-result.html';
   const logName = 'case___hardlink__123.html';
   const reportPath = path.join(reportDirectory, reportName);
   const trackedPath = path.join(trackedDirectory, reportName);
   const logContent = '<!doctype html><pre>hard-linked report log</pre>';
+  const hlsScript = 'window.Hls = { isSupported: function(){ return true; } };';
   const aliasOnlyVideo = path.join(taskDirectory, 'business-report', 'videos', 'alias-only.mp4');
   const html = [
-    `<!doctype html><button onclick="openLog('logs/${logName}')">Log</button>`,
+    '<!doctype html><script src="assets/video/hls.min.js"></script>',
+    `<button onclick="openLog('logs/${logName}')">Log</button>`,
     '<a href="../videos/alias-only.mp4">Video</a>',
   ].join('');
   fs.mkdirSync(logDirectory, { recursive: true });
+  fs.mkdirSync(scriptDirectory, { recursive: true });
   fs.mkdirSync(trackedDirectory, { recursive: true });
   fs.mkdirSync(path.dirname(aliasOnlyVideo), { recursive: true });
   fs.writeFileSync(reportPath, html, { mode: 0o600 });
   fs.linkSync(reportPath, trackedPath);
   fs.writeFileSync(path.join(logDirectory, logName), logContent, { mode: 0o600 });
+  fs.writeFileSync(path.join(scriptDirectory, 'hls.min.js'), hlsScript, { mode: 0o600 });
   fs.writeFileSync(aliasOnlyVideo, Buffer.from('video'), { mode: 0o600 });
   const input = reportFixture({
     reportKey: 'pytest-html:hardlink-log',
@@ -1457,15 +2206,18 @@ test('pytest HTML archival resolves logs beside a hard-linked report alias', asy
   const resources = getDatabase().prepare(`
     SELECT * FROM skill_report_artifact_resources WHERE artifact_id=?
   `).all(artifact.id);
-  assert.equal(resources.length, 1);
-  const [resource] = resources;
-  assert.ok(resource);
-  assert.equal(resource.file_name, logName);
+  assert.equal(resources.length, 2);
+  const logResource = resources.find((resource) => resource.file_name === logName);
+  const videoResource = resources.find((resource) => resource.file_name === 'alias-only.mp4');
+  assert.ok(logResource);
+  assert.ok(videoResource);
   const resourceUrl = `/api/sessions/${taskId}/skill-reports/${published.id}`
-    + `/artifacts/${artifact.id}/resources/${resource.id}`;
+    + `/artifacts/${artifact.id}/resources/${logResource.id}`;
   const opened = await store.openSkillReportArtifactFile(taskId, published.id, artifact.id);
   try {
     const archivedHtml = await opened.fileHandle.readFile('utf8');
+    assert.doesNotMatch(archivedHtml, /<script[^>]+src=/i);
+    assert.match(archivedHtml, /window\.Hls = \{ isSupported/);
     assert.doesNotMatch(archivedHtml, new RegExp(`logs/${logName}`));
     assert.match(archivedHtml, new RegExp(resourceUrl));
   } finally {
@@ -1791,6 +2543,42 @@ test('pytest HTML archival rejects unsafe or unavailable stylesheet dependencies
   }
 });
 
+test('pytest HTML archival reports a missing local player script instead of silently publishing it', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-missing-player-script-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-missing-player-script-worker');
+  const reportDirectory = path.join(projectDir, 'missing-player-script');
+  const htmlPath = path.join(reportDirectory, 'pytest-result.html');
+  fs.mkdirSync(reportDirectory, { recursive: true });
+  fs.writeFileSync(
+    htmlPath,
+    '<!doctype html><script src="assets/video/missing-player.js"></script><p>result</p>',
+    { mode: 0o600 },
+  );
+  const input = reportFixture({
+    reportKey: 'pytest-html:missing-player-script',
+    status: 'succeeded',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: 'pytest tests --html missing-player-script/pytest-result.html',
+      workingDirectory: projectDir,
+      status: 'succeeded',
+      exitCode: 0,
+    },
+  });
+  const { report: published } = publishArtifactReport(
+    taskId, runtime, input,
+    [{ key: 'normal', kind: 'pytest-html', path: htmlPath }],
+    { exitCode: 0 },
+  );
+
+  await assert.rejects(
+    store.archiveSkillReportArtifacts(taskId, published.id),
+    /script does not exist/,
+  );
+  assert.deepEqual(store.listSkillReports(taskId)[0].artifacts, []);
+});
+
 test('explicit pytest HTML declarations reject paths outside the execution directory', async () => {
   ensureReportSkill();
   const runtime = createRunningTask('pytest-html-escape-task', 'pytest-html-escape-worker');
@@ -2086,6 +2874,10 @@ test('Skill reports are attributed, revisioned, queryable, and immutable with th
   assert.match(jsonPublished.stdout, /REVISION=1/);
   assert.match(jsonPublished.stdout, /IDEMPOTENT=false/);
   assert.match(jsonPublished.stdout, /ARTIFACTS=1/);
+  const [historicalSkill] = store.getExternalAttempt('report-cli-task', cliExternal.id).skills;
+  assert.equal(historicalSkill.skillId, 'report-skill');
+  assert.equal(historicalSkill.source, 'skill-report');
+  assert.match(historicalSkill.contentHash, /^[a-f0-9]{64}$/);
 
   const shortCommandPublished = spawnSync(wrapper, [
     'report-skill', '--', 'codex-skill-report', 'publish', '--file', reportPath,
@@ -2148,6 +2940,101 @@ test('Skill reports are attributed, revisioned, queryable, and immutable with th
   }
 });
 
+test('the Skill command wrapper records invocations and background tracking inherits them', () => {
+  for (const skillId of ['cloud-recording-test', 'run-in-background']) {
+    store.saveSkill(skillId, {
+      name: skillId,
+      description: `${skillId} invocation fixture`,
+      content: `---\nname: ${skillId}\ndescription: invocation fixture\n---\n# ${skillId}\n`,
+    });
+  }
+  const taskId = 'automatic-skill-invocation-task';
+  const runtime = createRunningTask(taskId, 'automatic-skill-invocation-worker');
+  const basePath = path.join(projectDir, 'automatic-skill-invocation');
+  fs.writeFileSync(`${basePath}.log`, 'background output\n', { mode: 0o600 });
+  const wrapper = path.join(ROOT_DIR, 'bin', 'full-access', 'codex-skill-use');
+  const tracker = path.join(ROOT_DIR, 'bin', 'full-access', 'codex-background-track');
+  const result = spawnSync(wrapper, [
+    'cloud-recording-test', 'run-in-background', '--', tracker, 'register',
+    '--pid', '999999984', '--log', `${basePath}.log`,
+    '--done', `${basePath}.done`, '--state', `${basePath}.state`, '--meta', `${basePath}.meta`,
+    '--step-key', 'normal', '--step-label', 'Normal', '--run-key', 'initial', '--run-kind', 'initial',
+  ], {
+    cwd: projectDir,
+    env: {
+      ...process.env,
+      CODEX_TASK_ID: taskId,
+      CODEX_TASK_TURN_ID: runtime.turn.id,
+      CODEX_TASK_ATTEMPT_ID: runtime.attemptId,
+      CODEX_TASK_SKILL_SNAPSHOT: runtime.snapshot.path,
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const trackingId = result.stdout.match(/^TRACKING_ID=(.+)$/m)?.[1];
+  assert.ok(trackingId);
+
+  const [invocation] = store.listSkillInvocations(taskId);
+  assert.equal(invocation.status, 'succeeded');
+  assert.equal(invocation.exitCode, 0);
+  assert.equal(invocation.commandName, 'codex-background-track');
+  assert.deepEqual(invocation.skills.map((skill) => skill.skillId), [
+    'cloud-recording-test', 'run-in-background',
+  ]);
+
+  const external = store.getExternalAttempt(taskId, trackingId);
+  assert.equal(external.skillInvocationId, invocation.id);
+  assert.deepEqual(external.skills.map((skill) => [skill.skillId, skill.source]), [
+    ['cloud-recording-test', 'invocation'],
+    ['run-in-background', 'invocation'],
+  ]);
+  const [scheduled] = store.listScheduledJobs(taskId);
+  assert.equal(scheduled.externalAttemptId, external.id);
+  assert.deepEqual(scheduled.skills, external.skills);
+
+  const usage = store.getSessionSkillUsage(taskId);
+  assert.equal(usage.invocationCount, 1);
+  assert.equal(usage.skills.find((skill) => skill.id === 'cloud-recording-test').invocationCount, 1);
+  assert.equal(usage.skills.find((skill) => skill.id === 'run-in-background').invocationCount, 1);
+});
+
+test('automatic deployment invocations drive terminal fallback reports without command parsing', () => {
+  const skillId = 'rtsc-cicd-deploy';
+  store.saveSkill(skillId, {
+    name: skillId,
+    description: 'Automatic deployment invocation fixture',
+    content: `---\nname: ${skillId}\ndescription: deployment invocation fixture\n---\n# ${skillId}\n`,
+  });
+  const taskId = 'automatic-deployment-fallback-task';
+  const runtime = createRunningTask(taskId, 'automatic-deployment-fallback-worker');
+  const invocation = store.startSkillInvocation({
+    taskId,
+    turnId: runtime.turn.id,
+    attemptId: runtime.attemptId,
+    skillIds: [skillId],
+    commandName: 'cicd_deploy.py',
+  });
+  store.finishSkillInvocation(invocation.id, { exitCode: 0 });
+  store.finalizeSessionTurn({
+    taskId,
+    turnId: runtime.turn.id,
+    attemptId: runtime.attemptId,
+    commandId: runtime.command.id,
+    workerId: runtime.workerId,
+    exitCode: 0,
+    summary: 'Deployment command completed.',
+    finalStatus: 'waiting_review',
+    retryCount: 0,
+  });
+
+  const [report] = store.listSkillReports(taskId);
+  assert.equal(report.skillId, skillId);
+  assert.equal(report.reportType, 'deployment-result');
+  assert.equal(report.status, 'succeeded');
+  const evidence = report.sections.find((section) => section.id === 'runtime-evidence');
+  assert.ok(evidence.fields.some((field) => field.label === 'Skill invocation' && field.value === invocation.id));
+});
+
 test('terminal cloud-recording turns receive a fallback report when the Skill omits publication', () => {
   ensureCloudRecordingReportSkill();
   const runtime = createRunningTask('missing-cloud-report-task', 'missing-cloud-report-worker');
@@ -2196,4 +3083,125 @@ test('terminal cloud-recording turns receive a fallback report when the Skill om
   assert.ok(store.listSessionWorklogs('missing-cloud-report-task').some((entry) => (
     entry.kind === 'skill.report.fallback_published'
   )));
+});
+
+test('terminal CICD and GW turns receive fallbacks when only progress was reported', () => {
+  const deploymentSkillIds = ['rtsc-cicd-deploy', 'cloud-recording-gw-deploy'];
+  for (const skillId of deploymentSkillIds) {
+    store.saveSkill(skillId, {
+      name: skillId,
+      description: `${skillId} test fixture`,
+      content: `---\nname: ${skillId}\ndescription: deployment test fixture\n---\n# ${skillId}\n`,
+    });
+  }
+  const taskId = 'missing-terminal-deployment-report-task';
+  const runtime = createRunningTask(taskId, 'missing-terminal-deployment-report-worker');
+  for (const [index, skillId] of deploymentSkillIds.entries()) {
+    store.recordCommandExecution({
+      taskId,
+      turnId: runtime.turn.id,
+      attemptId: runtime.attemptId,
+      event: {
+        type: 'item.completed',
+        item: {
+          id: `deployment-command-${index}`,
+          type: 'command_execution',
+          command: `/usr/local/bin/codex-skill-use ${skillId} -- true`,
+          status: 'completed',
+          exit_code: 0,
+        },
+      },
+    });
+    store.publishSkillReport(taskId, {
+      schemaVersion: 2,
+      reportKey: `${skillId}:progress`,
+      skillId,
+      reportType: 'deployment-result',
+      title: `${skillId} deployment`,
+      status: 'running',
+      summary: `${skillId} preflight completed.`,
+      observedAt: '2026-08-04T12:00:00.000Z',
+      artifacts: [],
+      metrics: [],
+      sections: [{
+        id: 'deployment-progress', title: 'Deployment progress', kind: 'fields',
+        priority: 'primary', defaultExpanded: true,
+        fields: [{ label: 'Phase', value: 'preflight', format: 'status', tone: 'success' }],
+      }],
+    }, { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+    store.recordCommandExecution({
+      taskId,
+      turnId: runtime.turn.id,
+      attemptId: runtime.attemptId,
+      event: {
+        type: 'item.completed',
+        item: {
+          id: `deployment-report-command-${index}`,
+          type: 'command_execution',
+          command: `/usr/local/bin/codex-skill-use ${skillId} -- codex-skill-report publish --file deployment.json`,
+          status: 'failed',
+          exit_code: 7,
+        },
+      },
+    });
+    if (skillId === 'rtsc-cicd-deploy') {
+      store.publishSkillReport(taskId, {
+        schemaVersion: 2,
+        reportKey: `${skillId}:other-target`,
+        skillId,
+        reportType: 'deployment-result',
+        title: `${skillId} other deployment`,
+        status: 'succeeded',
+        summary: 'A separate CICD target was already terminal.',
+        observedAt: '2026-08-04T12:01:00.000Z',
+        artifacts: [],
+        metrics: [],
+        sections: [{
+          id: 'deployment-progress', title: 'Deployment progress', kind: 'fields',
+          priority: 'primary', defaultExpanded: true,
+          fields: [{ label: 'Phase', value: 'verify', format: 'status', tone: 'success' }],
+        }],
+      }, { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+    }
+  }
+  const external = store.registerExternalAttempt({
+    taskId,
+    logPath: path.join(projectDir, 'later-pytest.log'),
+    donePath: path.join(projectDir, 'later-pytest.done'),
+    statePath: path.join(projectDir, 'later-pytest.state'),
+    metaPath: path.join(projectDir, 'later-pytest.meta'),
+  });
+  const database = getDatabase();
+  database.prepare(`
+    UPDATE external_attempts SET status='failed', result_json=? WHERE id=?
+  `).run(JSON.stringify({ exitCode: 9 }), external.id);
+  database.prepare(`
+    UPDATE scheduled_jobs SET status='completed' WHERE external_attempt_id=?
+  `).run(external.id);
+
+  store.finalizeSessionTurn({
+    taskId,
+    turnId: runtime.turn.id,
+    attemptId: runtime.attemptId,
+    commandId: runtime.command.id,
+    workerId: runtime.workerId,
+    exitCode: 1,
+    summary: 'A later pytest execution failed after both deployments completed.',
+    finalStatus: 'waiting_review',
+    retryCount: 0,
+  });
+
+  const reports = store.listSkillReports(taskId, { history: true, limit: 100 });
+  for (const skillId of deploymentSkillIds) {
+    const skillReports = reports.filter((report) => report.skillId === skillId);
+    assert.equal(skillReports.length, skillId === 'rtsc-cicd-deploy' ? 3 : 2);
+    assert.ok(skillReports.some((report) => report.status === 'running'));
+    const fallback = skillReports.find((report) => report.reportKey.startsWith('platform-fallback:'));
+    assert.ok(fallback);
+    assert.equal(fallback.reportType, 'deployment-result');
+    assert.equal(fallback.status, 'succeeded');
+    assert.equal(fallback.metrics.find((metric) => metric.key === 'exit-code').value, 0);
+    assert.match(fallback.summary, /exit code 0/);
+    assert.doesNotMatch(fallback.summary, /later pytest/i);
+  }
 });

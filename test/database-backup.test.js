@@ -85,6 +85,7 @@ test('v1 backups remain verifiable when later optional table counters are absent
   delete manifest.database.tableCounts.skill_reports;
   delete manifest.database.tableCounts.skill_report_artifacts;
   delete manifest.database.tableCounts.skill_report_artifact_resources;
+  delete manifest.database.tableCounts.skill_report_artifact_media_views;
   delete manifest.database.tableCounts.skill_report_artifact_jobs;
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   fs.chmodSync(manifestPath, 0o600);
@@ -94,6 +95,7 @@ test('v1 backups remain verifiable when later optional table counters are absent
   assert.equal(Object.hasOwn(record.database.tableCounts, 'skill_reports'), false);
   assert.equal(Object.hasOwn(record.database.tableCounts, 'skill_report_artifacts'), false);
   assert.equal(Object.hasOwn(record.database.tableCounts, 'skill_report_artifact_resources'), false);
+  assert.equal(Object.hasOwn(record.database.tableCounts, 'skill_report_artifact_media_views'), false);
   assert.equal(Object.hasOwn(record.database.tableCounts, 'skill_report_artifact_jobs'), false);
   assert.equal((await verifyDatabaseBackup(backup.id)).ok, true);
 });

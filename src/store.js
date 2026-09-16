@@ -68,6 +68,7 @@ const MAX_SKILL_REPORT_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_PYTEST_MEDIA_MANIFEST_BYTES = 8 * 1024 * 1024;
 const MAX_PYTEST_MEDIA_RESOURCES = 10000;
 const MAX_PYTEST_ARTIFACT_ALIAS_ENTRIES = 20000;
+const MAX_PYTEST_MEDIA_KEY_LENGTH = 512;
 const SCHEDULE_CLAIM_TTL_MS = 15000;
 const DEFAULT_EXTERNAL_CHECK_SECONDS = 300;
 const MIN_EXTERNAL_CHECK_SECONDS = 5;
@@ -95,6 +96,7 @@ const EXTERNAL_STOP_GRACE_MS = 2000;
 const PLATFORM_REPORT_SKILL_IDS = new Set([
   'cloud-recording-test',
   'cloud-recording-gw-deploy',
+  'rtsc-cicd-deploy',
 ]);
 const SESSION_STATUSES = [
   'idle', 'queued', 'running', 'recovering', 'stopping', 'waiting_scheduled', 'waiting_review',
@@ -2567,13 +2569,33 @@ function listSessionWorklogs(sessionId, options = {}) {
   }));
 }
 
+function pytestArtifactDisplayFileName(sourcePath, fallback = 'pytest-report.html') {
+  const resolvedPath = path.resolve(String(sourcePath || fallback));
+  const fileName = path.basename(resolvedPath);
+  const reportDirectory = path.dirname(resolvedPath);
+  if (/^result\.html?$/i.test(fileName) && path.basename(reportDirectory) === 'report') {
+    const runName = path.basename(path.dirname(reportDirectory));
+    if (runName) return `${runName}${path.extname(fileName).toLowerCase()}`;
+  }
+  return /^[A-Za-z0-9._-]+$/.test(fileName) ? fileName : fallback;
+}
+
+function skillReportArtifactFileName(row) {
+  if (row.kind !== 'pytest-html') return row.file_name;
+  const report = parseJson(row.report_payload_json, {});
+  const declaration = (Array.isArray(report.artifacts) ? report.artifacts : []).find((artifact) => (
+    artifact?.kind === row.kind && artifact.key === row.artifact_key
+  ));
+  return pytestArtifactDisplayFileName(declaration?.path || row.file_name, row.file_name);
+}
+
 function rowToSkillReportArtifact(row) {
   return {
     id: row.id,
     key: row.artifact_key,
     label: row.label,
     kind: row.kind,
-    fileName: row.file_name,
+    fileName: skillReportArtifactFileName(row),
     mediaType: row.media_type,
     bytes: Number(row.bytes),
     sha256: row.sha256,
@@ -2582,11 +2604,110 @@ function rowToSkillReportArtifact(row) {
   };
 }
 
-function skillReportArtifacts(db, taskId, reportId) {
+function directSkillReportArtifacts(db, taskId, reportId) {
   return db.prepare(`
-    SELECT * FROM skill_report_artifacts
-    WHERE task_id=? AND report_id=? ORDER BY created_at, id
-  `).all(taskId, reportId).map(rowToSkillReportArtifact);
+    SELECT artifact.*, report.payload_json AS report_payload_json
+    FROM skill_report_artifacts artifact
+    JOIN skill_reports report ON report.id=artifact.report_id AND report.task_id=artifact.task_id
+    WHERE artifact.task_id=? AND artifact.report_id=? ORDER BY artifact.created_at, artifact.id
+  `).all(taskId, reportId);
+}
+
+function skillReportArtifactDeclarationIdentity(artifact) {
+  return JSON.stringify({
+    key: String(artifact?.key || ''),
+    kind: String(artifact?.kind || ''),
+    path: path.normalize(String(artifact?.path || '')),
+  });
+}
+
+function reusableSkillReportArtifacts(
+  db,
+  row,
+  report = parseJson(row?.payload_json, {}),
+  options = {},
+) {
+  const declarations = Array.isArray(report?.artifacts) ? report.artifacts : [];
+  if (!row || !declarations.length) return { artifactsByKey: new Map(), sourceReportIds: [] };
+  const currentJob = db.prepare('SELECT status FROM skill_report_artifact_jobs WHERE report_id=?').get(row.id);
+  if (!options.allowCurrentJob && currentJob && currentJob.status !== 'completed') {
+    return { artifactsByKey: new Map(), sourceReportIds: [] };
+  }
+  const directKeys = new Set(
+    directSkillReportArtifacts(db, row.task_id, row.id).map((artifact) => artifact.artifact_key),
+  );
+  const missingDeclarations = new Map(declarations
+    .filter((declaration) => !directKeys.has(declaration.key))
+    .map((declaration) => [declaration.key, declaration]));
+  if (!missingDeclarations.size) return { artifactsByKey: new Map(), sourceReportIds: [] };
+  const artifactsByKey = new Map();
+  const sourceReportIds = new Set();
+  const candidates = db.prepare(`
+    SELECT previous.*
+    FROM skill_reports previous
+    LEFT JOIN skill_report_artifact_jobs job ON job.report_id=previous.id
+    WHERE previous.task_id=? AND previous.report_key=? AND previous.revision<?
+      AND COALESCE(previous.step_run_id, '')=COALESCE(?, '')
+      AND (job.report_id IS NULL OR job.status='completed')
+    ORDER BY previous.revision DESC
+  `).all(row.task_id, row.report_key, Number(row.revision), row.step_run_id || null);
+  for (const candidate of candidates) {
+    const candidateReport = parseJson(candidate.payload_json, {});
+    const candidateDeclarations = new Map(
+      (Array.isArray(candidateReport.artifacts) ? candidateReport.artifacts : [])
+        .map((declaration) => [declaration.key, declaration]),
+    );
+    const candidateArtifacts = new Map(
+      directSkillReportArtifacts(db, row.task_id, candidate.id)
+        .map((artifact) => [artifact.artifact_key, artifact]),
+    );
+    for (const [key, declaration] of missingDeclarations) {
+      const candidateDeclaration = candidateDeclarations.get(key);
+      const artifact = candidateArtifacts.get(key);
+      if (!artifact || skillReportArtifactDeclarationIdentity(candidateDeclaration)
+        !== skillReportArtifactDeclarationIdentity(declaration)) continue;
+      artifactsByKey.set(key, artifact);
+      sourceReportIds.add(candidate.id);
+      missingDeclarations.delete(key);
+    }
+    if (!missingDeclarations.size) break;
+  }
+  return { artifactsByKey, sourceReportIds: [...sourceReportIds] };
+}
+
+async function verifiedReusableSkillReportArtifacts(db, row, report, evidence) {
+  const reusable = reusableSkillReportArtifacts(db, row, report, { allowCurrentJob: true });
+  const verifiedArtifactsByKey = new Map();
+  const sourceReportIds = new Set();
+  for (const declaration of report.artifacts) {
+    const artifact = reusable.artifactsByKey.get(declaration.key);
+    if (!artifact?.source_sha256) continue;
+    const candidate = declaredArtifactCandidate(declaration, evidence, report.artifacts.length);
+    const source = await readStablePytestArtifactFile(candidate.sourcePath, {
+      label: `${candidate.label} source`,
+    });
+    if (hashBuffer(source) !== artifact.source_sha256) continue;
+    verifiedArtifactsByKey.set(declaration.key, artifact);
+    sourceReportIds.add(artifact.report_id);
+  }
+  return { artifactsByKey: verifiedArtifactsByKey, sourceReportIds: [...sourceReportIds] };
+}
+
+function skillReportArtifacts(db, taskId, reportId) {
+  const direct = directSkillReportArtifacts(db, taskId, reportId);
+  const row = db.prepare('SELECT * FROM skill_reports WHERE task_id=? AND id=?').get(taskId, reportId);
+  if (!row) return [];
+  const report = parseJson(row.payload_json, {});
+  const reusable = reusableSkillReportArtifacts(db, row, report);
+  const directByKey = new Map(direct.map((artifact) => [artifact.artifact_key, artifact]));
+  const resolved = (Array.isArray(report.artifacts) ? report.artifacts : []).map((declaration) => (
+    directByKey.get(declaration.key) || reusable.artifactsByKey.get(declaration.key)
+  )).filter(Boolean);
+  const resolvedKeys = new Set(resolved.map((artifact) => artifact.artifact_key));
+  for (const artifact of direct) {
+    if (!resolvedKeys.has(artifact.artifact_key)) resolved.push(artifact);
+  }
+  return resolved.map(rowToSkillReportArtifact);
 }
 
 function registeredSkillReportArtifacts(db, row, report) {
@@ -2603,7 +2724,9 @@ function registeredSkillReportArtifacts(db, row, report) {
     .map((artifact) => ({
       key: String(artifact.key || ''),
       kind: artifact.kind,
-      fileName: path.basename(String(artifact.path || '')),
+      fileName: artifact.kind === 'pytest-html'
+        ? pytestArtifactDisplayFileName(artifact.path)
+        : path.basename(String(artifact.path || '')),
       executionStatus: external.status,
       url: `/api/sessions/${encodeURIComponent(row.task_id)}`
         + `/external-attempts/${encodeURIComponent(externalAttemptId)}`
@@ -2666,9 +2789,7 @@ function pytestHtmlArtifact(declaration, sourcePath, artifactCount) {
       ? `Pytest HTML report: ${path.basename(sourcePath)}`
       : 'Pytest HTML report',
     kind: 'pytest-html',
-    fileName: /^[A-Za-z0-9._-]+$/.test(path.basename(sourcePath))
-      ? path.basename(sourcePath)
-      : 'pytest-report.html',
+    fileName: pytestArtifactDisplayFileName(sourcePath),
     mediaType: 'text/html; charset=utf-8',
     sourcePath: path.normalize(sourcePath),
   };
@@ -2989,11 +3110,18 @@ function htmlAttribute(tag, name) {
   return match ? (match[1] ?? match[2] ?? match[3] ?? '') : '';
 }
 
-function decodeLocalArtifactReference(value, label) {
-  const decodedHtml = String(value || '')
-    .replace(/&amp;/gi, '&')
+function decodeHtmlEntities(value) {
+  const named = {
+    amp: '&', apos: "'", gt: '>', lt: '<', quot: '"',
+  };
+  return String(value || '')
     .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
-    .replace(/&#([0-9]+);/g, (_, decimal) => String.fromCodePoint(Number(decimal)));
+    .replace(/&#([0-9]+);/g, (_, decimal) => String.fromCodePoint(Number(decimal)))
+    .replace(/&(amp|apos|gt|lt|quot);/gi, (_, name) => named[name.toLowerCase()]);
+}
+
+function decodeLocalArtifactReference(value, label) {
+  const decodedHtml = decodeHtmlEntities(value);
   let decoded;
   try {
     decoded = decodeURIComponent(decodedHtml.split(/[?#]/, 1)[0]);
@@ -3039,7 +3167,11 @@ async function readPytestLocalResource(reference, baseDirectory, containmentRoot
   try {
     resourceStat = await fs.promises.lstat(resourcePath);
   } catch (error) {
-    if (error.code === 'ENOENT') throw statusError(`${label} does not exist: ${reference}`, 409);
+    if (error.code === 'ENOENT') {
+      const missing = statusError(`${label} does not exist: ${reference}`, 409);
+      missing.pytestResourceMissing = true;
+      throw missing;
+    }
     throw error;
   }
   if (!resourceStat.isFile() || resourceStat.isSymbolicLink()) {
@@ -3058,6 +3190,24 @@ async function readPytestLocalResource(reference, baseDirectory, containmentRoot
     if (!error.statusCode) error.statusCode = 409;
     throw error;
   }
+}
+
+async function readPytestLocalResourceFromDirectories(
+  reference,
+  directories,
+  containmentRoot,
+  label,
+) {
+  let missingError = null;
+  for (const directory of directories) {
+    try {
+      return await readPytestLocalResource(reference, directory, containmentRoot, label);
+    } catch (error) {
+      if (!error.pytestResourceMissing) throw error;
+      missingError ||= error;
+    }
+  }
+  throw missingError || statusError(`${label} does not exist: ${reference}`, 409);
 }
 
 async function inlinePytestCssAssets(css, stylesheetPath, containmentRoot) {
@@ -3097,7 +3247,7 @@ async function inlinePytestCssAssets(css, stylesheetPath, containmentRoot) {
   return transformed;
 }
 
-async function inlinePytestScriptAssets(html, sourcePath, containmentRoot) {
+async function inlinePytestScriptAssets(html, sourceDirectories, containmentRoot) {
   const scriptTags = [...html.matchAll(/<script\b[^>]*\bsrc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)[^>]*>\s*<\/script\s*>/gi)];
   if (!scriptTags.length) return html;
   const replacements = [];
@@ -3107,26 +3257,22 @@ async function inlinePytestScriptAssets(html, sourcePath, containmentRoot) {
     if (!src || /^(?:data|blob):/i.test(src)
       || src.startsWith('//')
       || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(src)) continue;
-    try {
-      const script = await readPytestLocalResource(
-        src,
-        path.dirname(sourcePath),
-        containmentRoot,
-        'Pytest HTML script',
-      );
-      let content = scriptCache.get(script.resolvedPath);
-      if (content == null) {
-        content = script.content.toString('utf8').replace(/<\/script/gi, '<\\/script');
-        scriptCache.set(script.resolvedPath, content);
-      }
-      replacements.push({
-        index: match.index,
-        length: match[0].length,
-        value: `<script>${content}</script>`,
-      });
-    } catch {
-      // A running pytest report can publish its stylesheet before optional player scripts.
+    const script = await readPytestLocalResourceFromDirectories(
+      src,
+      sourceDirectories,
+      containmentRoot,
+      'Pytest HTML script',
+    );
+    let content = scriptCache.get(script.resolvedPath);
+    if (content == null) {
+      content = script.content.toString('utf8').replace(/<\/script/gi, '<\\/script');
+      scriptCache.set(script.resolvedPath, content);
     }
+    replacements.push({
+      index: match.index,
+      length: match[0].length,
+      value: `<script>${content}</script>`,
+    });
   }
   let transformed = html;
   for (const replacement of replacements.reverse()) {
@@ -3139,9 +3285,14 @@ async function inlinePytestScriptAssets(html, sourcePath, containmentRoot) {
 
 const PYTEST_MEDIA_TYPES = new Map([
   ['.aac', 'audio/aac'],
+  ['.avif', 'image/avif'],
+  ['.bmp', 'image/bmp'],
   ['.flv', 'video/x-flv'],
+  ['.gif', 'image/gif'],
   ['.htm', 'text/html; charset=utf-8'],
   ['.html', 'text/html; charset=utf-8'],
+  ['.jpeg', 'image/jpeg'],
+  ['.jpg', 'image/jpeg'],
   ['.m3u8', 'application/vnd.apple.mpegurl'],
   ['.m4a', 'audio/mp4'],
   ['.m4s', 'video/iso.segment'],
@@ -3152,13 +3303,31 @@ const PYTEST_MEDIA_TYPES = new Map([
   ['.mpd', 'application/dash+xml'],
   ['.ogg', 'audio/ogg'],
   ['.opus', 'audio/ogg'],
+  ['.png', 'image/png'],
+  ['.svg', 'image/svg+xml'],
   ['.ts', 'video/mp2t'],
   ['.txt', 'text/plain; charset=utf-8'],
   ['.vtt', 'text/vtt; charset=utf-8'],
   ['.wav', 'audio/wav'],
   ['.webm', 'video/webm'],
+  ['.webp', 'image/webp'],
 ]);
-const PYTEST_MEDIA_ATTRIBUTE_REFERENCE = /\b(?:href|data-src|src)\s*=\s*(?:"|'|\\?&(?:#34|quot);)((?:\.\.\/|\.\/)?(?:[A-Za-z0-9_%+@(),.-]+\/)*[A-Za-z0-9_%+@(),.-]+\.(?:aac|flv|m3u8|m4a|m4s|m4v|mov|mp3|mp4|mpd|ogg|opus|ts|vtt|wav|webm)(?:\?[^"'\\<>\s&]*)?(?:#[^"'\\<>\s&]*)?)/gi;
+const PYTEST_IMAGE_EXTENSIONS = new Set([
+  '.avif', '.bmp', '.gif', '.jpeg', '.jpg', '.png', '.svg', '.webp',
+]);
+const EXTERNAL_ARTIFACT_MEDIA_TYPES = new Map([
+  ...PYTEST_MEDIA_TYPES,
+  ['.css', 'text/css; charset=utf-8'],
+  ['.eot', 'application/vnd.ms-fontobject'],
+  ['.ico', 'image/x-icon'],
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.json', 'application/json; charset=utf-8'],
+  ['.otf', 'font/otf'],
+  ['.ttf', 'font/ttf'],
+  ['.woff', 'font/woff'],
+  ['.woff2', 'font/woff2'],
+]);
+const PYTEST_MEDIA_ATTRIBUTE_REFERENCE = /\b(?:href|data-src|src)\s*=\s*(?:"|'|\\?&(?:#34|quot);)((?:\.\.\/|\.\/)?(?:[A-Za-z0-9_%+@(),.-]+\/)*[A-Za-z0-9_%+@(),.-]+\.(?:aac|avif|bmp|flv|gif|jpe?g|m3u8|m4a|m4s|m4v|mov|mp3|mp4|mpd|ogg|opus|png|svg|ts|vtt|wav|webm|webp)(?:\?[^"'\\<>\s&]*)?(?:#[^"'\\<>\s&]*)?)/gi;
 
 function pytestMediaResourceUrl(taskId, reportId, artifactId, resourceId) {
   return `/api/sessions/${encodeURIComponent(taskId)}`
@@ -3244,6 +3413,13 @@ async function hardLinkedPytestArtifactDirectories(sourcePath, containmentRoot) 
   return [...directories].sort();
 }
 
+async function pytestArtifactResourceDirectories(sourcePath, containmentRoot) {
+  return [
+    path.dirname(sourcePath),
+    ...await hardLinkedPytestArtifactDirectories(sourcePath, containmentRoot),
+  ];
+}
+
 async function resolvePytestMediaResourceFromDirectories(reference, directories, containmentRoot) {
   let missingError = null;
   for (const directory of directories) {
@@ -3257,6 +3433,43 @@ async function resolvePytestMediaResourceFromDirectories(reference, directories,
   throw missingError || statusError(`Pytest HTML media does not exist: ${reference}`, 409);
 }
 
+function pytestImageExtraReferences(html) {
+  const references = new Set();
+  const addImageExtra = (extra) => {
+    if (extra?.format_type === 'image' && typeof extra.content === 'string') {
+      const reference = extra.content.trim();
+      if (reference && !reference.startsWith('//')
+        && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(reference)) {
+        let decodedPath = '';
+        try {
+          decodedPath = decodeURIComponent(reference.split(/[?#]/, 1)[0]);
+        } catch {}
+        if (PYTEST_IMAGE_EXTENSIONS.has(path.extname(decodedPath).toLowerCase())) {
+          references.add(reference);
+        }
+      }
+    }
+  };
+  for (const match of html.matchAll(/<[^>]+\bdata-jsonblob\s*=\s*(?:"[^"]*"|'[^']*')[^>]*>/gi)) {
+    const encoded = htmlAttribute(match[0], 'data-jsonblob');
+    if (!encoded) continue;
+    try {
+      const payload = JSON.parse(decodeHtmlEntities(encoded));
+      const tests = payload?.tests;
+      if (!tests || typeof tests !== 'object' || Array.isArray(tests)) continue;
+      for (const results of Object.values(tests)) {
+        if (!Array.isArray(results)) continue;
+        for (const result of results) {
+          if (Array.isArray(result?.extras)) result.extras.forEach(addImageExtra);
+        }
+      }
+    } catch {
+      // Malformed report state is left to pytest-html; other explicit resources still archive.
+    }
+  }
+  return references;
+}
+
 function mediaReferencesInHtml(html) {
   const references = new Set();
   for (const match of html.matchAll(PYTEST_MEDIA_ATTRIBUTE_REFERENCE)) {
@@ -3265,10 +3478,10 @@ function mediaReferencesInHtml(html) {
       throw statusError(`Pytest HTML references more than ${MAX_PYTEST_MEDIA_RESOURCES} media resources`, 413);
     }
   }
-  for (const reference of arguments[1] || []) {
+  for (const reference of pytestImageExtraReferences(html)) {
     references.add(reference);
     if (references.size > MAX_PYTEST_MEDIA_RESOURCES) {
-      throw statusError(`Pytest HTML references more than ${MAX_PYTEST_MEDIA_RESOURCES} resources`, 413);
+      throw statusError(`Pytest HTML references more than ${MAX_PYTEST_MEDIA_RESOURCES} media resources`, 413);
     }
   }
   return [...references];
@@ -3277,8 +3490,8 @@ function mediaReferencesInHtml(html) {
 function manifestReferences(content, extension) {
   const references = [];
   if (extension === '.m3u8') {
-    for (const match of content.matchAll(/\bURI\s*=\s*"([^"]+)"/gi)) {
-      references.push(match[1]);
+    for (const match of content.matchAll(/\bURI\s*=\s*(?:"([^"]+)"|'([^']+)')/gi)) {
+      references.push(match[1] ?? match[2]);
     }
     for (const line of content.split(/\r?\n/)) {
       const value = line.trim();
@@ -3558,20 +3771,28 @@ async function archivePytestMediaResources(htmlContent, options) {
     ? options.referenceContent.toString('utf8')
     : String(options.referenceContent ?? sourceHtml);
   const descriptors = new Map();
+  const countedMediaPaths = new Set();
   const warnings = [];
+  const mediaResourceLimit = Number.isInteger(options.mediaResourceLimit)
+    ? Math.max(0, options.mediaResourceLimit)
+    : MAX_PYTEST_MEDIA_RESOURCES;
 
-  async function descriptorFor(reference, baseDirectory) {
+  async function descriptorFor(reference, baseDirectory, descriptorOptions = {}) {
     const baseDirectories = Array.isArray(baseDirectory) ? baseDirectory : [baseDirectory];
     const resolvedPath = await resolvePytestMediaResourceFromDirectories(
       reference,
       baseDirectories,
       options.containmentRoot,
     );
+    const countsTowardMediaLimit = descriptorOptions.countsTowardMediaLimit !== false;
+    if (countsTowardMediaLimit && !countedMediaPaths.has(resolvedPath)) {
+      if (countedMediaPaths.size >= mediaResourceLimit) {
+        throw statusError(`Pytest HTML references more than ${mediaResourceLimit} media resources`, 413);
+      }
+      countedMediaPaths.add(resolvedPath);
+    }
     const existing = descriptors.get(resolvedPath);
     if (existing) return existing;
-    if (descriptors.size >= MAX_PYTEST_MEDIA_RESOURCES) {
-      throw statusError(`Pytest HTML references more than ${MAX_PYTEST_MEDIA_RESOURCES} media resources`, 413);
-    }
     const extension = path.extname(resolvedPath).toLowerCase();
     const resourceId = `report-resource-${hashContent(`${options.artifactId}\0${resolvedPath}`).slice(0, 32)}`;
     const descriptor = {
@@ -3636,11 +3857,14 @@ async function archivePytestMediaResources(htmlContent, options) {
         replaceLiteralReferences(transformedManifest, replacements),
         'utf8',
       );
-      archived = await archiveBufferAtomically(transformed, descriptor.managedPath);
+      archived = await archiveBufferAtomically(transformed, descriptor.managedPath, {
+        onProgress: options.onProgress,
+      });
     } else {
       archived = await archiveFileAtomically({
         sourcePath: descriptor.resolvedPath,
         destinationPath: descriptor.managedPath,
+        onProgress: options.onProgress,
       });
     }
     Object.assign(descriptor, archived, { status: 'done' });
@@ -3653,23 +3877,33 @@ async function archivePytestMediaResources(htmlContent, options) {
     options.artifactId,
   ), { label: 'Skill report artifact resource directory' });
   const replacements = new Map();
-  const artifactDirectories = [
-    path.dirname(options.sourcePath),
-    ...await hardLinkedPytestArtifactDirectories(options.sourcePath, options.containmentRoot),
-  ];
-  const logReferences = new Set(options.logReferences || []);
-  for (const reference of mediaReferencesInHtml(referenceHtml, options.logReferences)) {
-    try {
-      const descriptor = await descriptorFor(
-        reference,
-        logReferences.has(reference) ? artifactDirectories : path.dirname(options.sourcePath),
-      );
-      await archiveDescriptor(descriptor);
-      replacements.set(reference, descriptor.url);
-    } catch (error) {
-      warnings.push(`${reference}: ${String(error.message || error)}`);
+  // A registered report may be a hard link under a sanitized alias directory.
+  // Keep the declared report directory first, then use only exact hard-link
+  // siblings as a fallback. This follows actual references without scanning
+  // or copying an entire videos directory.
+  const artifactDirectories = await pytestArtifactResourceDirectories(
+    options.sourcePath,
+    options.containmentRoot,
+  );
+
+  async function archiveReferences(references, descriptorOptions = {}) {
+    for (const reference of new Set(references)) {
+      try {
+        const descriptor = await descriptorFor(
+          reference,
+          artifactDirectories,
+          descriptorOptions,
+        );
+        await archiveDescriptor(descriptor);
+        replacements.set(reference, descriptor.url);
+      } catch (error) {
+        warnings.push(`${reference}: ${String(error.message || error)}`);
+      }
     }
   }
+
+  await archiveReferences(options.logReferences || [], { countsTowardMediaLimit: false });
+  await archiveReferences(mediaReferencesInHtml(referenceHtml));
   return {
     content: Buffer.from(replaceLiteralReferences(sourceHtml, replacements), 'utf8'),
     resources: [...descriptors.values()].filter((descriptor) => descriptor.status === 'done'),
@@ -3712,10 +3946,11 @@ async function preparePytestLogLinks(html, sourcePath, containmentRoot, options 
 
   let projectedBytes = Buffer.byteLength(html);
   const resolvedLogs = new Map();
+  const sourceDirectories = options.sourceDirectories || [path.dirname(sourcePath)];
   for (const [reference, count] of textReferenceCounts) {
-    const resolvedPath = await resolvePytestMediaResource(
+    const resolvedPath = await resolvePytestMediaResourceFromDirectories(
       reference,
-      path.dirname(sourcePath),
+      sourceDirectories,
       containmentRoot,
     );
     const stat = await fs.promises.lstat(resolvedPath);
@@ -3755,6 +3990,7 @@ async function preparePytestLogLinks(html, sourcePath, containmentRoot, options 
 async function selfContainedPytestHtml(sourceContent, sourcePath, containmentRoot, options = {}) {
   const sourceHtml = sourceContent.toString('utf8');
   const html = sourceHtml;
+  const sourceDirectories = await pytestArtifactResourceDirectories(sourcePath, containmentRoot);
   const stylesheetTags = [...html.matchAll(/<link\b[^>]*>/gi)].filter((match) => {
     const rel = htmlAttribute(match[0], 'rel').toLowerCase().split(/\s+/);
     return rel.includes('stylesheet');
@@ -3764,9 +4000,9 @@ async function selfContainedPytestHtml(sourceContent, sourcePath, containmentRoo
   for (const match of stylesheetTags) {
     const href = htmlAttribute(match[0], 'href');
     if (!href) throw statusError('Pytest HTML stylesheet link must include href', 409);
-    const stylesheet = await readPytestLocalResource(
+    const stylesheet = await readPytestLocalResourceFromDirectories(
       href,
-      path.dirname(sourcePath),
+      sourceDirectories,
       containmentRoot,
       'Pytest HTML stylesheet',
     );
@@ -3821,10 +4057,13 @@ try { void window.sessionStorage.length; } catch {
       + storageShim
       + transformed.slice(insertionIndex);
   }
-  transformed = await inlinePytestScriptAssets(transformed, sourcePath, containmentRoot);
+  transformed = await inlinePytestScriptAssets(transformed, sourceDirectories, containmentRoot);
   const preparedLogs = options.includeLogs === false
     ? { content: transformed, externalReferences: [] }
-    : await preparePytestLogLinks(transformed, sourcePath, containmentRoot, options);
+    : await preparePytestLogLinks(transformed, sourcePath, containmentRoot, {
+      ...options,
+      sourceDirectories,
+    });
   transformed = preparedLogs.content;
   const output = transformed === sourceHtml ? sourceContent : Buffer.from(transformed, 'utf8');
   if (output.length > MAX_SKILL_REPORT_ARTIFACT_BYTES) {
@@ -3878,23 +4117,15 @@ function externalArtifactPreviewHtml(content, taskId, attemptId, artifactKey) {
     PYTEST_MEDIA_ATTRIBUTE_REFERENCE,
     (attribute, reference) => attribute.replace(reference, resourceUrl(reference)),
   );
-  return Buffer.from(preview, 'utf8');
+  const imageExtraReplacements = new Map(
+    [...pytestImageExtraReferences(html)].map((reference) => [reference, resourceUrl(reference)]),
+  );
+  return Buffer.from(replaceLiteralReferences(preview, imageExtraReplacements), 'utf8');
 }
 
 function externalArtifactMediaType(filePath) {
   const extension = path.extname(filePath).toLowerCase();
-  return new Map([
-    ['.css', 'text/css; charset=utf-8'], ['.js', 'text/javascript; charset=utf-8'],
-    ['.json', 'application/json; charset=utf-8'], ['.svg', 'image/svg+xml'],
-    ['.png', 'image/png'], ['.jpg', 'image/jpeg'], ['.jpeg', 'image/jpeg'],
-    ['.gif', 'image/gif'], ['.webp', 'image/webp'], ['.avif', 'image/avif'],
-    ['.woff', 'font/woff'], ['.woff2', 'font/woff2'], ['.ttf', 'font/ttf'],
-    ['.mp4', 'video/mp4'], ['.webm', 'video/webm'], ['.mp3', 'audio/mpeg'],
-    ['.m3u8', 'application/vnd.apple.mpegurl'], ['.mpd', 'application/dash+xml'],
-    ['.m4s', 'video/iso.segment'],
-    ['.htm', 'text/html; charset=utf-8'], ['.html', 'text/html; charset=utf-8'],
-    ['.ts', 'video/mp2t'], ['.txt', 'text/plain; charset=utf-8'],
-  ]).get(extension) || 'application/octet-stream';
+  return EXTERNAL_ARTIFACT_MEDIA_TYPES.get(extension) || 'application/octet-stream';
 }
 
 function externalArtifactDeclaration(db, taskId, attemptId, artifactKey) {
@@ -3931,7 +4162,7 @@ function externalArtifactResourceRoot(db, taskId, attemptId, declaration) {
   }
 }
 
-async function archiveBufferAtomically(content, destinationPath) {
+async function archiveBufferAtomically(content, destinationPath, options = {}) {
   const temporaryPath = path.join(
     path.dirname(destinationPath),
     `.${path.basename(destinationPath)}.${process.pid}.${crypto.randomUUID()}.source`,
@@ -3947,7 +4178,11 @@ async function archiveBufferAtomically(content, destinationPath) {
     await handle.sync();
     await handle.close();
     handle = null;
-    return await archiveFileAtomically({ sourcePath: temporaryPath, destinationPath });
+    return await archiveFileAtomically({
+      sourcePath: temporaryPath,
+      destinationPath,
+      onProgress: options.onProgress,
+    });
   } finally {
     try { await handle?.close(); } catch {}
     try { await fs.promises.unlink(temporaryPath); } catch (error) {
@@ -3956,10 +4191,10 @@ async function archiveBufferAtomically(content, destinationPath) {
   }
 }
 
-async function replaceArchivedBufferAtomically(content, destinationPath) {
+async function replaceArchivedBufferAtomically(content, destinationPath, options = {}) {
   const replacementPath = `${destinationPath}.${crypto.randomUUID()}.replacement`;
   try {
-    await archiveBufferAtomically(content, replacementPath);
+    await archiveBufferAtomically(content, replacementPath, options);
     const [destinationStat, replacementStat] = await Promise.all([
       fs.promises.lstat(destinationPath),
       fs.promises.lstat(replacementPath),
@@ -4065,7 +4300,9 @@ function publishSkillReport(sessionId, input, context = {}) {
       payloadJson,
       publishedAt,
     );
-    if (report.artifacts.length) queueSkillReportArtifactJob(db, taskId, id, publishedAt);
+    if (report.artifacts.length) {
+      queueSkillReportArtifactJob(db, taskId, id, publishedAt, context.artifactJobOwner);
+    }
     insertSessionWorklog(db, taskId, {
       turnId: turnId || null,
       ts: publishedAt,
@@ -4105,15 +4342,102 @@ function terminalReportStatus(data, external) {
   return terminalReportExitCode(data, external) === 0 ? 'succeeded' : 'failed';
 }
 
-function missingPlatformReportSkillsForTask(db, taskId) {
-  const usedSkills = db.prepare(`
+function missingTerminalPlatformReportSkillsForTask(db, taskId) {
+  const usedSkills = new Set(db.prepare(`
     SELECT DISTINCT attribution.skill_id
     FROM command_skill_attributions attribution
     WHERE attribution.task_id=? AND attribution.action='linked'
-  `).all(taskId).map((row) => row.skill_id);
-  return usedSkills.filter((skillId) => PLATFORM_REPORT_SKILL_IDS.has(skillId)
-    && !db.prepare('SELECT 1 FROM skill_reports WHERE task_id=? AND skill_id=? LIMIT 1')
-      .get(taskId, skillId));
+      AND attribution.sequence=(
+        SELECT MAX(latest.sequence) FROM command_skill_attributions latest
+        WHERE latest.command_execution_id=attribution.command_execution_id
+          AND latest.skill_id=attribution.skill_id
+      )
+  `).all(taskId).map((row) => row.skill_id));
+  const invokedSkills = db.prepare(`
+    SELECT DISTINCT json_extract(skill.value, '$.skillId') AS skill_id
+    FROM skill_invocations invocation, json_each(invocation.skills_json) skill
+    WHERE invocation.task_id=?
+  `).all(taskId).map((row) => row.skill_id).filter(Boolean);
+  for (const skillId of invokedSkills) usedSkills.add(skillId);
+  return [...usedSkills].filter((skillId) => {
+    if (!PLATFORM_REPORT_SKILL_IDS.has(skillId)) return false;
+    const latestReports = db.prepare(`
+      SELECT report.status FROM skill_reports report
+      WHERE report.task_id=? AND report.skill_id=?
+        AND report.revision=(
+          SELECT MAX(latest.revision) FROM skill_reports latest
+          WHERE latest.task_id=report.task_id AND latest.report_key=report.report_key
+        )
+    `).all(taskId, skillId);
+    return !latestReports.length || latestReports.some((report) => (
+      ['pending', 'running', 'unknown'].includes(report.status)
+    ));
+  });
+}
+
+function latestPlatformReportEvidenceForSkill(db, taskId, skillId) {
+  const execution = db.prepare(`
+    SELECT execution.id, execution.status, execution.exit_code,
+      execution.started_at, execution.finished_at, 'Command execution' AS evidence_kind
+    FROM command_executions execution
+    JOIN command_skill_attributions attribution
+      ON attribution.command_execution_id=execution.id
+    WHERE execution.task_id=? AND attribution.skill_id=?
+      AND attribution.action='linked'
+      AND attribution.sequence=(
+        SELECT MAX(latest.sequence) FROM command_skill_attributions latest
+        WHERE latest.command_execution_id=attribution.command_execution_id
+          AND latest.skill_id=attribution.skill_id
+      )
+      AND lower(execution.command) NOT LIKE '%codex-skill-report%'
+    ORDER BY
+      COALESCE(NULLIF(execution.finished_at, ''), NULLIF(execution.started_at, ''), '') DESC,
+      attribution.sequence DESC
+    LIMIT 1
+  `).get(taskId, skillId);
+  const invocation = db.prepare(`
+    SELECT invocation.id, invocation.status, invocation.exit_code,
+      invocation.started_at, invocation.finished_at, 'Skill invocation' AS evidence_kind
+    FROM skill_invocations invocation, json_each(invocation.skills_json) skill
+    WHERE invocation.task_id=?
+      AND json_extract(skill.value, '$.skillId')=?
+      AND lower(invocation.command_name)<>'codex-skill-report'
+    ORDER BY COALESCE(NULLIF(invocation.finished_at, ''), invocation.started_at) DESC,
+      invocation.sequence DESC
+    LIMIT 1
+  `).get(taskId, skillId);
+  if (!execution) return invocation;
+  if (!invocation) return execution;
+  const executionAt = execution.finished_at || execution.started_at || '';
+  const invocationAt = invocation.finished_at || invocation.started_at || '';
+  return invocationAt >= executionAt ? invocation : execution;
+}
+
+function deploymentFallbackOutcome(execution, data) {
+  if (!execution) {
+    return {
+      exitCode: terminalReportExitCode(data, null),
+      status: terminalReportStatus(data, null),
+      observedAt: String(data.finishedAt || nowIso()),
+      summary: String(data.summary || data.resultText || 'Deployment turn completed.'),
+    };
+  }
+  const exitCode = Number.isInteger(Number(execution.exit_code))
+    ? Number(execution.exit_code)
+    : null;
+  const executionStatus = String(execution.status || '').toLowerCase();
+  let status = 'unknown';
+  if (executionStatus === 'cancelled') status = 'cancelled';
+  else if (exitCode != null) status = exitCode === 0 ? 'succeeded' : 'failed';
+  else if (['completed', 'succeeded'].includes(executionStatus)) status = 'succeeded';
+  else if (['failed', 'error', 'lost', 'interrupted'].includes(executionStatus)) status = 'failed';
+  const exitSummary = exitCode == null ? executionStatus || 'unknown' : `exit code ${exitCode}`;
+  return {
+    exitCode,
+    status,
+    observedAt: execution.finished_at || execution.started_at || data.finishedAt || nowIso(),
+    summary: `Deployment command reached ${exitSummary}; detailed deployment result was not published.`,
+  };
 }
 
 function publishMissingPlatformReports(taskId, data, skillIds) {
@@ -4124,35 +4448,50 @@ function publishMissingPlatformReports(taskId, data, skillIds) {
     SELECT log_path, done_path, state_path, meta_path, result_json, started_at, finished_at
     FROM external_attempts WHERE task_id=? ORDER BY generation DESC LIMIT 1
   `).get(taskId);
-  const exitCode = terminalReportExitCode(data, external);
-  const status = terminalReportStatus(data, external);
   for (const skillId of skillIds) {
     try {
-      const evidence = [
-        ['Log', external?.log_path],
-        ['Done', external?.done_path],
-        ['State', external?.state_path],
-        ['Metadata', external?.meta_path],
-      ].filter(([, value]) => value);
+      const isTestReport = skillId === 'cloud-recording-test';
+      const execution = isTestReport
+        ? null
+        : latestPlatformReportEvidenceForSkill(db, taskId, skillId);
+      const outcome = isTestReport
+        ? {
+            exitCode: terminalReportExitCode(data, external),
+            status: terminalReportStatus(data, external),
+            observedAt: String(data.finishedAt || nowIso()),
+            summary: String(data.summary || data.resultText || `${task?.name || taskId} completed.`),
+          }
+        : deploymentFallbackOutcome(execution, data);
+      const evidence = isTestReport
+        ? [
+            ['Log', external?.log_path],
+            ['Done', external?.done_path],
+            ['State', external?.state_path],
+            ['Metadata', external?.meta_path],
+          ].filter(([, value]) => value)
+        : [
+            [execution?.evidence_kind || 'Execution', execution?.id],
+            ['Command status', execution?.status],
+          ].filter(([, value]) => value);
       const report = publishSkillReport(taskId, {
         schemaVersion: 2,
         reportKey: `platform-fallback:${skillId}:${hashContent(taskId).slice(0, 16)}`,
         skillId,
-        reportType: skillId === 'cloud-recording-test' ? 'test-result' : 'deployment-result',
+        reportType: isTestReport ? 'test-result' : 'deployment-result',
         title: `${task?.name || taskId} result`,
-        status,
-        summary: String(data.summary || data.resultText || `${task?.name || taskId} completed.`).slice(0, 2000),
-        observedAt: String(data.finishedAt || nowIso()),
+        status: outcome.status,
+        summary: outcome.summary.slice(0, 2000),
+        observedAt: String(outcome.observedAt),
         artifacts: [],
         metrics: [{
-          key: 'exit-code', label: 'Exit code', value: exitCode,
-          tone: status === 'succeeded' ? 'success' : 'danger',
+          key: 'exit-code', label: 'Exit code', value: outcome.exitCode ?? 'unknown',
+          tone: outcome.status === 'succeeded' ? 'success' : 'danger',
         }],
         sections: [
           {
             id: 'publication', title: 'Publication', kind: 'fields', priority: 'primary', defaultExpanded: true,
             fields: [
-              { label: 'Status', value: status, format: 'status', tone: status === 'succeeded' ? 'success' : 'warning' },
+              { label: 'Status', value: outcome.status, format: 'status', tone: outcome.status === 'succeeded' ? 'success' : 'warning' },
               { label: 'Source', value: 'Platform terminal fallback after the Skill did not publish a report.', format: 'text', tone: 'warning' },
             ],
           },
@@ -4166,7 +4505,7 @@ function publishMissingPlatformReports(taskId, data, skillIds) {
         turnId: data.turnId,
         kind: 'skill.report.fallback_published', level: 'warn',
         message: `Published terminal fallback report for ${skillId}`,
-        payload: { skillId, reportId: report.id, status },
+        payload: { skillId, reportId: report.id, status: outcome.status },
         actor: 'platform',
       });
     } catch (error) {
@@ -4181,6 +4520,7 @@ function publishMissingPlatformReports(taskId, data, skillIds) {
 }
 
 async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {}) {
+  await context.renewLease?.();
   ensureSessionStorage(taskId);
   ensureManagedDirectory(sessionSkillReportArtifactDir(taskId), {
     label: 'Skill report artifact root',
@@ -4197,6 +4537,8 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
   let archivedResources = [];
   let mediaWarnings = [];
   let repairedArtifact = false;
+  let sourceSha256 = registeredArtifact?.source_sha256 || '';
+  let sourceContentSnapshot = null;
   if (!pathEntryExists(destinationPath)) {
     let sourceStat;
     try {
@@ -4220,6 +4562,8 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
     const sourceContent = await readStablePytestArtifactFile(candidate.sourcePath, {
       label: 'Pytest HTML report',
     });
+    sourceContentSnapshot = sourceContent;
+    sourceSha256 = hashBuffer(sourceContent);
     assertCompletedPytestHtml(sourceContent, 'Pytest HTML report');
     const resolvedSourcePath = await fs.promises.realpath(candidate.sourcePath);
     const containmentRoot = candidate.workingDirectory || path.dirname(resolvedSourcePath);
@@ -4236,6 +4580,8 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
       containmentRoot,
       referenceContent: sourceContent,
       logReferences: selfContained.externalLogReferences,
+      mediaResourceLimit: context.mediaResourceLimit,
+      onProgress: context.renewLease,
     });
     const archivedContent = mediaArchive.content;
     archivedResources = mediaArchive.resources;
@@ -4244,8 +4590,11 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
       ? await archiveFileAtomically({
         sourcePath: candidate.sourcePath,
         destinationPath,
+        onProgress: context.renewLease,
       })
-      : await archiveBufferAtomically(archivedContent, destinationPath);
+      : await archiveBufferAtomically(archivedContent, destinationPath, {
+        onProgress: context.renewLease,
+      });
   } else {
     const managedContent = await readStablePytestArtifactFile(destinationPath, {
       label: 'Managed pytest HTML report',
@@ -4259,17 +4608,20 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
     }
     const resolvedSourcePath = path.resolve(candidate.sourcePath);
     const containmentRoot = candidate.workingDirectory || path.dirname(resolvedSourcePath);
+    if (pathEntryExists(candidate.sourcePath)) {
+      sourceContentSnapshot = await readStablePytestArtifactFile(candidate.sourcePath, {
+        label: 'Pytest HTML report',
+      });
+      assertCompletedPytestHtml(sourceContentSnapshot, 'Pytest HTML report');
+    }
     let repairSourceContent = managedContent;
     let repairReferenceContent = managedContent;
     let sourceVerifiedForRepair = false;
     const hasOmittedLogs = managedContent.includes(
       'data:text/plain;charset=utf-8,Log%20omitted%3A%20artifact%20size%20limit',
     );
-    if (hasOmittedLogs && pathEntryExists(candidate.sourcePath)) {
-      const sourceContent = await readStablePytestArtifactFile(candidate.sourcePath, {
-        label: 'Pytest HTML report',
-      });
-      assertCompletedPytestHtml(sourceContent, 'Pytest HTML report');
+    if (hasOmittedLogs && sourceContentSnapshot) {
+      const sourceContent = sourceContentSnapshot;
       const legacySelfContained = await selfContainedPytestHtml(
         sourceContent,
         resolvedSourcePath,
@@ -4283,11 +4635,13 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
         sourcePath: resolvedSourcePath,
         containmentRoot,
         referenceContent: sourceContent,
+        mediaResourceLimit: context.mediaResourceLimit,
       });
       if (legacyMediaArchive.content.equals(managedContent)) {
         repairSourceContent = sourceContent;
         repairReferenceContent = sourceContent;
         sourceVerifiedForRepair = true;
+        sourceSha256 = hashBuffer(sourceContent);
       }
     }
     const selfContained = await selfContainedPytestHtml(
@@ -4303,6 +4657,8 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
       containmentRoot,
       referenceContent: repairReferenceContent,
       logReferences: selfContained.externalLogReferences,
+      mediaResourceLimit: context.mediaResourceLimit,
+      onProgress: context.renewLease,
     });
     const repairedContent = mediaArchive.content;
     archivedResources = mediaArchive.resources;
@@ -4310,12 +4666,15 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
     if (repairedContent.equals(managedContent)) {
       archived = await digestRegularFile(destinationPath, {
         label: 'Managed pytest HTML report',
+        onProgress: context.renewLease,
       });
     } else {
       if (hasOmittedLogs && !sourceVerifiedForRepair) {
         throw statusError('Pytest HTML source no longer reproduces its managed archive', 409);
       }
-      archived = await replaceArchivedBufferAtomically(repairedContent, destinationPath);
+      archived = await replaceArchivedBufferAtomically(repairedContent, destinationPath, {
+        onProgress: context.renewLease,
+      });
       repairedArtifact = true;
     }
   }
@@ -4336,8 +4695,8 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
           throw statusError('Registered pytest HTML report does not match its managed archive', 409);
         }
         db.prepare(`
-          UPDATE skill_report_artifacts SET bytes=?, sha256=? WHERE id=?
-        `).run(archived.bytes, archived.sha256, existing.id);
+          UPDATE skill_report_artifacts SET bytes=?, sha256=?, source_sha256=? WHERE id=?
+        `).run(archived.bytes, archived.sha256, sourceSha256, existing.id);
         insertSessionWorklog(db, taskId, {
           turnId: row.turn_id || null,
           ts: createdAt,
@@ -4354,17 +4713,20 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
             sourceExternalAttemptId: candidate.externalAttemptId || null,
           },
         });
+      } else if (sourceSha256 && existing.source_sha256 !== sourceSha256) {
+        db.prepare('UPDATE skill_report_artifacts SET source_sha256=? WHERE id=?')
+          .run(sourceSha256, existing.id);
       }
     } else {
       db.prepare(`
         INSERT INTO skill_report_artifacts(
           id, task_id, report_id, artifact_key, label, kind, file_name,
-          media_type, managed_path, bytes, sha256, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          media_type, managed_path, bytes, sha256, source_sha256, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         artifactId, taskId, row.id, candidate.key, candidate.label, candidate.kind,
         candidate.fileName, candidate.mediaType, destinationPath,
-        archived.bytes, archived.sha256, createdAt,
+        archived.bytes, archived.sha256, sourceSha256, createdAt,
       );
       insertSessionWorklog(db, taskId, {
         turnId: row.turn_id || null,
@@ -4424,6 +4786,145 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
       });
     }
   }).immediate();
+  await context.renewLease?.();
+  return { mediaWarningCount: mediaWarnings.length };
+}
+
+function projectRunVideosDirectory(sourcePath) {
+  const reportDirectory = path.dirname(path.resolve(sourcePath));
+  if (path.basename(reportDirectory) !== 'report') return null;
+  const runDirectory = path.dirname(reportDirectory);
+  if (path.basename(path.dirname(runDirectory)) !== 'task') return null;
+  return path.join(runDirectory, 'videos');
+}
+
+async function projectMediaResourceKeys(videosDirectory, containmentRoot) {
+  const keys = [];
+  const visit = async (directory) => {
+    const entries = await fs.promises.readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(entryPath);
+      } else if (entry.isFile()) {
+        const resolvedPath = await fs.promises.realpath(entryPath);
+        keys.push(path.relative(containmentRoot, resolvedPath).split(path.sep).join('/'));
+      } else {
+        keys.push(path.relative(containmentRoot, entryPath).split(path.sep).join('/'));
+      }
+    }
+  };
+  await visit(videosDirectory);
+  return keys;
+}
+
+function archivedResourceKeysForReportRun(db, taskId, row) {
+  const rows = row.step_run_id
+    ? db.prepare(`
+      SELECT DISTINCT resource.resource_key
+      FROM skill_report_artifact_resources resource
+      JOIN skill_reports report ON report.id=resource.report_id AND report.task_id=resource.task_id
+      WHERE resource.task_id=? AND report.step_run_id=?
+    `).all(taskId, row.step_run_id)
+    : db.prepare(`
+      SELECT DISTINCT resource_key
+      FROM skill_report_artifact_resources
+      WHERE task_id=? AND report_id=?
+    `).all(taskId, row.id);
+  return new Set(rows.map((resource) => resource.resource_key));
+}
+
+function appendProjectMediaCleanupWorklog(db, taskId, event) {
+  try {
+    insertSessionWorklog(db, taskId, event);
+  } catch {
+    // The archive has already been committed; cleanup observability must not
+    // turn a successful archive into a retry or remove its managed artifact.
+  }
+}
+
+async function removeArchivedProjectVideos(db, taskId, row, candidates, context = {}) {
+  const archivedResourceKeys = archivedResourceKeysForReportRun(db, taskId, row);
+  const directories = new Map();
+  for (const candidate of candidates) {
+    const videosDirectory = projectRunVideosDirectory(candidate.sourcePath);
+    if (videosDirectory && !directories.has(videosDirectory)) {
+      directories.set(videosDirectory, candidate.workingDirectory || path.dirname(candidate.sourcePath));
+    }
+  }
+  const failures = [];
+  for (const [videosDirectory, containmentRoot] of directories) {
+    await context.renewLease?.();
+    let stat;
+    try {
+      stat = await fs.promises.lstat(videosDirectory);
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      appendProjectMediaCleanupWorklog(db, taskId, {
+        kind: 'skill.report.project_media_cleanup_failed',
+        level: 'warn',
+        message: `Could not inspect project media directory ${videosDirectory}`,
+        actor: context.actor || 'artifact-worker',
+        requestId: context.requestId || '',
+        payload: { videosDirectory, error: String(error.message || error) },
+      });
+      failures.push(error);
+      continue;
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      appendProjectMediaCleanupWorklog(db, taskId, {
+        kind: 'skill.report.project_media_cleanup_skipped',
+        level: 'warn',
+        message: `Project media path is not a regular directory: ${videosDirectory}`,
+        actor: context.actor || 'artifact-worker',
+        requestId: context.requestId || '',
+        payload: { videosDirectory },
+      });
+      failures.push(statusError(`Project media path is not a regular directory: ${videosDirectory}`, 409));
+      continue;
+    }
+    const mediaResourceKeys = await projectMediaResourceKeys(videosDirectory, containmentRoot);
+    const unarchived = mediaResourceKeys.filter((resourceKey) => !archivedResourceKeys.has(resourceKey));
+    if (unarchived.length) {
+      appendProjectMediaCleanupWorklog(db, taskId, {
+        kind: 'skill.report.project_media_cleanup_deferred',
+        level: 'warn',
+        message: `Kept project media directory with ${unarchived.length} unarchived file(s): ${videosDirectory}`,
+        actor: context.actor || 'artifact-worker',
+        requestId: context.requestId || '',
+        payload: {
+          videosDirectory,
+          unarchivedCount: unarchived.length,
+          unarchivedResourceKeys: unarchived.slice(0, 100),
+        },
+      });
+      continue;
+    }
+    try {
+      await fs.promises.rm(videosDirectory, { recursive: true, force: true });
+      await context.renewLease?.();
+      appendProjectMediaCleanupWorklog(db, taskId, {
+        kind: 'skill.report.project_media_cleaned',
+        message: `Removed archived project media directory ${videosDirectory}`,
+        actor: context.actor || 'artifact-worker',
+        requestId: context.requestId || '',
+        payload: { videosDirectory },
+      });
+    } catch (error) {
+      appendProjectMediaCleanupWorklog(db, taskId, {
+        kind: 'skill.report.project_media_cleanup_failed',
+        level: 'warn',
+        message: `Could not remove project media directory ${videosDirectory}`,
+        actor: context.actor || 'artifact-worker',
+        requestId: context.requestId || '',
+        payload: { videosDirectory, error: String(error.message || error) },
+      });
+      failures.push(error);
+    }
+  }
+  if (failures.length) {
+    throw statusError(`Could not clean ${failures.length} archived project media director${failures.length === 1 ? 'y' : 'ies'}`, 409);
+  }
 }
 
 function artifactArchivalError(failures, candidateCount) {
@@ -4452,16 +4953,41 @@ async function archiveSkillReportArtifacts(sessionId, reportId, context = {}) {
   const report = parseJson(row.payload_json, {});
   const declarations = Array.isArray(report.artifacts) ? report.artifacts : [];
   if (!declarations.length) {
-    completeSkillReportArtifactJob(db, row.id);
+    completeSkillReportArtifactJob(db, row.id, context.jobOwner);
     return rowToSkillReport(row, db);
   }
   const evidence = declaredArtifactExecutionEvidence(db, taskId, report, row.step_run_id || '');
+  const reusable = await verifiedReusableSkillReportArtifacts(db, row, report, evidence);
+  if (reusable.artifactsByKey.size) {
+    insertSessionWorklog(db, taskId, {
+      turnId: row.turn_id || null,
+      kind: 'skill.report.artifacts.reused',
+      message: `Reused ${reusable.artifactsByKey.size} managed artifact(s) from prior report revisions`,
+      actor: context.actor || `skill:${row.skill_id}`,
+      requestId: context.requestId || '',
+      payload: {
+        reportId: row.id,
+        sourceReportId: reusable.sourceReportIds[0] || '',
+        sourceReportIds: reusable.sourceReportIds,
+        artifactKeys: [...reusable.artifactsByKey.keys()],
+      },
+    });
+  }
+  if (reusable.artifactsByKey.size === declarations.length) {
+    completeSkillReportArtifactJob(db, row.id, context.jobOwner);
+    return rowToSkillReport(row, db);
+  }
   const failures = [];
+  const artifactCandidates = [];
+  let mediaWarningCount = 0;
   for (const declaration of declarations) {
+    if (reusable.artifactsByKey.has(declaration.key)) continue;
     try {
       const candidate = declaredArtifactCandidate(declaration, evidence, declarations.length);
       if (candidate.kind === 'pytest-html') {
-        await archivePytestHtmlArtifact(db, taskId, row, candidate, context);
+        artifactCandidates.push(candidate);
+        const result = await archivePytestHtmlArtifact(db, taskId, row, candidate, context);
+        mediaWarningCount += Number(result?.mediaWarningCount || 0);
       } else {
         await archiveFailureAnalysisMarkdownArtifact(db, taskId, row, candidate, context);
       }
@@ -4469,28 +4995,67 @@ async function archiveSkillReportArtifacts(sessionId, reportId, context = {}) {
       failures.push({ declaration, error });
     }
   }
-  if (failures.length) throw artifactArchivalError(failures, declarations.length);
-  completeSkillReportArtifactJob(db, row.id);
+  if (failures.length) {
+    throw artifactArchivalError(failures, declarations.length - reusable.artifactsByKey.size);
+  }
+  if (mediaWarningCount === 0) {
+    await removeArchivedProjectVideos(db, taskId, row, artifactCandidates, context);
+  }
+  completeSkillReportArtifactJob(db, row.id, context.jobOwner);
   return rowToSkillReport(row, db);
 }
 
-function queueSkillReportArtifactJob(db, taskId, reportId, createdAt = nowIso()) {
+function queueSkillReportArtifactJob(db, taskId, reportId, createdAt = nowIso(), ownerInput = '') {
+  const owner = String(ownerInput || '').trim();
+  const leaseExpiresAt = owner
+    ? new Date(Date.now() + REPORT_ARTIFACT_JOB_LEASE_MS).toISOString()
+    : '';
   db.prepare(`
     INSERT INTO skill_report_artifact_jobs(
-      report_id, task_id, status, created_at, updated_at
-    ) VALUES (?, ?, 'pending', ?, ?)
+      report_id, task_id, status, attempt_count, lease_owner, lease_expires_at,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(report_id) DO NOTHING
-  `).run(reportId, taskId, createdAt, createdAt);
+  `).run(
+    reportId,
+    taskId,
+    owner ? 'processing' : 'pending',
+    owner ? 1 : 0,
+    owner,
+    leaseExpiresAt,
+    createdAt,
+    createdAt,
+  );
 }
 
-function completeSkillReportArtifactJob(db, reportId) {
+function completeSkillReportArtifactJob(db, reportId, ownerInput = '') {
+  const owner = String(ownerInput || '').trim();
   const now = nowIso();
-  db.prepare(`
+  const changed = db.prepare(`
     UPDATE skill_report_artifact_jobs
     SET status='completed', lease_owner='', lease_expires_at='', next_attempt_at='',
       last_error='', completed_at=?, updated_at=?
     WHERE report_id=? AND status<>'completed'
-  `).run(now, now, reportId);
+      AND (?='' OR (status='processing' AND lease_owner=?))
+  `).run(now, now, reportId, owner, owner);
+  if (owner && changed.changes !== 1) {
+    throw statusError('Skill report artifact job ownership changed before completion', 409);
+  }
+}
+
+function renewSkillReportArtifactJobLease(reportId, ownerInput) {
+  const owner = String(ownerInput || '').trim();
+  if (!owner) return;
+  const now = nowIso();
+  const leaseExpiresAt = new Date(Date.now() + REPORT_ARTIFACT_JOB_LEASE_MS).toISOString();
+  const changed = ensureStorage().prepare(`
+    UPDATE skill_report_artifact_jobs
+    SET lease_expires_at=?, updated_at=?
+    WHERE report_id=? AND status='processing' AND lease_owner=?
+  `).run(leaseExpiresAt, now, String(reportId || ''), owner);
+  if (changed.changes !== 1) {
+    throw statusError('Skill report artifact job ownership changed during archival', 409);
+  }
 }
 
 function reportArtifactJobRetryDelayMs(attemptCount) {
@@ -4542,6 +5107,8 @@ async function processSkillReportArtifactJob(reportId, workerId) {
   try {
     const report = await archiveSkillReportArtifacts(row.task_id, row.report_id, {
       actor: 'artifact-worker',
+      jobOwner: workerId,
+      renewLease: () => renewSkillReportArtifactJobLease(row.report_id, workerId),
     });
     return { ok: true, report };
   } catch (error) {
@@ -4581,6 +5148,7 @@ async function processSkillReportArtifactJob(reportId, workerId) {
 }
 
 async function archiveFailureAnalysisMarkdownArtifact(db, taskId, row, candidate, context) {
+  await context?.renewLease?.();
   ensureSessionStorage(taskId);
   ensureManagedDirectory(sessionSkillReportArtifactDir(taskId), {
     label: 'Skill report artifact root',
@@ -4615,6 +5183,7 @@ async function archiveFailureAnalysisMarkdownArtifact(db, taskId, row, candidate
     archived = await archiveFileAtomically({
       sourcePath: candidate.sourcePath,
       destinationPath,
+      onProgress: context?.renewLease,
     });
   } else {
     archived = await readStablePytestArtifactFile(destinationPath, {
@@ -4639,17 +5208,21 @@ async function archiveFailureAnalysisMarkdownArtifact(db, taskId, row, candidate
         || existing.sha256 !== archived.sha256) {
         throw statusError('Registered failure analysis report does not match its managed archive', 409);
       }
+      if (!existing.source_sha256) {
+        db.prepare('UPDATE skill_report_artifacts SET source_sha256=? WHERE id=?')
+          .run(archived.sha256, existing.id);
+      }
       return;
     }
     db.prepare(`
-      INSERT INTO skill_report_artifacts(
-        id, task_id, report_id, artifact_key, label, kind, file_name,
-        media_type, managed_path, bytes, sha256, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO skill_report_artifacts(
+          id, task_id, report_id, artifact_key, label, kind, file_name,
+          media_type, managed_path, bytes, sha256, source_sha256, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       artifactId, taskId, row.id, candidate.key, candidate.label, candidate.kind,
       candidate.fileName, candidate.mediaType, destinationPath,
-      archived.bytes, archived.sha256, createdAt,
+      archived.bytes, archived.sha256, archived.sha256, createdAt,
     );
     insertSessionWorklog(db, taskId, {
       turnId: row.turn_id || null,
@@ -4668,6 +5241,7 @@ async function archiveFailureAnalysisMarkdownArtifact(db, taskId, row, candidate
       },
     });
   }).immediate();
+  await context?.renewLease?.();
 }
 
 async function redactSkillReportArtifacts() {
@@ -4720,7 +5294,8 @@ async function openSkillReportArtifactFile(sessionId, reportId, artifactId, opti
   const db = ensureStorage();
   const taskId = canonicalTaskId(sessionId);
   const row = db.prepare(`
-    SELECT artifact.* FROM skill_report_artifacts artifact
+    SELECT artifact.*, report.payload_json AS report_payload_json
+    FROM skill_report_artifacts artifact
     JOIN skill_reports report ON report.id=artifact.report_id AND report.task_id=artifact.task_id
     WHERE artifact.task_id=? AND artifact.report_id=? AND artifact.id=?
   `).get(taskId, String(reportId || ''), String(artifactId || ''));
@@ -4741,9 +5316,143 @@ async function openSkillReportArtifactFile(sessionId, reportId, artifactId, opti
   return {
     fileHandle: opened.handle,
     bytes: opened.bytes,
-    fileName: row.file_name,
+    fileName: skillReportArtifactFileName(row),
     mediaType: row.media_type,
   };
+}
+
+function normalizePytestMediaKey(input) {
+  const mediaKey = String(input || '').trim();
+  if (!mediaKey || mediaKey.length > MAX_PYTEST_MEDIA_KEY_LENGTH || /[\u0000-\u001f\u007f]/.test(mediaKey)) {
+    throw statusError(
+      `Media key must contain 1-${MAX_PYTEST_MEDIA_KEY_LENGTH} characters without control characters`,
+      400,
+    );
+  }
+  return mediaKey;
+}
+
+function skillReportArtifactForMediaViews(db, sessionId, reportId, artifactId) {
+  const taskId = canonicalTaskId(sessionId);
+  return db.prepare(`
+    SELECT artifact.id, artifact.kind
+    FROM skill_report_artifacts artifact
+    JOIN skill_reports report
+      ON report.id=artifact.report_id AND report.task_id=artifact.task_id
+    WHERE artifact.task_id=? AND artifact.report_id=? AND artifact.id=?
+  `).get(taskId, String(reportId || ''), String(artifactId || '')) || null;
+}
+
+function listSkillReportArtifactMediaViews(sessionId, reportId, artifactId) {
+  const db = ensureStorage();
+  const artifact = skillReportArtifactForMediaViews(db, sessionId, reportId, artifactId);
+  if (!artifact) return null;
+  if (artifact.kind !== 'pytest-html') {
+    throw statusError('Viewed media state is only available for pytest HTML artifacts', 409);
+  }
+  return db.prepare(`
+    SELECT media_key, viewed_at
+    FROM skill_report_artifact_media_views
+    WHERE artifact_id=?
+    ORDER BY viewed_at, media_key
+  `).all(artifact.id).map((row) => ({
+    mediaKey: row.media_key,
+    viewedAt: row.viewed_at,
+  }));
+}
+
+function skillReportArtifactPlayerFormatHints(sessionId, reportId, artifactId) {
+  const db = ensureStorage();
+  const artifact = skillReportArtifactForMediaViews(db, sessionId, reportId, artifactId);
+  if (!artifact) return null;
+  if (artifact.kind !== 'pytest-html') return new Map();
+  const playerExtensions = new Set(['.flv', '.m3u8', '.mpd']);
+  return new Map(db.prepare(`
+    SELECT id, file_name
+    FROM skill_report_artifact_resources
+    WHERE artifact_id=?
+    ORDER BY id
+  `).all(artifact.id).flatMap((row) => {
+    const extension = path.extname(row.file_name).toLowerCase();
+    return playerExtensions.has(extension) ? [[row.id, extension]] : [];
+  }));
+}
+
+function skillReportArtifactPlaybackAlternatives(sessionId, reportId, artifactId) {
+  const db = ensureStorage();
+  const artifact = skillReportArtifactForMediaViews(db, sessionId, reportId, artifactId);
+  if (!artifact) return null;
+  if (artifact.kind !== 'pytest-html') return new Map();
+  const resources = db.prepare(`
+    SELECT id, resource_key, file_name
+    FROM skill_report_artifact_resources
+    WHERE artifact_id=?
+    ORDER BY resource_key, id
+  `).all(artifact.id);
+  const mp4ResourcesByDirectory = new Map();
+  for (const resource of resources) {
+    if (path.extname(resource.file_name).toLowerCase() !== '.mp4') continue;
+    const directory = path.posix.dirname(resource.resource_key);
+    const candidates = mp4ResourcesByDirectory.get(directory) || [];
+    candidates.push(resource);
+    mp4ResourcesByDirectory.set(directory, candidates);
+  }
+
+  const pairedMp4 = (playlist) => {
+    const directory = path.posix.dirname(playlist.resource_key);
+    const stem = path.posix.basename(
+      playlist.resource_key,
+      path.posix.extname(playlist.resource_key),
+    );
+    return (mp4ResourcesByDirectory.get(directory) || []).map((candidate) => {
+      const candidateStem = path.posix.basename(
+        candidate.resource_key,
+        path.posix.extname(candidate.resource_key),
+      );
+      let rank = Number.POSITIVE_INFINITY;
+      if (candidateStem === stem) rank = 0;
+      else if (candidateStem === `${stem}_0`) rank = 1;
+      return Number.isFinite(rank) ? { candidate, rank } : null;
+    }).filter(Boolean).sort((left, right) => (
+      left.rank - right.rank
+      || left.candidate.resource_key.localeCompare(right.candidate.resource_key)
+      || left.candidate.id.localeCompare(right.candidate.id)
+    ))[0]?.candidate || null;
+  };
+
+  return new Map(resources.flatMap((resource) => {
+    if (path.extname(resource.file_name).toLowerCase() !== '.m3u8') return [];
+    const paired = pairedMp4(resource);
+    return [[resource.id, { resourceId: paired?.id || '', format: '.mp4' }]];
+  }));
+}
+
+function markSkillReportArtifactMediaViewed(sessionId, reportId, artifactId, mediaKeyInput) {
+  const db = ensureStorage();
+  const mediaKey = normalizePytestMediaKey(mediaKeyInput);
+  return db.transaction(() => {
+    const artifact = skillReportArtifactForMediaViews(db, sessionId, reportId, artifactId);
+    if (!artifact) throw statusError('Report artifact not found', 404);
+    if (artifact.kind !== 'pytest-html') {
+      throw statusError('Viewed media state is only available for pytest HTML artifacts', 409);
+    }
+    const viewedAt = nowIso();
+    const inserted = db.prepare(`
+      INSERT INTO skill_report_artifact_media_views(artifact_id, media_key, viewed_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(artifact_id, media_key) DO NOTHING
+    `).run(artifact.id, mediaKey, viewedAt);
+    const row = db.prepare(`
+      SELECT media_key, viewed_at
+      FROM skill_report_artifact_media_views
+      WHERE artifact_id=? AND media_key=?
+    `).get(artifact.id, mediaKey);
+    return {
+      mediaKey: row.media_key,
+      viewedAt: row.viewed_at,
+      created: inserted.changes === 1,
+    };
+  }).immediate();
 }
 
 async function openSkillReportArtifactResourceFile(
@@ -4814,6 +5523,8 @@ async function openSkillReportArtifactResourceFile(
     bytes: opened.bytes,
     fileName: row.file_name,
     mediaType: row.media_type,
+    managedPath: expectedPath,
+    sha256: row.sha256,
   };
 }
 
@@ -5489,6 +6200,8 @@ function rowToExternalAttempt(row) {
     originTurnId: row.origin_turn_id || '',
     originAttemptId: row.origin_attempt_id || '',
     sourceCommandExecutionId: row.source_command_execution_id || '',
+    skillInvocationId: row.skill_invocation_id || '',
+    skills: [],
     chainKey: row.chain_key,
     generation: Number(row.generation),
     label: row.label,
@@ -5640,18 +6353,21 @@ function listExternalAttempts(taskId, options = {}) {
   const db = ensureStorage();
   const statuses = String(options.status || '').split(',').map((item) => item.trim()).filter(Boolean);
   const statusSql = statuses.length ? ` AND status IN (${statuses.map(() => '?').join(',')})` : '';
-  return db.prepare(`
+  const attempts = db.prepare(`
     SELECT * FROM external_attempts WHERE task_id=?${statusSql}
     ORDER BY created_at DESC LIMIT ? OFFSET ?
   `).all(
     safeId(taskId), ...statuses, boundedLimit(options.limit, 100), boundedOffset(options.offset),
   ).map(rowToExternalAttempt);
+  return enrichExternalAttemptSkills(db, attempts);
 }
 
 function getExternalAttempt(taskId, attemptId) {
-  return rowToExternalAttempt(ensureStorage().prepare(`
+  const db = ensureStorage();
+  const attempt = rowToExternalAttempt(db.prepare(`
     SELECT * FROM external_attempts WHERE task_id=? AND id=?
   `).get(safeId(taskId), String(attemptId || '')));
+  return attempt ? enrichExternalAttemptSkills(db, [attempt])[0] : null;
 }
 
 async function openExternalAttemptLogFile(taskId, attemptId, options = {}) {
@@ -5784,7 +6500,7 @@ async function openExternalAttemptArtifactFile(taskId, attemptId, artifactKey, o
       return {
         content: preview,
         bytes: preview.length,
-        fileName: path.basename(declaration.path),
+        fileName: pytestArtifactDisplayFileName(declaration.path),
         mediaType,
       };
     } catch (error) {
@@ -5795,7 +6511,9 @@ async function openExternalAttemptArtifactFile(taskId, attemptId, artifactKey, o
   return {
     fileHandle: opened.handle,
     bytes: opened.bytes,
-    fileName: path.basename(declaration.path),
+    fileName: declaration.kind === 'pytest-html'
+      ? pytestArtifactDisplayFileName(declaration.path)
+      : path.basename(declaration.path),
     mediaType,
   };
 }
@@ -5859,12 +6577,22 @@ function listScheduledJobs(taskId, options = {}) {
   const db = ensureStorage();
   const statuses = String(options.status || '').split(',').map((item) => item.trim()).filter(Boolean);
   const statusSql = statuses.length ? ` AND status IN (${statuses.map(() => '?').join(',')})` : '';
-  return db.prepare(`
+  const jobs = db.prepare(`
     SELECT * FROM scheduled_jobs WHERE task_id=?${statusSql}
     ORDER BY due_at DESC, sequence DESC LIMIT ? OFFSET ?
   `).all(
     safeId(taskId), ...statuses, boundedLimit(options.limit, 100), boundedOffset(options.offset),
   ).map(rowToScheduledJob);
+  const externalAttemptIds = unique(jobs.map((job) => job.externalAttemptId).filter(Boolean));
+  if (!externalAttemptIds.length) return jobs;
+  const attempts = db.prepare(`
+    SELECT * FROM external_attempts
+    WHERE task_id=? AND id IN (${externalAttemptIds.map(() => '?').join(',')})
+  `).all(safeId(taskId), ...externalAttemptIds).map(rowToExternalAttempt);
+  const skillsByAttempt = new Map(
+    enrichExternalAttemptSkills(db, attempts).map((attempt) => [attempt.id, attempt.skills]),
+  );
+  return jobs.map((job) => ({ ...job, skills: skillsByAttempt.get(job.externalAttemptId) || [] }));
 }
 
 function registerExternalAttempt(data, context = {}) {
@@ -5907,6 +6635,17 @@ function registerExternalAttempt(data, context = {}) {
       || (originTurnId && sourceExecution.turn_id !== originTurnId)
       || (originAttemptId && sourceExecution.attempt_id !== originAttemptId))) {
       throw statusError('The source command execution does not belong to this background attempt', 409);
+    }
+    const skillInvocationId = String(
+      data.skillInvocationId || process.env.CODEX_SKILL_INVOCATION_ID || '',
+    );
+    const skillInvocation = skillInvocationId
+      ? db.prepare('SELECT * FROM skill_invocations WHERE id=?').get(skillInvocationId)
+      : null;
+    if (skillInvocationId && (!skillInvocation || skillInvocation.task_id !== taskId
+      || (originTurnId && skillInvocation.turn_id !== originTurnId)
+      || (originAttemptId && skillInvocation.attempt_id !== originAttemptId))) {
+      throw statusError('The Skill invocation does not belong to this background attempt', 409);
     }
     const stepRun = resolveExternalStepRun(
       db,
@@ -6016,6 +6755,12 @@ function registerExternalAttempt(data, context = {}) {
         matchingActive.source_command_execution_id = sourceExecutionId;
         matchingActive.started_at = refinedStartedAt;
       }
+      if (skillInvocationId && !matchingActive.skill_invocation_id) {
+        db.prepare(`
+          UPDATE external_attempts SET skill_invocation_id=?, updated_at=? WHERE id=?
+        `).run(skillInvocationId, nowIso(), matchingActive.id);
+        matchingActive.skill_invocation_id = skillInvocationId;
+      }
       registered = enrichExternalFollowUp(db, matchingActive, data.followUpPrompt);
       return;
     }
@@ -6082,14 +6827,16 @@ function registerExternalAttempt(data, context = {}) {
     db.prepare(`
       INSERT INTO external_attempts(
         id, task_id, step_run_id, origin_turn_id, origin_attempt_id, source_command_execution_id,
+        skill_invocation_id,
         chain_key, generation, label, status, pid, pid_start_ticks, process_group_id,
         log_path, done_path, state_path,
         meta_path, artifact_declarations_json, check_interval_seconds, follow_up_prompt,
         started_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, taskId, stepRun?.id || null,
       originTurnId || null, originAttemptId || null, sourceExecutionId || null,
+      skillInvocationId || null,
       chainKey, generation, label, attempt.pid, attempt.pidStartTicks, attempt.processGroupId,
       logPath, attempt.donePath, attempt.statePath,
       attempt.metaPath, JSON.stringify(attempt.artifactDeclarations),
@@ -6145,7 +6892,7 @@ function registerExternalAttempt(data, context = {}) {
       };
     }
   }
-  return registered;
+  return enrichExternalAttemptSkills(db, [registered])[0];
 }
 
 function detachedLaunchFields(value) {
@@ -6548,17 +7295,19 @@ function reconcileExternalAttempts(taskId, options = {}) {
         );
         refreshStepRunStatus(db, current.step_run_id);
         if (preserveTerminalSchedule) {
-          const activeSchedule = db.prepare(`
+          const futureSchedule = db.prepare(`
             SELECT 1 FROM scheduled_jobs
             WHERE external_attempt_id=? AND generation=?
-              AND status IN ('pending','leased','dispatched') LIMIT 1
+              AND status IN ('pending','leased') LIMIT 1
           `).get(attempt.id, attempt.generation);
-          if (activeSchedule) {
+          if (futureSchedule) {
             db.prepare(`
               UPDATE scheduled_jobs SET due_at=?, last_error='', updated_at=?
               WHERE external_attempt_id=? AND generation=? AND status='pending'
             `).run(now, now, attempt.id, attempt.generation);
           } else {
+            // A dispatched check is the current in-flight Turn, not a future
+            // collection opportunity. Preserve one pending terminal follow-up.
             insertScheduledJob(db, { ...attempt, ...rowToExternalAttempt(current) }, now);
           }
         } else {
@@ -7413,6 +8162,204 @@ function appendRuntimeWorklog(sessionId, event, runtimeEvent, attemptId, configu
   return record;
 }
 
+function rowToSkillInvocation(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    sessionId: row.task_id,
+    turnId: row.turn_id || '',
+    attemptId: row.attempt_id || '',
+    parentInvocationId: row.parent_invocation_id || '',
+    skills: parseJson(row.skills_json, []),
+    commandName: row.command_name || '',
+    status: row.status,
+    exitCode: row.exit_code == null ? null : Number(row.exit_code),
+    signal: row.signal || '',
+    startedAt: row.started_at,
+    finishedAt: row.finished_at || '',
+    updatedAt: row.updated_at,
+  };
+}
+
+function startSkillInvocation(data) {
+  const db = getDatabase();
+  const taskId = safeId(data.taskId || process.env.CODEX_TASK_ID);
+  const turnId = String(data.turnId || process.env.CODEX_TASK_TURN_ID || '');
+  const attemptId = String(data.attemptId || process.env.CODEX_TASK_ATTEMPT_ID || '');
+  const skillIds = unique(toArray(data.skillIds).map((value) => String(value).trim()).filter(Boolean));
+  if (!turnId || !attemptId) throw statusError('Skill invocation requires Task, Turn, and Attempt context', 400);
+  if (!skillIds.length || skillIds.length > MAX_SKILL_FILES
+    || skillIds.some((skillId) => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(skillId))) {
+    throw statusError('Skill invocation requires valid Skill IDs', 400);
+  }
+  let invocation;
+  db.transaction(() => {
+    const task = db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId);
+    if (!task) throw statusError(`Session ${taskId} not found`, 404);
+    const turn = db.prepare('SELECT * FROM turns WHERE id=? AND task_id=?').get(turnId, taskId);
+    const attempt = db.prepare('SELECT * FROM attempts WHERE id=? AND task_id=?').get(attemptId, taskId);
+    if (!turn || !attempt || attempt.turn_id !== turn.id) {
+      throw statusError('Skill invocation does not belong to the supplied Task, Turn, and Attempt', 409);
+    }
+    const availableSkills = taskSnapshotSkillMap(db, taskId);
+    const missing = skillIds.filter((skillId) => !availableSkills.has(skillId));
+    if (missing.length) throw statusError(`Skill not present in this task snapshot: ${missing.join(', ')}`, 400);
+    const parentInvocationId = String(data.parentInvocationId || '');
+    if (parentInvocationId) {
+      const parent = db.prepare('SELECT task_id, turn_id, attempt_id FROM skill_invocations WHERE id=?')
+        .get(parentInvocationId);
+      if (!parent || parent.task_id !== taskId || parent.turn_id !== turnId || parent.attempt_id !== attemptId) {
+        throw statusError('Parent Skill invocation does not belong to this Attempt', 409);
+      }
+    }
+    const skills = skillIds.map((skillId) => {
+      const skill = availableSkills.get(skillId);
+      return {
+        skillId,
+        name: skill.name,
+        origin: skill.origin,
+        version: Number(skill.version),
+        contentHash: skill.content_hash,
+      };
+    });
+    const id = eventId('skill-invocation');
+    const now = nowIso();
+    db.prepare(`
+      INSERT INTO skill_invocations(
+        id, task_id, turn_id, attempt_id, parent_invocation_id, skills_json,
+        command_name, status, started_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+    `).run(
+      id, taskId, turnId, attemptId, parentInvocationId || null, JSON.stringify(skills),
+      String(data.commandName || '').slice(0, 300), now, now,
+    );
+    invocation = rowToSkillInvocation(db.prepare('SELECT * FROM skill_invocations WHERE id=?').get(id));
+  }).immediate();
+  return invocation;
+}
+
+function finishSkillInvocation(invocationId, data = {}) {
+  const db = getDatabase();
+  const id = String(invocationId || '');
+  const signal = String(data.signal || '').slice(0, 64);
+  const exitCode = data.exitCode == null ? null : Number(data.exitCode);
+  if (exitCode != null && !Number.isInteger(exitCode)) {
+    throw statusError('Skill invocation exitCode must be an integer', 400);
+  }
+  let invocation;
+  db.transaction(() => {
+    const row = db.prepare('SELECT * FROM skill_invocations WHERE id=?').get(id);
+    if (!row) throw statusError(`Skill invocation ${id} not found`, 404);
+    if (row.status !== 'running') {
+      invocation = rowToSkillInvocation(row);
+      return;
+    }
+    const status = signal ? 'interrupted' : (exitCode === 0 ? 'succeeded' : 'failed');
+    const now = nowIso();
+    db.prepare(`
+      UPDATE skill_invocations
+      SET status=?, exit_code=?, signal=?, finished_at=?, updated_at=?
+      WHERE id=? AND status='running'
+    `).run(status, exitCode, signal, now, now, id);
+    invocation = rowToSkillInvocation(db.prepare('SELECT * FROM skill_invocations WHERE id=?').get(id));
+  }).immediate();
+  return invocation;
+}
+
+function listSkillInvocations(taskId, options = {}) {
+  const clauses = ['task_id=?'];
+  const params = [safeId(taskId)];
+  if (options.turnId) {
+    clauses.push('turn_id=?');
+    params.push(String(options.turnId));
+  }
+  return ensureStorage().prepare(`
+    SELECT * FROM skill_invocations
+    WHERE ${clauses.join(' AND ')}
+    ORDER BY started_at DESC, sequence DESC LIMIT ? OFFSET ?
+  `).all(
+    ...params,
+    boundedLimit(options.limit, 100),
+    boundedOffset(options.offset),
+  ).map(rowToSkillInvocation);
+}
+
+function enrichExternalAttemptSkills(db, attempts) {
+  if (!attempts.length) return attempts;
+  const attemptsById = new Map(attempts.map((attempt) => [attempt.id, attempt]));
+  const skillsByAttempt = new Map(attempts.map((attempt) => [attempt.id, new Map()]));
+  const addSkill = (attemptId, skill, source) => {
+    const target = skillsByAttempt.get(attemptId);
+    const skillId = String(skill.skillId || skill.skill_id || '');
+    if (!target || !skillId || target.has(skillId)) return;
+    target.set(skillId, {
+      skillId,
+      version: Number(skill.version ?? skill.skill_version ?? 0),
+      contentHash: String(skill.contentHash || skill.content_hash || skill.skill_content_hash || ''),
+      source,
+    });
+  };
+
+  const invocationIds = unique(attempts.map((attempt) => attempt.skillInvocationId).filter(Boolean));
+  if (invocationIds.length) {
+    const rows = db.prepare(`
+      SELECT * FROM skill_invocations WHERE id IN (${invocationIds.map(() => '?').join(',')})
+    `).all(...invocationIds);
+    const invocations = new Map(rows.map((row) => [row.id, rowToSkillInvocation(row)]));
+    for (const attempt of attempts) {
+      const invocation = invocations.get(attempt.skillInvocationId);
+      for (const skill of invocation?.skills || []) addSkill(attempt.id, skill, 'invocation');
+    }
+  }
+
+  const taskIds = unique(attempts.map((attempt) => attempt.sessionId));
+  const attemptIds = [...attemptsById.keys()];
+  for (const taskId of taskIds) {
+    const reports = db.prepare(`
+      SELECT skill_id, skill_version, skill_content_hash, payload_json
+      FROM skill_reports
+      WHERE task_id=?
+        AND json_extract(payload_json, '$.executionEvidence.externalAttemptId')
+          IN (${attemptIds.map(() => '?').join(',')})
+      ORDER BY sequence DESC
+    `).all(taskId, ...attemptIds);
+    for (const report of reports) {
+      const payload = parseJson(report.payload_json, {});
+      const attemptId = String(payload.executionEvidence?.externalAttemptId || '');
+      if (attemptsById.has(attemptId)) addSkill(attemptId, report, 'skill-report');
+    }
+  }
+
+  const sourceExecutionIds = unique(attempts.map((attempt) => attempt.sourceCommandExecutionId).filter(Boolean));
+  if (sourceExecutionIds.length) {
+    const attributionRows = db.prepare(`
+      SELECT * FROM command_skill_attributions
+      WHERE command_execution_id IN (${sourceExecutionIds.map(() => '?').join(',')})
+      ORDER BY sequence
+    `).all(...sourceExecutionIds);
+    const effective = new Map();
+    for (const row of attributionRows) effective.set(`${row.command_execution_id}\0${row.skill_id}`, row);
+    const attemptsByExecution = new Map();
+    for (const attempt of attempts) {
+      const values = attemptsByExecution.get(attempt.sourceCommandExecutionId) || [];
+      values.push(attempt.id);
+      attemptsByExecution.set(attempt.sourceCommandExecutionId, values);
+    }
+    for (const row of effective.values()) {
+      if (row.action !== 'linked') continue;
+      for (const attemptId of attemptsByExecution.get(row.command_execution_id) || []) {
+        addSkill(attemptId, row, 'command');
+      }
+    }
+  }
+
+  return attempts.map((attempt) => ({
+    ...attempt,
+    skills: [...skillsByAttempt.get(attempt.id).values()]
+      .sort((left, right) => left.skillId.localeCompare(right.skillId)),
+  }));
+}
+
 function listCommandExecutions(taskId, options = {}) {
   const clauses = ['task_id = ?'];
   const params = [safeId(taskId)];
@@ -7529,7 +8476,9 @@ function getSessionSkillUsage(taskId) {
   const normalizedTaskId = safeId(taskId);
   const task = db.prepare('SELECT skill_snapshot_id FROM tasks WHERE id=?').get(normalizedTaskId);
   if (!task) throw statusError(`Session ${normalizedTaskId} not found`, 404);
-  if (!task.skill_snapshot_id) return { snapshot: null, skills: [], attributedCommandCount: 0 };
+  if (!task.skill_snapshot_id) {
+    return { snapshot: null, skills: [], attributedCommandCount: 0, invocationCount: 0 };
+  }
   const snapshot = db.prepare('SELECT * FROM skill_snapshots WHERE id=?').get(task.skill_snapshot_id);
   const entries = db.prepare(`
     SELECT skill_id, version, origin, name, content_hash
@@ -7538,6 +8487,9 @@ function getSessionSkillUsage(taskId) {
   const attributions = db.prepare(`
     SELECT * FROM command_skill_attributions WHERE task_id=? ORDER BY sequence
   `).all(normalizedTaskId);
+  const invocations = db.prepare(`
+    SELECT * FROM skill_invocations WHERE task_id=? ORDER BY sequence
+  `).all(normalizedTaskId).map(rowToSkillInvocation);
   const effective = new Map();
   const correctionCounts = new Map();
   for (const row of attributions) {
@@ -7545,7 +8497,9 @@ function getSessionSkillUsage(taskId) {
     if (row.source === 'operator') correctionCounts.set(row.skill_id, (correctionCounts.get(row.skill_id) || 0) + 1);
   }
   const commandIds = new Set();
-  const usage = new Map(entries.map((entry) => [entry.skill_id, { commandIds: new Set(), lastUsedAt: '' }]));
+  const usage = new Map(entries.map((entry) => [entry.skill_id, {
+    commandIds: new Set(), invocationIds: new Set(), lastUsedAt: '',
+  }]));
   for (const row of effective.values()) {
     if (row.action !== 'linked') continue;
     commandIds.add(row.command_execution_id);
@@ -7553,6 +8507,16 @@ function getSessionSkillUsage(taskId) {
     if (!item) continue;
     item.commandIds.add(row.command_execution_id);
     if (!item.lastUsedAt || row.ts > item.lastUsedAt) item.lastUsedAt = row.ts;
+  }
+  for (const invocation of invocations) {
+    for (const skill of invocation.skills) {
+      const item = usage.get(skill.skillId);
+      if (!item) continue;
+      item.invocationIds.add(invocation.id);
+      if (!item.lastUsedAt || invocation.startedAt > item.lastUsedAt) {
+        item.lastUsedAt = invocation.startedAt;
+      }
+    }
   }
   return {
     snapshot: {
@@ -7567,10 +8531,12 @@ function getSessionSkillUsage(taskId) {
       version: Number(entry.version),
       contentHash: entry.content_hash,
       commandCount: usage.get(entry.skill_id).commandIds.size,
+      invocationCount: usage.get(entry.skill_id).invocationIds.size,
       lastUsedAt: usage.get(entry.skill_id).lastUsedAt,
       correctionCount: correctionCounts.get(entry.skill_id) || 0,
     })),
     attributedCommandCount: commandIds.size,
+    invocationCount: invocations.length,
   };
 }
 
@@ -8380,7 +9346,7 @@ function finalizeSessionTurn(data) {
     );
     if (taskChanged.changes !== 1) throw statusError(`Session ${taskId} could not be finalized`, 409);
     if (finalStatus === 'waiting_review') {
-      missingPlatformReportSkills = missingPlatformReportSkillsForTask(db, taskId);
+      missingPlatformReportSkills = missingTerminalPlatformReportSkillsForTask(db, taskId);
     }
     if (data.resultText) {
       insertSessionWorklog(db, taskId, {
@@ -9361,6 +10327,10 @@ module.exports = {
   redactHistoricalSkillReports,
   openSkillReportArtifactFile,
   openSkillReportArtifactResourceFile,
+  skillReportArtifactPlayerFormatHints,
+  skillReportArtifactPlaybackAlternatives,
+  listSkillReportArtifactMediaViews,
+  markSkillReportArtifactMediaViewed,
   listSkillReports,
   appendSessionLatestLog,
   readSessionLatestLog,
@@ -9394,6 +10364,9 @@ module.exports = {
   prepareSessionRetry,
   recordCommandExecution,
   appendRuntimeWorklog,
+  startSkillInvocation,
+  finishSkillInvocation,
+  listSkillInvocations,
   listCommandExecutions,
   setCommandExecutionSkills,
   getSessionSkillUsage,

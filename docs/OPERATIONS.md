@@ -176,7 +176,7 @@ npm run verify:data-protection
 | `CODEX_DESK_DATA_DIR` | 工作区下 `data` | SQLite 和原始日志 |
 | `CODEX_DESK_BACKUP_DIR` | `<CODEX_DESK_DATA_DIR>/backups` | 私有数据库备份包目录 |
 | `CODEX_DESK_RUNTIME_DIR` | 工作区外独立目录 | 持久 Session 状态和 Skill 快照 |
-| `CODEX_TASK_WORKSPACE_ROOTS` | 独立任务根目录 | Linux 使用 `:` 分隔多个允许根目录 |
+| `CODEX_TASK_WORKSPACE_ROOTS` | 任务工作根目录，默认是平台源码的父目录 | Linux 使用 `:` 分隔多个允许根目录；当前部署统一使用 `/home/jenkins` |
 | `CODEX_API_MAX_CONCURRENCY` | `64` | 普通 API 响应槽上限，范围 `1..256`；Health/Ready 不占普通槽 |
 | `CODEX_API_IDLE_TIMEOUT_MS` | `30000` | 非日志 API 请求体或响应无网络进展超时，范围 `1000..3600000` 毫秒 |
 | `CODEX_LOG_STREAM_MAX_CONCURRENCY` | `8` | Attempt 与后台原始日志的并发下载数，范围 `1` 至 `64` |

@@ -54,8 +54,9 @@ Web 控制面不依赖执行适配器启动。执行能力不可用时，页面�
 - 完成会终止交互式 CLI、封存并校验 transcript，但保留 Bridge Runtime；Task 删除、Reset 或手工回收会释放对应原生运行资源。
 - Task 的 Skill 快照在首轮执行时冻结，恢复、Reset 后的新 Session 和后续 Turn 都使用同一快照；需要最新 Skill 集合时创建 New Task。
 - Skill 驱动的命令通过 `codex-skill-use` 显式声明一个或多个快照 Skill；平台不按命令关键字推断。
+- `codex-skill-use` 在子进程开始和结束时直接持久化 `skill_invocations`，冻结 Skill 版本和内容哈希；这条链路不依赖 Agent 报告或 Codex 工具事件文本。
 - 命令 Skill 归因采用追加事件模型。运行时声明和人工 `linked/unlinked` 修正全部保留，当前值由每个命令与 Skill 的最后一条事件决定。
-- 工作目录必须在允许根目录内，并与平台源码、数据和运行状态隔离。
+- 工作目录必须在允许根目录内；默认允许平台源码所在父目录下的全部真实目录，符号链接解析后仍必须落在该根目录内。
 - 所有执行事件同时写入任务工作日志和全局审计。
 - 命令执行明细与工作日志在同一事务中写入，并关联 Session、Turn 和 Attempt。
 - 配置工作目录与执行端实际上报目录分列保存；执行端未上报时不推测实际目录。
@@ -81,7 +82,7 @@ inactive  --reset----> idle
 ## 后台执行与定时检查
 
 - 新业务执行使用 `Task -> task_steps -> step_runs -> external_attempts` 层级。Step 表示 `normal`、`long` 等稳定业务范围；首轮和 Rerun 是同 Step 下不同 Run；技术 Retry 复用 Run，只增加 External Attempt generation。`skill_reports.step_run_id` 由 `executionEvidence.externalAttemptId` 推导，报告 revision 不允许跨 Run。
-- `run-in-background` 命令返回 `PID/LOG/DONE/STATE/META` 后，Codex 用 `codex-background-track register` 显式登记 Step/Run 身份，并用可重复的 `--artifact` 同步登记已知 HTML 输出。运行中 Skill Report 通过 External Attempt 身份取得不含源路径的 `registeredArtifacts` 投影；Web 只按 task、attempt 和 artifact key 打开同一只读文件描述符，并把响应限制为打开瞬间的字节长度。不同 Step 允许在同一工作目录并行；各 Run 的可变输出必须使用唯一名字或子目录。Worker 每秒轻量核对 DONE/STATE/META，`stop` 前再同步核对一次；终态会自动发布兜底修订并通过持久化任务归档 HTML。服务获得 cgroup v2 delegation 时，平台默认从 `/proc/self/cgroup` 定位其委派根；也可用 `CODEX_TASK_CGROUP_ROOT` 显式指定。登记会把身份已校验的独立后台进程组迁入该任务的专属 cgroup，并保存受限路径和 cgroup inode。
+- `run-in-background` 命令返回 `PID/LOG/DONE/STATE/META` 后，Codex 在业务 Skill 的 `codex-skill-use` 包装内调用 `codex-background-track register`，显式登记 Step/Run 身份并自动关联当前 `skill_invocation`，同时用可重复的 `--artifact` 登记已知 HTML 输出。定时检查通过 `external_attempt_id` 继承同一组 Skill，不产生虚假的业务调用。旧 External Attempt 只从精确关联的 Skill Report 或来源命令归因回退。运行中 Skill Report 通过 External Attempt 身份取得不含源路径的 `registeredArtifacts` 投影；Web 只按 task、attempt 和 artifact key 打开同一只读文件描述符，并把响应限制为打开瞬间的字节长度。不同 Step 允许在同一工作目录并行；各 Run 的可变输出必须使用唯一名字或子目录。Worker 每秒轻量核对 DONE/STATE/META，`stop` 前再同步核对一次；终态会自动发布兜底修订并通过持久化任务归档 HTML。服务获得 cgroup v2 delegation 时，平台默认从 `/proc/self/cgroup` 定位其委派根；也可用 `CODEX_TASK_CGROUP_ROOT` 显式指定。登记会把身份已校验的独立后台进程组迁入该任务的专属 cgroup，并保存受限路径和 cgroup inode。
 - 运行中 artifact URL 是源文件的临时观察通道：要求登记 key 精确匹配、任务归属正确、路径没有符号链接且文件为普通文件，响应使用 `private, no-store` 和 HTML sandbox。它不生成摘要，也不进入恢复检查点。终态归档完成后，同一 UI 条目切换到 `skill_report_artifacts` 的托管 URL；该路径使用字节数和 SHA-256 完整性校验，并可拥有隔离的日志与媒体资源。
 - `.done`、`.state` 和 `.meta` 提供业务终态，但不能覆盖仍存活的受管运行时。只要保存的 cgroup 路径/inode 中仍有进程或线程，或 PID 启动时钟、Session 和进程组身份仍匹配，External 保持 `running`，Task 保持后台运行态；裸 PID 不作为身份依据。
 - 每条外部执行按 `chain_key + generation` 隔离；Step Run 与 chain 一一归属，同一 chain 同时只允许一个活动 generation，避免跨 Run 混用 chain 或两代进程共用 LOG/DONE/STATE/META。前一代终态后可创建新 generation，旧 generation 的未派发回调失效。
@@ -89,6 +90,7 @@ inactive  --reset----> idle
 - META 同时支持 JSON 和官方 `run-in-background` 的 `key=value` 格式，后者的 `ended_at`、`exit_code` 和 `end_signal` 可直接恢复终态。
 - 每次到期检查从 `scheduled_jobs` 领取，恢复同一持久 Session，并创建新 Turn 和 Attempt。检查结束后 Codex 进程再次释放。
 - 后台任务仍运行时，平台追加观察并创建下一条一次性检查；只有业务终态证据已出现且受管 cgroup/进程组都为空时才停止续排，结果收集完成后任务进入 `waiting_review`。若启动 Turn 收尾时已经观察到 External 终态，平台保留并立即到期首次结果收集作业，使快速失败仍能执行失败分析和结构化报告发布。
+- 若 External 在 scheduled 检查 Turn 执行期间才转为终态，当前 `dispatched` 检查不算未来收集机会；平台会额外保留一条立即到期的 pending 终态检查。即使当前 Turn 提交了过期的“仍在运行”观察，Task 也继续处于 `waiting_scheduled`，直到下一 Turn 完成终态汇总。
 - External 进入终态后，独立归档租约把原始 LOG 按字节托管到 `data/sessions/<task>/external-attempt-output/`。复制前后校验设备、inode、大小、mtime、ctime 和链接数，拒绝符号链接；临时文件 `fsync` 并原子发布后，SQLite 保存字节数、SHA-256、时间和错误状态。旧终态记录由 Worker 每轮一条渐进回填，不在服务启动路径执行无界 I/O。
 - 托管日志按 24 小时周期由独立租约渐进复验，API 读取前也执行完整字节数和 SHA-256 校验。API 的哈希计算、inode/路径指纹确认和响应流共用一个 `O_NOFOLLOW` 只读文件描述符，消除校验完成后按路径重开被替换文件的竞态。校验失败采用 fail-closed：不返回可疑日志，Health/Ready 降级并保留工作日志和审计证据。同一记录的归档和校验异常在健康统计中只计一次。
 - HTTP 请求中断会传播到托管日志哈希循环和所有文件响应流。哈希每处理 1 MiB 检查取消信号，流阶段监听响应关闭并销毁源流；中断只释放请求资源，不会被误记为归档完整性故障。

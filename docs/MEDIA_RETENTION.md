@@ -1,24 +1,43 @@
 # Generated media retention
 
 The platform keeps one authoritative copy of a pytest HTML report and its
-managed resources. A test project's generated `videos/<run-id>` directories
-are temporary source material; they are not included in the platform's SQLite
-backup or recovery-checkpoint policy. `standard_videos` is a separate fixture
-library and is never a cleanup target.
+managed resources. A test project's generated `task/<run-id>/videos`
+directory is a temporary local copy used by the report while the run is
+active; after the report is archived and every regular file in that directory
+has a matching managed resource, the platform removes this local copy. Files
+that were not mounted into the HTML keep the whole directory in place and add
+a visible worklog warning. The original media under the operator's
+source root (for example `/data/jenkins/videos`) is not removed by the
+platform. `standard_videos` is a separate fixture library and is never a
+cleanup target.
 
-`bin/media-retention-cleanup.js` is the only supported cleanup command. It
-requires explicit video roots through `CODEX_MEDIA_CLEANUP_ROOTS` (a
+The platform removes a completed Run's project `task/<run-id>/videos` copy
+after successful artifact archival. Resource registrations from every report
+in the same Step Run participate in the completeness check. The artifact job
+performs cleanup before it is marked completed; inspection or removal failures
+leave the job retryable. A later report revision reuses each prior artifact
+whose declaration and source-file SHA-256 are unchanged, even when the revision
+adds another artifact such as failure analysis Markdown.
+Browser-compatible HLS playback may create one SHA-256-addressed MP4 stream-copy
+cache under the owning Task's `skill-report-artifacts/.playback-cache` only when
+no paired MP4 already exists. This is a derived cache rather than another
+archived media object; it is excluded with the surrounding report artifact
+tree from database/recovery packages and is removed by the same Task retention
+lifecycle.
+`bin/media-retention-cleanup.js` remains the supported fallback for legacy
+generated-media layouts left behind by interrupted runs.
+It requires explicit video roots through `CODEX_MEDIA_CLEANUP_ROOTS` (a
 colon-separated list on Linux) and is dry-run by default. A production timer
-must pass `--apply`.
-
-Each run performs the following checks:
+must pass `--apply`. Each scheduled run performs the following checks:
 
 1. It reads the platform SQLite database in read-only mode. Non-terminal Tasks,
    non-terminal or not-yet-verified External Attempts, and pending/failed
-   report-artifact jobs protect their working directories.
+   report-artifact jobs contribute active paths. A run is protected when it
+   contains one of those paths; a project-root working directory does not hide
+   every unrelated historical run below it.
 2. It scans only direct run directories below each configured `videos` root.
    Symlinks, special files, hidden entries, `standard_videos`, and entries
-   newer than 30 days are skipped.
+   whose directory or newest contained file is newer than 30 days are skipped.
 3. Eligible directories are renamed into the root's
    `.retention-quarantine/` directory. They are permanently removed only after
    the quarantine period (default three days), giving operators a recovery
@@ -34,17 +53,21 @@ inspected.
 
 ## Configuration
 
-Example for a host that has two generated-media roots:
+Example for a host that still has a legacy direct-run media root:
 
 ```text
-CODEX_MEDIA_CLEANUP_ROOTS=/home/jenkins/premium_robot/videos:/home/jenkins/premium_robot/task/videos
+CODEX_MEDIA_CLEANUP_ROOTS=/home/jenkins/premium_robot/videos
 CODEX_MEDIA_RETENTION_DAYS=30
 CODEX_MEDIA_QUARANTINE_DAYS=3
 ```
 
-Do not set `/data/jenkins` as a root unless the exact generated `videos`
-directory has been identified. The source tree and standard fixtures may live
-under that path and must not be treated as disposable output.
+The new `task/<run-id>/videos` layout is normally removed by its completed
+artifact job and should not be replaced with a broad `task` cleanup root.
+
+Do not configure `/data/jenkins/videos` or another operator-managed source
+root for automatic cleanup. The source tree and standard fixtures may live
+under that path and must not be treated as disposable output. Configure only
+project-local generated-media roots for the fallback command.
 
 ## Long-term media backup
 

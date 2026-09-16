@@ -67,6 +67,7 @@ try {
     taskId: process.env.CODEX_TASK_ID,
     turnId: process.env.CODEX_TASK_TURN_ID,
     attemptId: process.env.CODEX_TASK_ATTEMPT_ID,
+    skillInvocationId: process.env.CODEX_SKILL_INVOCATION_ID,
     workingDirectory: process.cwd(),
     pid,
     logPath: options['--log'],

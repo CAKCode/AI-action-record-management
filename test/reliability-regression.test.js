@@ -1321,6 +1321,86 @@ test('fast converter failures keep and enrich the scheduled result collection', 
   assert.equal(store.getSession(taskId).status, 'stopped');
 });
 
+test('a terminal transition during a scheduled Turn keeps one future result collection', () => {
+  const taskId = 'terminal-during-scheduled-turn-task';
+  const launchWorker = 'terminal-race-launch-worker';
+  const schedulerWorker = 'terminal-race-scheduler-worker';
+  const followUpWorker = 'terminal-race-follow-up-worker';
+  const taskBase = path.join(workspaceRoot, 'terminal-during-scheduled-turn');
+  fs.writeFileSync(`${taskBase}.log`, '[START]\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.state`, 'running\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.meta`, '{}\n', 'utf8');
+
+  store.saveSession(taskId, {
+    name: 'Terminal during scheduled Turn',
+    objective: 'Preserve terminal result collection after a stale running observation.',
+    workingDir: '.',
+  });
+  store.queueSessionRun(taskId, 'Launch detached work.', 'terminal-race-launch');
+  const launchCommand = store.claimPendingCommands(launchWorker, 10)
+    .find((command) => command.task_id === taskId);
+  assert.ok(launchCommand);
+  assert.equal(store.acquireTaskLease(taskId, launchWorker), true);
+  const launchTurn = store.beginSessionTurn({
+    taskId, commandId: launchCommand.id, workerId: launchWorker, input: launchCommand.input,
+    persistentSessionKey: `single:${taskId}`, skillSnapshotId: null,
+  }).turn;
+  const launchAttemptId = store.createAttempt(taskId, launchTurn.id, 1, launchWorker);
+  const external = store.registerExternalAttempt({
+    taskId, turnId: launchTurn.id, attemptId: launchAttemptId, pid: null,
+    logPath: `${taskBase}.log`, donePath: `${taskBase}.done`,
+    statePath: `${taskBase}.state`, metaPath: `${taskBase}.meta`,
+    label: 'terminal race', dueAt: '2000-01-01T00:00:00.000Z', checkIntervalSeconds: 5,
+  });
+  assert.equal(store.finalizeSessionTurn({
+    taskId, turnId: launchTurn.id, attemptId: launchAttemptId,
+    commandId: launchCommand.id, workerId: launchWorker, exitCode: 0,
+    summary: 'Detached execution launched.', finalStatus: 'waiting_review', retryCount: 0,
+  }).status, 'waiting_scheduled');
+
+  const [claimed] = store.claimDueScheduledJobs(schedulerWorker, 1);
+  store.dispatchClaimedScheduledJob(claimed.id, schedulerWorker);
+  const followUpCommand = store.claimPendingCommands(followUpWorker, 10)
+    .find((command) => command.task_id === taskId);
+  assert.ok(followUpCommand);
+  assert.equal(store.acquireTaskLease(taskId, followUpWorker), true);
+  const followUpTurn = store.beginSessionTurn({
+    taskId, commandId: followUpCommand.id, workerId: followUpWorker, input: followUpCommand.input,
+    persistentSessionKey: `single:${taskId}`, skillSnapshotId: null,
+  }).turn;
+  const followUpAttemptId = store.createAttempt(taskId, followUpTurn.id, 1, followUpWorker);
+
+  fs.writeFileSync(`${taskBase}.done`, '1\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.state`, 'finished\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.meta`, [
+    `started_at=${external.startedAt}`,
+    `ended_at=${new Date().toISOString()}`,
+    'exit_code=1',
+    '',
+  ].join('\n'), 'utf8');
+  const reconciled = store.reconcileRunningExternalAttempts()
+    .find((result) => result.id === external.id);
+  assert.equal(reconciled.status, 'failed');
+  const schedulesDuringTurn = store.listScheduledJobs(taskId);
+  assert.equal(schedulesDuringTurn.filter((job) => job.status === 'dispatched').length, 1);
+  assert.equal(schedulesDuringTurn.filter((job) => job.status === 'pending').length, 1);
+
+  const waiting = store.finalizeSessionTurn({
+    taskId, turnId: followUpTurn.id, attemptId: followUpAttemptId,
+    commandId: followUpCommand.id, workerId: followUpWorker, exitCode: 0,
+    summary: 'Background execution still appears to be running.',
+    resultText: 'Stale running observation.',
+    finalStatus: 'waiting_review', retryCount: 0,
+  });
+  assert.equal(waiting.status, 'waiting_scheduled');
+  assert.equal(waiting.activeExternalAttempts, 0);
+  assert.equal(waiting.activeScheduledJobs, 1);
+  const next = store.listScheduledJobs(taskId).find((job) => job.status === 'pending');
+  assert.ok(next);
+  assert.ok(Date.parse(next.dueAt) <= Date.now());
+  assert.equal(store.requestSessionStop(taskId), true);
+});
+
 test('reused background paths ignore stale terminal files until the new generation writes evidence', () => {
   const taskId = 'background-evidence-generation-task';
   const taskBase = path.join(workspaceRoot, 'reused-background-evidence');

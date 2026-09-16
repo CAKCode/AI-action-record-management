@@ -257,6 +257,7 @@ function schema(db) {
       origin_turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
       origin_attempt_id TEXT REFERENCES attempts(id) ON DELETE SET NULL,
       source_command_execution_id TEXT REFERENCES command_executions(id) ON DELETE SET NULL,
+      skill_invocation_id TEXT REFERENCES skill_invocations(id) ON DELETE SET NULL,
       chain_key TEXT NOT NULL,
       generation INTEGER NOT NULL,
       label TEXT NOT NULL DEFAULT '',
@@ -377,6 +378,28 @@ function schema(db) {
     CREATE INDEX IF NOT EXISTS idx_command_skill_attributions_task
       ON command_skill_attributions(task_id, sequence DESC);
 
+    CREATE TABLE IF NOT EXISTS skill_invocations (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+      attempt_id TEXT REFERENCES attempts(id) ON DELETE SET NULL,
+      parent_invocation_id TEXT REFERENCES skill_invocations(id) ON DELETE SET NULL,
+      skills_json TEXT NOT NULL,
+      command_name TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL CHECK(status IN ('running', 'succeeded', 'failed', 'interrupted')),
+      exit_code INTEGER,
+      signal TEXT NOT NULL DEFAULT '',
+      started_at TEXT NOT NULL,
+      finished_at TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_skill_invocations_task_started
+      ON skill_invocations(task_id, started_at DESC, sequence DESC);
+    CREATE INDEX IF NOT EXISTS idx_skill_invocations_attempt
+      ON skill_invocations(attempt_id, started_at DESC, sequence DESC);
+
     CREATE TABLE IF NOT EXISTS skill_reports (
       sequence INTEGER PRIMARY KEY AUTOINCREMENT,
       id TEXT NOT NULL UNIQUE,
@@ -419,6 +442,7 @@ function schema(db) {
       managed_path TEXT NOT NULL,
       bytes INTEGER NOT NULL,
       sha256 TEXT NOT NULL,
+      source_sha256 TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       UNIQUE(report_id, artifact_key)
     );
@@ -443,6 +467,13 @@ function schema(db) {
 
     CREATE INDEX IF NOT EXISTS idx_skill_report_artifact_resources_artifact
       ON skill_report_artifact_resources(task_id, report_id, artifact_id);
+
+    CREATE TABLE IF NOT EXISTS skill_report_artifact_media_views (
+      artifact_id TEXT NOT NULL REFERENCES skill_report_artifacts(id) ON DELETE CASCADE,
+      media_key TEXT NOT NULL,
+      viewed_at TEXT NOT NULL,
+      PRIMARY KEY(artifact_id, media_key)
+    );
 
     CREATE TABLE IF NOT EXISTS skill_report_artifact_jobs (
       report_id TEXT PRIMARY KEY REFERENCES skill_reports(id) ON DELETE CASCADE,
@@ -698,6 +729,7 @@ function schema(db) {
   const externalAttemptColumns = new Set(db.pragma('table_info(external_attempts)').map((column) => column.name));
   const externalAttemptMigrations = [
     ['step_run_id', 'ALTER TABLE external_attempts ADD COLUMN step_run_id TEXT REFERENCES step_runs(id) ON DELETE SET NULL'],
+    ['skill_invocation_id', 'ALTER TABLE external_attempts ADD COLUMN skill_invocation_id TEXT REFERENCES skill_invocations(id) ON DELETE SET NULL'],
     ['pid_start_ticks', "ALTER TABLE external_attempts ADD COLUMN pid_start_ticks TEXT NOT NULL DEFAULT ''"],
     ['process_group_id', 'ALTER TABLE external_attempts ADD COLUMN process_group_id INTEGER'],
     ['cgroup_path', "ALTER TABLE external_attempts ADD COLUMN cgroup_path TEXT NOT NULL DEFAULT ''"],
@@ -728,9 +760,18 @@ function schema(db) {
   if (!skillReportColumns.has('step_run_id')) {
     db.exec('ALTER TABLE skill_reports ADD COLUMN step_run_id TEXT REFERENCES step_runs(id) ON DELETE SET NULL');
   }
+  const skillReportArtifactColumns = new Set(
+    db.pragma('table_info(skill_report_artifacts)').map((column) => column.name),
+  );
+  if (!skillReportArtifactColumns.has('source_sha256')) {
+    db.exec("ALTER TABLE skill_report_artifacts ADD COLUMN source_sha256 TEXT NOT NULL DEFAULT ''");
+  }
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_external_attempts_step_run
       ON external_attempts(step_run_id, chain_key, generation DESC);
+    CREATE INDEX IF NOT EXISTS idx_external_attempts_skill_invocation
+      ON external_attempts(skill_invocation_id)
+      WHERE skill_invocation_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_skill_reports_step_run
       ON skill_reports(step_run_id, published_at DESC, sequence DESC);
   `);

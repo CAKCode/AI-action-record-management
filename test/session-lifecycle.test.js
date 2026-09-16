@@ -1211,6 +1211,10 @@ test('documented task APIs support create, list, detail, update, log queries, an
   assert.equal(executions.response.status, 200);
   assert.deepEqual(executions.payload, []);
 
+  const skillInvocations = await request('/api/sessions/api-docs-task/skill-invocations?limit=20&offset=0');
+  assert.equal(skillInvocations.response.status, 200);
+  assert.deepEqual(skillInvocations.payload, []);
+
   const worklogs = await request('/api/sessions/api-docs-task/worklogs?limit=100&q=test');
   assert.equal(worklogs.response.status, 200);
   assert.deepEqual(worklogs.payload, []);
@@ -2056,6 +2060,7 @@ test('API reference lists every public task management route', () => {
     'GET|HEAD /api/sessions/:id/external-attempts/:attemptId/artifacts/:artifactKey',
     'GET|HEAD /api/sessions/:id/external-attempts/:attemptId/artifacts/:artifactKey/resources/:resourcePath',
     'GET /api/sessions/:id/executions',
+    'GET /api/sessions/:id/skill-invocations',
     'PUT /api/sessions/:id/executions/:executionId/skills',
     'GET /api/sessions/:id/skill-usage',
     'GET /api/sessions/:id/skill-reports',
@@ -2540,13 +2545,30 @@ test('authentication and same-origin checks protect remote-capable deployments',
   assert.notEqual(invalidLogStreamIdleTimeoutExit, 0);
 });
 
-test('workspace allowlists reject platform and symlink escapes', async () => {
+test('workspace roots allow their own directories and reject symlink escapes', async () => {
+  const broadRootResolution = spawnSync(process.execPath, [
+    '-e',
+    "process.stdout.write(require('./src/workspaces').resolveWorkingDir(process.argv[1]))",
+    ROOT_DIR,
+  ], {
+    cwd: ROOT_DIR,
+    env: {
+      ...process.env,
+      CODEX_TASK_WORKSPACE_ROOTS: path.dirname(ROOT_DIR),
+      CODEX_DESK_DATA_DIR: path.join(tempDir, 'broad-root-data'),
+      CODEX_DESK_RUNTIME_DIR: path.join(tempDir, 'broad-root-runtime'),
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(broadRootResolution.status, 0, broadRootResolution.stderr);
+  assert.equal(broadRootResolution.stdout, fs.realpathSync(ROOT_DIR));
+
   const platform = await request('/api/sessions', {
     method: 'POST',
-    body: { id: 'platform-root', name: 'Platform Root', objective: 'Must fail.', workingDir: ROOT_DIR },
+    body: { id: 'platform-root', name: 'Platform Root', objective: 'Must pass.', workingDir: workspaceRoot },
   });
-  assert.equal(platform.response.status, 400);
-  assert.match(platform.payload.error, /outside the configured|isolated/i);
+  assert.equal(platform.response.status, 201);
+  assert.equal(platform.payload.workingDir, fs.realpathSync(workspaceRoot));
 
   const escapePath = path.join(workspaceRoot, 'escape');
   fs.symlinkSync(outsideDir, escapePath, 'dir');
@@ -2556,6 +2578,7 @@ test('workspace allowlists reject platform and symlink escapes', async () => {
   });
   assert.equal(escaped.response.status, 400);
   assert.match(escaped.payload.error, /outside the configured/i);
+  assert.equal((await request('/api/sessions/platform-root', { method: 'DELETE' })).response.status, 200);
 });
 
 test('imports are rejected while a task is active and stop remains recoverable', async () => {

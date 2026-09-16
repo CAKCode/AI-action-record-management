@@ -8,7 +8,16 @@ const vm = require('node:vm');
 
 const APP_SOURCE = fs.readFileSync(path.resolve(__dirname, '../public/app.js'), 'utf8');
 const INDEX_SOURCE = fs.readFileSync(path.resolve(__dirname, '../public/index.html'), 'utf8');
+const REPORT_VIEWER_SOURCE = fs.readFileSync(path.resolve(__dirname, '../public/report-viewer.html'), 'utf8');
+const REPORT_VIEWER_SCRIPT = fs.readFileSync(path.resolve(__dirname, '../public/report-viewer.js'), 'utf8');
 const STYLES_SOURCE = fs.readFileSync(path.resolve(__dirname, '../public/styles.css'), 'utf8');
+
+test('report viewer uses a CSP-compatible script to set its tab title and artifact frame', () => {
+  assert.match(REPORT_VIEWER_SOURCE, /<script src="\/report-viewer\.js"><\/script>/);
+  assert.doesNotMatch(REPORT_VIEWER_SOURCE, /<script>\s*\(\(\) =>/);
+  assert.match(REPORT_VIEWER_SCRIPT, /document\.title = title/);
+  assert.match(REPORT_VIEWER_SCRIPT, /report\.src = artifact/);
+});
 
 test('dashboard polling pauses when hidden, avoids stale health, and skips unchanged DOM writes', async () => {
   const elements = new Map();
@@ -871,8 +880,16 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     attemptId: 'attempt-1', turnSequence: 1, turnInput: 'Run the check', attemptNo: 1,
     command: 'python3 -m pytest -v test_agent_record.py', output: '1 passed', exitCode: 0,
     status: 'completed', finishedAt: '2026-07-26T00:01:00.000Z', rawEvent: { type: 'item.completed' }
+  }], [{
+    id: 'skill-invocation-1', attemptId: 'attempt-1', commandName: 'pytest',
+    status: 'succeeded', exitCode: 0, startedAt: '2026-07-26T00:00:00.000Z',
+    finishedAt: '2026-07-26T00:01:00.000Z',
+    skills: [{ skillId: 'cloud-recording-test', version: 1, contentHash: 'abcdef1234567890' }]
   }])`, context);
   assert.match(agentRecordsHtml, /Agent 工作记录/);
+  assert.match(agentRecordsHtml, /Skill 调用/);
+  assert.match(agentRecordsHtml, /skill-invocation-1/);
+  assert.match(agentRecordsHtml, /cloud-recording-test/);
   assert.match(agentRecordsHtml, /Agent 命令/);
   assert.match(agentRecordsHtml, /Agent finished the requested check/);
   assert.match(agentRecordsHtml, /python3 -m pytest -v test_agent_record\.py/);
@@ -962,6 +979,14 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     [{ id: 'running-attempt', status: 'running' }],
     []
   ).outputFormat`, context), 'raw');
+  assert.equal(vm.runInContext(`managedCodexTerminalStream(
+    { id: 'large-managed-task', status: 'running' },
+    [{
+      id: 'large-managed-attempt', status: 'running',
+      stdoutBytes: (64 * 1024 * 1024) + 4096
+    }],
+    []
+  ).initialOffset`, context), 4096);
   assert.deepEqual(
     JSON.parse(vm.runInContext(`JSON.stringify((({ cols, rows }) => ({ cols, rows }))(
       managedCodexTerminalStream(
@@ -1117,13 +1142,22 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     managedSockets[0].emit('message', { data: JSON.stringify({ type: 'ready', offset: 0, status: 'running' }) });
     const managedEvent = '\\x1b[1;94mCodex\\x1b[0m\\r\\nLive managed output.\\r\\n';
     managedSockets[0].emit('message', { data: new TextEncoder().encode(managedEvent).buffer });
-    managedSockets[0].emit('message', { data: JSON.stringify({ type: 'end', offset: managedEvent.length, status: 'completed' }) });
+    managedView.offset = 64 * 1024 * 1024;
+    const beyondFormerLimit = 'Output after the former display limit.\\r\\n';
+    managedSockets[0].emit('message', { data: new TextEncoder().encode(beyondFormerLimit).buffer });
+    globalThis.managedContinuedPastFormerLimit = !managedView.ended
+      && managedSockets[0].readyState === 1
+      && managedView.offset === (64 * 1024 * 1024) + beyondFormerLimit.length;
+    managedSockets[0].emit('message', {
+      data: JSON.stringify({ type: 'end', offset: managedView.offset, status: 'completed' })
+    });
   `, context);
   assert.equal(vm.runInContext('managedToggle.disabled', context), true);
   assert.equal(vm.runInContext('managedView.inputUnlocked', context), false);
   assert.equal(vm.runInContext('managedWriteControls.every((control) => control.disabled)', context), true);
   assert.equal(vm.runInContext('managedHost.scrollTop', context), 0);
   assert.equal(vm.runInContext('managedScrollToBottomCalls', context), 1);
+  assert.equal(vm.runInContext('managedContinuedPastFormerLimit', context), true);
   vm.runInContext(`
     managedHost.scrollTop = 11;
     writeManagedCodexTerminalOutput(managedView, 'More live output.\\r\\n');
@@ -1135,7 +1169,10 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     `${authenticatedWebSocketOrigin}/api/sessions/live-managed-task/attempts/live-managed-attempt/stdout/live?offset=0`,
   );
   assert.doesNotMatch(vm.runInContext('managedSockets[0].url', context), /codex-terminal\/live/);
-  assert.match(vm.runInContext("plainTerminalText(managedWrites.join(''))", context), /Codex\r?\nLive managed output\./);
+  assert.match(
+    vm.runInContext("plainTerminalText(managedWrites.join(''))", context),
+    /Codex\r?\nLive managed output\.\r?\nOutput after the former display limit\./,
+  );
   assert.equal(vm.runInContext('managedStatus.textContent', context), 'CLI 已结束');
   vm.runInContext('state.codexTerminalView = null; delete globalThis.WebSocket', context);
   vm.runInContext(`
@@ -1298,18 +1335,59 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(skillReportHtml, /priority-debug sensitivity-sensitive">\s*<summary><span>Credential source/);
   assert.match(skillReportHtml, /Pytest HTML 报告/);
   assert.match(skillReportHtml, /Fail 分析报告/);
-  assert.match(skillReportHtml, /href="\/api\/sessions\/report-task\/skill-reports\/skill-report-1\/artifacts\/pytest-html-artifact" target="_blank" rel="noopener"/);
-  assert.match(skillReportHtml, /href="\/api\/sessions\/report-task\/skill-reports\/skill-report-1\/artifacts\/pytest-html-artifact-web" target="_blank" rel="noopener"/);
-  assert.match(skillReportHtml, /href="\/api\/sessions\/report-task\/skill-reports\/skill-report-1\/artifacts\/failure-analysis-artifact" target="_blank" rel="noopener"/);
+  assert.match(skillReportHtml, /href="\/report-viewer\.html\?artifact=%2Fapi%2Fsessions%2Freport-task%2Fskill-reports%2Fskill-report-1%2Fartifacts%2Fpytest-html-artifact&amp;title=pytest-result\.html" target="_blank" rel="noopener"/);
+  assert.match(skillReportHtml, /href="\/report-viewer\.html\?artifact=%2Fapi%2Fsessions%2Freport-task%2Fskill-reports%2Fskill-report-1%2Fartifacts%2Fpytest-html-artifact-web&amp;title=pytest-web-result\.html" target="_blank" rel="noopener"/);
+  assert.match(skillReportHtml, /href="\/report-viewer\.html\?artifact=%2Fapi%2Fsessions%2Freport-task%2Fskill-reports%2Fskill-report-1%2Fartifacts%2Ffailure-analysis-artifact&amp;title=failure-analysis\.md" target="_blank" rel="noopener"/);
   assert.match(skillReportHtml, /pytest-result\.html/);
   assert.match(skillReportHtml, /pytest-web-result\.html/);
   assert.match(skillReportHtml, /pytest-pending\.html/);
   assert.match(skillReportHtml, /已登记 · 执行中/);
   const visibleSkillReportHtml = skillReportHtml.split('<details class="report-raw">')[0];
-  assert.equal((visibleSkillReportHtml.match(/pytest-result\.html/g) || []).length, 1);
+  assert.equal((visibleSkillReportHtml.match(/<strong>pytest-result\.html<\/strong>/g) || []).length, 1);
   assert.match(skillReportHtml, /failure-analysis\.md/);
   assert.match(skillReportHtml, /2 KiB/);
   assert.match(skillReportHtml, /<details class="report-raw"><summary>/);
+  const genericArtifactNames = vm.runInContext(`reportArtifactLinks(
+    [{
+      key: 'normal', kind: 'pytest-html', fileName: 'result.html', bytes: 1024,
+      url: '/api/sessions/report-task/skill-reports/report-normal/artifacts/artifact-normal'
+    }],
+    [{ key: 'long', kind: 'pytest-html', fileName: 'result.html', executionStatus: 'running' }],
+    'running',
+    [{
+      key: 'normal', kind: 'pytest-html',
+      path: '/home/jenkins/premium_robot/task/cloud_recording_full_normal_parallel_tag/report/result.html'
+    }, {
+      key: 'long', kind: 'pytest-html',
+      path: '/home/jenkins/premium_robot/task/cloud_recording_full_long_parallel_tag/report/result.html'
+    }]
+  )`, context);
+  assert.match(genericArtifactNames, /cloud_recording_full_normal_parallel_tag\.html/);
+  assert.match(genericArtifactNames, /cloud_recording_full_long_parallel_tag\.html/);
+  assert.doesNotMatch(genericArtifactNames, />result\.html</);
+  assert.equal(
+    vm.runInContext(`reportArtifactDisplayName({
+      key: 'web', kind: 'pytest-html', fileName: 'pytest-web-result.html'
+    }, [], 'pytestHtmlReport')`, context),
+    'pytest-web-result.html',
+  );
+  const runningResultNames = vm.runInContext(`businessReportPage([{
+    ...${JSON.stringify(skillReports[0])},
+    artifacts: [], artifactDeclarations: [],
+    executionEvidence: { externalAttemptId: 'external-result-layout' },
+    registeredArtifacts: [{
+      key: 'gw51-normal', kind: 'pytest-html', fileName: 'result.html',
+      executionStatus: 'running', url: '/api/running-result'
+    }]
+  }], [{
+    id: 'external-result-layout', status: 'running',
+    artifactDeclarations: [{
+      key: 'gw51-normal', kind: 'pytest-html',
+      path: '/home/jenkins/premium_robot/task/cloud_recording_full_normal_parallel_live/report/result.html'
+    }]
+  }])`, context);
+  assert.match(runningResultNames, /cloud_recording_full_normal_parallel_live\.html/);
+  assert.doesNotMatch(runningResultNames.split('<details class="report-raw">')[0], />result\.html</);
   const externallyRegisteredReport = {
     ...skillReports[0],
     artifacts: [],
@@ -1495,6 +1573,62 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(generalTaskHtml, /clean-code/);
   assert.match(generalTaskHtml, /实现完成并通过检查。/);
   assert.doesNotMatch(generalTaskHtml, /pytest 回归命令|等待业务测试结果|首轮回归/);
+  const deploymentTimelineReports = [{
+    id: 'cicd-progress-1', reportKey: 'cicd-deploy:release-1', revision: 1,
+    skillId: 'rtsc-cicd-deploy', reportType: 'deployment-result',
+    title: 'CICD deployment', status: 'running', summary: 'CICD preflight completed.',
+    observedAt: '2026-08-04T13:01:00.000Z', publishedAt: '2026-08-04T13:01:01.000Z',
+    metrics: [], sections: [],
+  }, {
+    id: 'cicd-progress-2', reportKey: 'cicd-deploy:release-1', revision: 2,
+    skillId: 'rtsc-cicd-deploy', reportType: 'deployment-result',
+    title: 'CICD deployment', status: 'running', summary: 'CICD dry-run completed.',
+    observedAt: '2026-08-04T13:02:00.000Z', publishedAt: '2026-08-04T13:02:01.000Z',
+    metrics: [], sections: [],
+  }, {
+    id: 'cicd-progress-3', reportKey: 'cicd-deploy:release-1', revision: 3,
+    skillId: 'rtsc-cicd-deploy', reportType: 'deployment-result',
+    title: 'CICD deployment', status: 'succeeded', summary: 'CICD deployment verified.',
+    observedAt: '2026-08-04T13:03:00.000Z', publishedAt: '2026-08-04T13:03:01.000Z',
+    metrics: [], sections: [],
+  }, {
+    id: 'gw-progress-1', reportKey: 'gw-deploy:release-1', revision: 1,
+    skillId: 'cloud-recording-gw-deploy', reportType: 'deployment-result',
+    title: 'GW deployment', status: 'running', summary: 'GW images resolved.',
+    observedAt: '2026-08-04T13:04:00.000Z', publishedAt: '2026-08-04T13:04:01.000Z',
+    metrics: [], sections: [],
+  }, {
+    id: 'gw-progress-2', reportKey: 'gw-deploy:release-1', revision: 2,
+    skillId: 'cloud-recording-gw-deploy', reportType: 'deployment-result',
+    title: 'GW deployment', status: 'succeeded', summary: 'GW workers verified.',
+    observedAt: '2026-08-04T13:05:00.000Z', publishedAt: '2026-08-04T13:05:01.000Z',
+    metrics: [], sections: [],
+  }];
+  const deploymentTimelineHtml = vm.runInContext(`businessSummaryTimeline(
+    ${JSON.stringify({
+    id: 'deployment-task', name: '部署测试环境', objective: 'Deploy CICD and GW.',
+    status: 'waiting_review', summary: '部署完成。',
+    createdAt: '2026-08-04T13:00:00.000Z', lastFinishedAt: '2026-08-04T13:06:00.000Z',
+  })},
+    ${JSON.stringify(deploymentTimelineReports)}, [], [], [], []
+  )`, context);
+  assert.match(deploymentTimelineHtml, /业务轨迹/);
+  assert.equal((deploymentTimelineHtml.match(/CI\/CD 部署/g) || []).length, 2);
+  assert.equal((deploymentTimelineHtml.match(/GW 部署/g) || []).length, 2);
+  assert.match(deploymentTimelineHtml, /CI\/CD 部署 · 开始/);
+  assert.match(deploymentTimelineHtml, /CI\/CD 部署 · 结束/);
+  assert.match(deploymentTimelineHtml, /GW 部署 · 开始/);
+  assert.match(deploymentTimelineHtml, /GW 部署 · 结束/);
+  assert.doesNotMatch(deploymentTimelineHtml, /CICD dry-run completed\./);
+  for (const summary of deploymentTimelineReports
+    .filter((report) => report.id !== 'cicd-progress-2')
+    .map((report) => report.summary)) {
+    assert.match(deploymentTimelineHtml, new RegExp(summary.replace(/[.]/g, '\\.')));
+  }
+  assert.ok(
+    deploymentTimelineHtml.indexOf('CICD preflight completed.')
+      < deploymentTimelineHtml.indexOf('CICD deployment verified.'),
+  );
   const documentRuleOnly = vm.runInContext(`testRequestDocumentEvent(${JSON.stringify({
     id: 'document-rule-only', name: 'Timeline behavior',
     objective: '只有给了 Confluence 或其他形式的提测文档才算收到提测报告。',
@@ -1899,7 +2033,8 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(largeAttemptOutputHtml, /打开完整原始输出/);
   assert.doesNotMatch(largeAttemptOutputHtml, /data-action="view-attempt-output"/);
   assert.match(APP_SOURCE, /INLINE_ATTEMPT_OUTPUT_MAX_BYTES\s*=\s*5\s*\*\s*1024\s*\*\s*1024/);
-  assert.match(APP_SOURCE, /CODEX_CLI_DISPLAY_MAX_BYTES\s*=\s*64\s*\*\s*1024\s*\*\s*1024/);
+  assert.doesNotMatch(APP_SOURCE, /CODEX_CLI_DISPLAY_MAX_BYTES/);
+  assert.match(APP_SOURCE, /CODEX_CLI_INITIAL_REPLAY_MAX_BYTES\s*=\s*64\s*\*\s*1024\s*\*\s*1024/);
   assert.match(APP_SOURCE, /CODEX_CLI_SCROLLBACK_LINES\s*=\s*100000/);
   assert.match(APP_SOURCE, /abortAttemptOutputLoad\(\)[\s\S]*active\.controller\.abort\(\)/);
   responseOverrides.set('GET /api/sessions/inline-task/attempts/attempt-inline/stdout', { payload: 'raw session line\n' });
@@ -2265,10 +2400,12 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     id: 'external-1', generation: 2, status: 'running', pid: 1234,
     commandPath: '/tmp/converter.cmd', command: 'python3 -m pytest -v converter/test_smoke.py',
     logPath: '/tmp/converter.log', donePath: '/tmp/converter.done', statePath: '/tmp/converter.state',
-    checkIntervalSeconds: 300, lastObservation: 'state=running pid=running', startedAt: '2026-07-26T00:00:00.000Z'
+    checkIntervalSeconds: 300, lastObservation: 'state=running pid=running', startedAt: '2026-07-26T00:00:00.000Z',
+    skills: [{ skillId: 'converter-test', version: 2, contentHash: '1234567890abcdef' }]
   }], [{
     id: 'scheduled-1', externalAttemptId: 'external-1', generation: 2, sequence: 3, status: 'pending', dueAt: '2026-07-26T00:05:00.000Z',
-    attemptCount: 0, maxAttempts: 3, commandId: '', lastError: ''
+    attemptCount: 0, maxAttempts: 3, commandId: '', lastError: '',
+    skills: [{ skillId: 'converter-test', version: 2, contentHash: '1234567890abcdef' }]
   }])`, context);
   assert.match(backgroundHtml, /external-1/);
   assert.match(backgroundHtml, /scheduled-1/);
@@ -2278,6 +2415,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(backgroundHtml, /python3 -m pytest -v converter\/test_smoke\.py/);
   assert.match(backgroundHtml, /external-attempts\/external-1\/log/);
   assert.match(backgroundHtml, /\/tmp\/converter\.done/);
+  assert.equal((backgroundHtml.match(/converter-test/g) || []).length, 2);
   vm.runInContext(`updateBackgroundTabAvailability([{ id: 'external-1' }], [])`, context);
   assert.equal(element('#detailTabs [data-tab="background"]').classList.contains('hidden'), false);
 

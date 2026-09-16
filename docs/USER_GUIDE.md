@@ -88,12 +88,14 @@ converter 等 Skill 会通过 `run-in-background` 返回 `PID`、`LOG`、`DONE`�
 2. 逻辑任务进入“后台运行中”，不会进入历史，也不能确认完成。
 3. 到达检查时间后，Worker 恢复 Task 当前持久 Session，并新增一个 Turn 检查状态文件和业务结果。
 4. 仍在运行时保存观察并安排下一次检查；终止后汇总最终结果并进入“待确认”。如果后台命令在启动 Turn 返回前已经结束，平台会把首次结果收集提前到立即执行，而不是取消检查；pytest 失败时，适用的测试 Skill 会继续执行 `analyze-failures` 并登记结构化结论。
+   如果后台命令在某次检查 Turn 进行期间才结束，平台会保留另一条立即执行的终态收集，而不会因为当前 Turn 的旧“运行中”观察而提前进入“待确认”。
 5. 终态后 Worker 将原始 `.log` 字节托管到任务目录；“后台与调度”可查看托管状态、字节数、SHA-256、最近完整校验和失败原因。平台每 24 小时渐进复验，读取时也会校验；异常日志不会返回，并在原业务 LOG 仍匹配原摘要时自动隔离损坏副本和修复。
 
-启动后台进程后，Codex 必须按平台提示显式执行：
+启动后台进程后，Codex 必须按平台提示通过业务 Skill 和 `run-in-background` 包装登记命令。包装器会自动记录调用，后台执行直接继承，不需要 Agent 另外生成归因报告：
 
 ```bash
-codex-background-track register \
+codex-skill-use cloud-recording-test run-in-background -- \
+  codex-background-track register \
   --pid <PID> --log <LOG> --done <DONE> --state <STATE> --meta <META> \
   --step-key normal --step-label "Normal group" \
   --run-key initial --run-kind initial --target-count 974 \
@@ -113,7 +115,7 @@ codex-background-track register \
 
 状态判断以 DONE/STATE/META 为准，PID 只是辅助。Worker 每秒执行轻量终态核对；点击“停止”前也会先核对一次，已经结束的执行保留真实的 succeeded/failed 状态，只取消仍在运行的跟踪。每个已知 HTML 在启动登记时使用可重复的 `--artifact kind:key:absolute-path` 声明，并在运行中 Skill Report 通过 `executionEvidence.externalAttemptId` 关联该登记。任务摘要和结构化报告会立即显示文件名；文件已经生成时可打开请求开始时的只读快照，刷新可查看后续写入，尚未生成时返回 `404`。终态后平台自动归档并把同一条目切换为正式托管入口，不要求 wrapper 的 `.cmd` 直接包含 pytest `--html`。
 
-运行中入口读取业务工作目录中的登记文件，不等同于已归档证据：响应不缓存并使用 HTML sandbox，但源 HTML 的本地日志、媒体或其他相对依赖可能尚未托管。终态入口从平台托管副本读取，包含已归档并改写的可用依赖，任务完成后仍可访问。
+运行中入口读取业务工作目录中的登记文件，不等同于已归档证据：响应不缓存并使用 HTML sandbox，但源 HTML 的本地日志、媒体或其他相对依赖可能尚未托管。终态入口从平台托管副本读取，包含已归档并改写的可用依赖，任务完成后仍可访问。采用 `task/<run-id>/report/result.html` 布局时，平台对外使用原业务报告名 `<run-id>.html`，链接文字、响应文件名和浏览器网页标签均不显示内部占位名 `result.html`；实际源路径和归档 URL 不变。
 
 一次后台业务执行及其检查使用同一任务 Session。每天、每小时等周期性业务不是一条 Session 永久复用：每次周期应创建新的任务 Session，使每次结果独立归档和审计。
 
@@ -171,7 +173,7 @@ codex-skill-use <skill-id> [skill-id ...] -- <executable> [args ...]
 codex-skill-use converter-test run-in-background -- python3 -m pytest path/to/test_converter.py
 ```
 
-`codex-skill-use` 是本平台的审计包装器，不是 Codex CLI 的内置 `/` 命令。它先校验所有 ID 都存在于当前任务的冻结快照，再原样启动后面的程序并传递输出和退出码。包含管道、重定向等 shell 语法时，应把显式 shell 作为被执行程序，例如 `-- sh -lc 'command | tee output.log'`。
+`codex-skill-use` 是本平台的审计包装器，不是 Codex CLI 的内置 `/` 命令。它先校验所有 ID 都存在于当前任务的冻结快照，自动记录 Task/Turn/Attempt、Skill 版本与哈希、命令状态和退出码，再原样启动后面的程序并传递输出。记录过程是本地 SQLite 写入，不触发模型调用或新的 Turn。包含管道、重定向等 shell 语法时，应把显式 shell 作为被执行程序，例如 `-- sh -lc 'command | tee output.log'`。
 
 converter 场景中，一条命令可以同时关联 `converter-test`、`run-in-background` 等多个 Skill。平台不使用命令关键字猜测 Skill，避免把普通 `pytest`、日志查看或同名脚本误判为 Skill 使用。
 
@@ -183,7 +185,7 @@ converter 场景中，一条命令可以同时关联 `converter-test`、`run-in-
 
 5 MiB 以上的单个输出流使用“打开完整原始输出”，避免自动把大日志载入页面；实时查看期间达到该上限时也会停止内嵌追加，完整内容继续由原始入口提供。内嵌视图使用本地加载的只读 xterm.js，支持 ANSI 样式、回车覆盖和终端滚动，不能向 Session 发送输入；浏览器不支持终端组件时自动退回纯文本。两种入口读取的是同一份 Attempt 原始文件，xterm 视图按 UTF-8 展示，原始入口保持服务器保存的完整字节流。
 
-“Codex CLI”页签是 Codex 终端的唯一入口。托管 Turn 运行时，它实时跟随该 Turn 唯一的交互式 `codex` / `codex resume` TUI PTY，不会启动第二个 Codex 进程，也不会显示 Attempt JSON 或后台 pytest 日志。runner 只按 rollout 的结构化 Turn 完成事件自动结束 TUI，不解析终端文字。托管进程退出后显示只读终端历史；只有操作者显式点击“重连”才会再次恢复同一 Codex Session。任务完成后再次打开该页签只校验并回放全部托管/交互 transcript，不启动 Codex，也不解析或连接原 Runtime；要重新执行已归档任务，必须先显式恢复任务，再重连或提交新 Turn。页面最多追加 64 MiB、保留 100,000 行滚动缓存；超过页面上限时，Attempt 的“打开完整原始输出”入口仍可读取服务器保存的完整字节流。
+“Codex CLI”页签是 Codex 终端的唯一入口。托管 Turn 运行时，它实时跟随该 Turn 唯一的交互式 `codex` / `codex resume` TUI PTY，不会启动第二个 Codex 进程，也不会显示 Attempt JSON 或后台 pytest 日志。runner 只按 rollout 的结构化 Turn 完成事件自动结束 TUI，不解析终端文字。托管进程退出后显示只读终端历史；只有操作者显式点击“重连”才会再次恢复同一 Codex Session。任务完成后再次打开该页签只校验并回放全部托管/交互 transcript，不启动 Codex，也不解析或连接原 Runtime；要重新执行已归档任务，必须先显式恢复任务，再重连或提交新 Turn。首次打开超大 Attempt 输出时页面加载最新 64 MiB，随后持续显示全部新输出并保留最新 100,000 行滚动缓存；超出后自动淘汰最旧行，不影响后续实时输出。Attempt 的“打开完整原始输出”入口仍可读取服务器保存的完整字节流。
 
 “任务摘要”根据已经持久化的执行证据自动选择展示方式，不新增任务类型字段，也不要求迁移现有 Task。存在 pytest 命令、`test-result` 报告或对应 Step/Run 证据时，继续按业务时间显示回归、部署、预约回查和最终结果；其他任务则显示当前任务状态、目标或最近结果、主要后台执行、任意类型的结构化报告和任务时间线。判断不依赖任务名称或工作目录，因此代码修改、文档、排障、部署和其他 Codex 工作都可以使用同一套 Task、Session 和 Turn 生命周期。
 
@@ -198,6 +200,8 @@ converter 场景中，一条命令可以同时关联 `converter-test`、`run-in-
 - 可展开查看的原始运行事件。
 - Codex 显式声明并经快照校验的 Skill ID、版本、内容哈希和归因来源。
 - 运行时原始归因以及后续所有人工增加、移除记录。
+
+“Skill 调用”独立列出 `codex-skill-use` 自动埋点的真实调用及其退出状态。这是新调用的权威归因，不依赖 Codex 外层工具事件是否能还原内部 shell 命令。“后台与调度”显示后台登记继承的同一组 Skill；定时检查继承关联后台执行的 Skill，不把平台调度器伪装成业务 Skill。
 
 发现归因错误时，在命令卡片点击“修正归因”，从该任务冻结快照中重新勾选最终 Skill 集合，并填写修正原因。已完成历史也允许修正归因。修正采用追加记录：运行时声明、旧值、操作者、时间和原因都不会被覆盖；Agent 工作记录和全局操作审计会同步产生 `command.skills.corrected` 事件。
 

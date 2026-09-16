@@ -42,12 +42,17 @@ const {
   openExternalAttemptArtifactResourceFile,
   externalArchiveIntegrityStatus,
   listScheduledJobs,
+  listSkillInvocations,
   listCommandExecutions,
   setCommandExecutionSkills,
   getSessionSkillUsage,
   listSkillReports,
   openSkillReportArtifactFile,
   openSkillReportArtifactResourceFile,
+  skillReportArtifactPlayerFormatHints,
+  skillReportArtifactPlaybackAlternatives,
+  listSkillReportArtifactMediaViews,
+  markSkillReportArtifactMediaViewed,
   listSessionWorklogs,
   appendSessionWorklog,
   readSessionLatestLog,
@@ -109,6 +114,7 @@ const {
   validateTaskBody,
   validateSkillBody,
 } = require('./src/validation');
+const { openHlsPlaybackFile } = require('./src/report-media-playback');
 
 const PORT = Number(process.env.PORT || 8091);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -120,6 +126,32 @@ const AUTH_SESSION_SECRET = AUTH_USER && AUTH_PASSWORD
   ? crypto.createHash('sha256').update(`${AUTH_USER}\0${AUTH_PASSWORD}`).digest()
   : null;
 const REPORT_RESOURCE_ACCESS_PARAM = 'codex_report_resource_access';
+const REPORT_VIEWED_ACCESS_PARAM = 'codex_report_viewed_access';
+const REPORT_VIEWED_MEDIA_KEY_PARAM = 'mediaKey';
+const REPORT_VIEWED_ACCESS_SECRET = AUTH_SESSION_SECRET || crypto.randomBytes(32);
+const PYTEST_PLAYER_SCRIPT_ASSETS = new Map([
+  ['https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js', {
+    name: 'hls', fileName: 'hls.min.js', sha256: '6cfad701a61fb8a99add5e84449e64661169b0652bf44ceb2a28465c8817b5f1',
+  }],
+  ['https://cdn.jsdelivr.net/npm/hls.js@1.7.1/dist/hls.min.js', {
+    name: 'hls', fileName: 'hls.min.js', sha256: '6cfad701a61fb8a99add5e84449e64661169b0652bf44ceb2a28465c8817b5f1',
+  }],
+  ['https://cdn.jsdelivr.net/npm/flv.js@latest/dist/flv.min.js', {
+    name: 'flv', fileName: 'flv.min.js', sha256: '733b9b325dbc59871a652c0a84f2f285a2cfd06cf2efcedcd87cb1e194cd1e8f',
+  }],
+  ['https://cdn.jsdelivr.net/npm/dashjs@4.7.4/dist/dash.all.min.js', {
+    name: 'dash', fileName: 'dash.all.min.js', sha256: '3a1db51ed00412c16f9edb304db69ac84f1ffce8aa2d61caf4895aa9c9bdf0df',
+  }],
+  ['https://cdn.jsdelivr.net/npm/shaka-player@4.15.15/dist/shaka-player.compiled.js', {
+    name: 'shaka', fileName: 'shaka-player.compiled.js', sha256: 'a5f055ce9ac2077b285ae9c6f133b0afc5a46f232f3ec7a04df27e37fc33e1ce',
+  }],
+]);
+for (const asset of PYTEST_PLAYER_SCRIPT_ASSETS.values()) {
+  const source = fs.readFileSync(path.join(__dirname, 'assets', 'pytest-html-video', asset.fileName));
+  const digest = crypto.createHash('sha256').update(source).digest('hex');
+  if (digest !== asset.sha256) throw new Error(`Pytest player asset integrity failed: ${asset.fileName}`);
+  asset.source = source.toString('utf8').replace(/<\/script/gi, '<\\/script');
+}
 const OPERATOR_ACTOR = AUTH_USER ? `user:${AUTH_USER}` : 'operator';
 const API_MAX_CONCURRENCY = Number(process.env.CODEX_API_MAX_CONCURRENCY ?? 64);
 const API_IDLE_TIMEOUT_MS = Number(process.env.CODEX_API_IDLE_TIMEOUT_MS ?? 30000);
@@ -545,14 +577,337 @@ function rewriteExternalArtifactManifest(content, resourceScope, manifestPath, m
   );
 }
 
-async function withSignedArtifactResourceUrls(opened, resourceScope) {
+function inlineScriptJson(value) {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
+function artifactDocumentTitle(html, fileName) {
+  const title = String(fileName || 'pytest-report.html')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  const titleElement = `<title>${title}</title>`;
+  if (/<title\b[^>]*>[\s\S]*?<\/title\s*>/i.test(html)) {
+    return String(html).replace(/<title\b[^>]*>[\s\S]*?<\/title\s*>/i, titleElement);
+  }
+  const head = /<head\b[^>]*>/i.exec(html);
+  if (head) {
+    const index = head.index + head[0].length;
+    return html.slice(0, index) + titleElement + html.slice(index);
+  }
+  const htmlElement = /<html\b[^>]*>/i.exec(html);
+  if (htmlElement) {
+    const index = htmlElement.index + htmlElement[0].length;
+    return html.slice(0, index) + `<head>${titleElement}</head>` + html.slice(index);
+  }
+  const doctype = /<!doctype\b[^>]*>/i.exec(html);
+  if (doctype) {
+    const index = doctype.index + doctype[0].length;
+    return html.slice(0, index) + titleElement + html.slice(index);
+  }
+  return titleElement + html;
+}
+
+function inlineKnownPytestPlayerScripts(html) {
+  return String(html).replace(
+    /<script\b[^>]*\bsrc\s*=\s*(["'])([^"']+)\1[^>]*>\s*<\/script\s*>/gi,
+    (tag, quote, sourceUrl) => {
+      const asset = PYTEST_PLAYER_SCRIPT_ASSETS.get(sourceUrl);
+      return asset
+        ? `<script data-codex-pytest-player="${asset.name}">${asset.source}</script>`
+        : tag;
+    },
+  );
+}
+
+const LEGACY_PYTEST_VIDEO_RESTORE = `  function restoreViewedLinks() {
+    var map = loadViewedMap();
+    var links = document.querySelectorAll('.vm_video_link');
+    links.forEach(function(a){
+      if (map[linkKey(a)]) {
+        markLinkViewed(a);
+      }
+    });
+  }
+`;
+const INCREMENTAL_PYTEST_VIDEO_RESTORE = `  function restoreViewedLinks(root) {
+    var map = loadViewedMap();
+    var restoreLink = function(a){
+      if (map[linkKey(a)]) {
+        markLinkViewed(a);
+      }
+    };
+    if (!root) {
+      document.querySelectorAll('.vm_video_link').forEach(restoreLink);
+      return;
+    }
+    if (root.nodeType !== 1) return;
+    if (root.matches && root.matches('.vm_video_link')) restoreLink(root);
+    if (root.querySelectorAll) {
+      root.querySelectorAll('.vm_video_link').forEach(restoreLink);
+    }
+  }
+`;
+const LEGACY_PYTEST_VIDEO_OBSERVER = `  function installRestoreObserver() {
+    if (!window.MutationObserver || !document.body) {
+      return;
+    }
+    var scheduled = false;
+    var observer = new MutationObserver(function(mutations){
+      var shouldRestore = false;
+      mutations.forEach(function(mutation){
+        if (mutation.addedNodes && mutation.addedNodes.length) {
+          shouldRestore = true;
+        }
+      });
+      if (!shouldRestore || scheduled) {
+        return;
+      }
+      scheduled = true;
+      window.requestAnimationFrame(function(){
+        scheduled = false;
+        restoreViewedLinks();
+      });
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+`;
+const INCREMENTAL_PYTEST_VIDEO_OBSERVER = `  function installRestoreObserver() {
+    if (!window.MutationObserver || !document.body) {
+      return;
+    }
+    var scheduled = false;
+    var pendingRestoreRoots = [];
+    var observer = new MutationObserver(function(mutations){
+      mutations.forEach(function(mutation){
+        mutation.addedNodes.forEach(function(node){
+          if (node.nodeType === 1) pendingRestoreRoots.push(node);
+        });
+      });
+      if (!pendingRestoreRoots.length || scheduled) {
+        return;
+      }
+      scheduled = true;
+      window.requestAnimationFrame(function(){
+        var roots = pendingRestoreRoots;
+        pendingRestoreRoots = [];
+        scheduled = false;
+        roots.forEach(restoreViewedLinks);
+      });
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+`;
+
+function optimizeLegacyPytestVideoViewedObserver(html) {
+  const source = String(html);
+  if (!source.includes(LEGACY_PYTEST_VIDEO_RESTORE)
+    || !source.includes(LEGACY_PYTEST_VIDEO_OBSERVER)) return source;
+  return source
+    .replace(LEGACY_PYTEST_VIDEO_RESTORE, INCREMENTAL_PYTEST_VIDEO_RESTORE)
+    .replace(LEGACY_PYTEST_VIDEO_OBSERVER, INCREMENTAL_PYTEST_VIDEO_OBSERVER);
+}
+
+const LEGACY_PYTEST_LOG_FRAME_LOAD = 'if(frame){ frame.src = url;';
+const ISOLATED_PYTEST_LOG_FRAME_LOAD = [
+  'if(frame){',
+  '  var nextFrame=frame.cloneNode(false);',
+  "  nextFrame.removeAttribute('src');",
+  '  frame.parentNode.replaceChild(nextFrame,frame);',
+  '  frame=nextFrame;',
+  '  frame.src = url;',
+].join('');
+
+function isolateLegacyPytestLogFrames(html) {
+  return String(html).replaceAll(
+    LEGACY_PYTEST_LOG_FRAME_LOAD,
+    ISOLATED_PYTEST_LOG_FRAME_LOAD,
+  );
+}
+
+function injectPlatformViewedMediaAdapter(html, adapter) {
+  const config = inlineScriptJson({
+    endpoint: adapter.endpoint,
+    mediaKeys: adapter.mediaKeys,
+    playbackSources: adapter.playbackSources,
+  });
+  const script = `<script>(function(){
+'use strict';
+var config=${config};
+var viewed=new Set(config.mediaKeys||[]);
+var playbackSources=config.playbackSources||{};
+var activePlayback=null;
+var activatedFallbacks=new Set();
+function validKey(value){
+  var key=String(value||'').trim();
+  return key&&key.length<=512&&!/[\\u0000-\\u001f\\u007f]/.test(key)?key:'';
+}
+function linkKey(link){
+  var declared=validKey(link.getAttribute('data-media-key'));
+  if(declared)return declared;
+  var source=link.getAttribute('data-src')||link.getAttribute('href')||'';
+  try{
+    var parsed=new URL(source,window.location.href);
+    var marker='/resources/';
+    var markerIndex=parsed.pathname.lastIndexOf(marker);
+    if(markerIndex>=0){
+      var resourceId=decodeURIComponent(parsed.pathname.slice(markerIndex+marker.length));
+      if(resourceId&&!resourceId.includes('/'))return validKey('resource:'+resourceId);
+    }
+    return validKey('legacy:'+parsed.pathname+'||'+(link.getAttribute('data-label')||link.textContent||''));
+  }catch(error){
+    return validKey('legacy:'+source.split(/[?#]/,1)[0]+'||'+(link.getAttribute('data-label')||link.textContent||''));
+  }
+}
+function linkResourceId(link){
+  var declared=link.getAttribute('data-codex-original-resource-id');
+  if(declared)return declared;
+  var source=link.getAttribute('data-src')||link.getAttribute('href')||'';
+  try{
+    var parsed=new URL(source,window.location.href);
+    var marker='/resources/';
+    var markerIndex=parsed.pathname.lastIndexOf(marker);
+    if(markerIndex<0)return '';
+    var remainder=parsed.pathname.slice(markerIndex+marker.length);
+    var resourceId=decodeURIComponent(remainder.split('/',1)[0]);
+    return resourceId&&!resourceId.includes('/')?resourceId:'';
+  }catch(error){
+    return '';
+  }
+}
+function applyPlaybackSource(link){
+  var resourceId=linkResourceId(link);
+  var playback=resourceId&&playbackSources[resourceId];
+  if(!playback||!playback.source)return;
+  if(playback.fallbackOnly&&!activatedFallbacks.has(resourceId))return;
+  link.setAttribute('data-codex-original-resource-id',resourceId);
+  if(!link.hasAttribute('data-media-key'))link.setAttribute('data-media-key','resource:'+resourceId);
+  link.setAttribute('data-src',playback.source);
+  link.setAttribute('href',playback.source);
+  link.setAttribute('data-media-format',playback.format||'mp4');
+}
+function activatePlaybackFallback(event){
+  if(!activePlayback||!activePlayback.playback.fallbackOnly)return;
+  if(activatedFallbacks.has(activePlayback.resourceId))return;
+  var media=event.target;
+  if(!(media instanceof HTMLMediaElement)||!media.buffered||!media.buffered.length)return;
+  var firstBuffered=media.buffered.start(0);
+  if(firstBuffered<=1){
+    if(event.type==='canplay'||event.type==='playing')activePlayback=null;
+    return;
+  }
+  if(media.currentTime<firstBuffered-1)return;
+  var current=activePlayback;
+  activatedFallbacks.add(current.resourceId);
+  applyPlaybackSource(current.link);
+  activePlayback=null;
+  window.setTimeout(function(){current.link.click();},0);
+}
+function markElement(link){
+  if(!link)return;
+  if(!link.classList.contains('vm_video_link_viewed')){
+    link.classList.add('vm_video_link_viewed');
+    link.style.setProperty('color','#666','important');
+    link.style.setProperty('opacity','1','important');
+  }
+  var next=link.nextElementSibling;
+  if(next&&next.classList&&next.classList.contains('vm_video_link_badge'))return;
+  var badge=document.createElement('span');
+  badge.className='vm_video_link_badge';
+  badge.textContent='(viewed)';
+  link.insertAdjacentElement('afterend',badge);
+}
+function processLink(link){
+  applyPlaybackSource(link);
+  if(viewed.has(linkKey(link)))markElement(link);
+}
+function processAddedTree(node){
+  if(!node||node.nodeType!==1)return;
+  if(node.matches&&node.matches('.vm_video_link'))processLink(node);
+  if(node.querySelectorAll){
+    node.querySelectorAll('.vm_video_link').forEach(processLink);
+  }
+}
+function restore(){
+  document.querySelectorAll('.vm_video_link').forEach(processLink);
+}
+function publishState(){
+  document.dispatchEvent(new CustomEvent('pytest-html-video-viewed-state',{
+    detail:{mediaKeys:Array.from(viewed)}
+  }));
+}
+function markViewed(value,link){
+  var key=validKey(value);
+  if(!key)return;
+  if(link)markElement(link);
+  if(viewed.has(key))return;
+  viewed.add(key);
+  if(!link){
+    document.querySelectorAll('.vm_video_link').forEach(function(candidate){
+      if(linkKey(candidate)===key)markElement(candidate);
+    });
+  }
+  publishState();
+  fetch(config.endpoint+'&${REPORT_VIEWED_MEDIA_KEY_PARAM}='+encodeURIComponent(key),{
+    method:'POST',credentials:'omit',referrerPolicy:'no-referrer',keepalive:true
+  }).catch(function(){});
+}
+document.addEventListener('pytest-html-video-viewed',function(event){
+  var detail=event.detail||{};
+  markViewed(detail.mediaKey||detail.key);
+});
+document.addEventListener('pytest-html-video-request-viewed-state',publishState);
+document.addEventListener('click',function(event){
+  var link=event.target.closest?event.target.closest('.vm_video_link'):null;
+  if(!link)return;
+  var resourceId=linkResourceId(link);
+  var playback=resourceId&&playbackSources[resourceId];
+  activePlayback=playback?{link:link,resourceId:resourceId,playback:playback}:null;
+  markViewed(linkKey(link),link);
+},true);
+['seeking','canplay','playing'].forEach(function(eventName){
+  document.addEventListener(eventName,activatePlaybackFallback,true);
+});
+function initialize(){
+  restore();
+  publishState();
+  if(window.MutationObserver&&document.body){
+    new MutationObserver(function(mutations){
+      mutations.forEach(function(mutation){
+        mutation.addedNodes.forEach(processAddedTree);
+      });
+    }).observe(document.body,{childList:true,subtree:true});
+  }
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initialize,{once:true});
+else initialize();
+})();</script>`;
+  const insertion = /<head\b[^>]*>/i.exec(html)
+    || /<html\b[^>]*>/i.exec(html)
+    || /<!doctype\b[^>]*>/i.exec(html);
+  if (!insertion) return script + html;
+  const index = insertion.index + insertion[0].length;
+  return html.slice(0, index) + script + html.slice(index);
+}
+
+async function withSignedArtifactResourceUrls(opened, resourceScope, options = {}) {
   const rewritableMediaTypes = new Set([
     'text/html; charset=utf-8',
     'application/vnd.apple.mpegurl',
     'application/dash+xml',
   ]);
-  if (!AUTH_USER || !AUTH_PASSWORD || !resourceScope
-    || !rewritableMediaTypes.has(opened.mediaType)) return opened;
+  const shouldSignResources = Boolean(
+    AUTH_USER && AUTH_PASSWORD && resourceScope && rewritableMediaTypes.has(opened.mediaType),
+  );
+  const shouldInjectViewedAdapter = Boolean(
+    options.viewedMediaAdapter && opened.mediaType === 'text/html; charset=utf-8',
+  );
+  const shouldSetDocumentTitle = options.documentTitle === true
+    && opened.mediaType === 'text/html; charset=utf-8';
+  if (!shouldSignResources && !shouldInjectViewedAdapter && !shouldSetDocumentTitle) return opened;
 
   let content = opened.content;
   let handle = opened.fileHandle;
@@ -571,7 +926,15 @@ async function withSignedArtifactResourceUrls(opened, resourceScope) {
   }
 
   let transformedContent = content.toString('utf8');
-  if (opened.resourcePath && ['application/vnd.apple.mpegurl', 'application/dash+xml']
+  if (shouldSetDocumentTitle) {
+    transformedContent = artifactDocumentTitle(transformedContent, opened.fileName);
+  }
+  if (opened.mediaType === 'text/html; charset=utf-8') {
+    transformedContent = inlineKnownPytestPlayerScripts(transformedContent);
+    transformedContent = optimizeLegacyPytestVideoViewedObserver(transformedContent);
+    transformedContent = isolateLegacyPytestLogFrames(transformedContent);
+  }
+  if (shouldSignResources && opened.resourcePath && ['application/vnd.apple.mpegurl', 'application/dash+xml']
     .includes(opened.mediaType)) {
     transformedContent = rewriteExternalArtifactManifest(
       transformedContent,
@@ -580,13 +943,24 @@ async function withSignedArtifactResourceUrls(opened, resourceScope) {
       opened.mediaType,
     );
   }
-  const resourcePattern = new RegExp(
-    `${escapeRegularExpression(resourceScope)}/([^\\s"'\\\\<>&?#]+)`,
-    'g',
-  );
-  const transformed = transformedContent.replace(resourcePattern, (resourcePath) => (
-    `${resourcePath}?${REPORT_RESOURCE_ACCESS_PARAM}=${reportResourceAccessToken(resourcePath)}`
-  ));
+  if (shouldSignResources) {
+    const formatHints = options.resourceFormatHints || new Map();
+    const resourcePattern = new RegExp(
+      `${escapeRegularExpression(resourceScope)}/([^\\s"'\\\\<>&?#]+)`,
+      'g',
+    );
+    transformedContent = transformedContent.replace(resourcePattern, (resourcePath, resourceId) => {
+      const formatHint = formatHints.get(resourceId) || '';
+      return signedReportResourceUrl(resourcePath, formatHint);
+    });
+  }
+  if (shouldInjectViewedAdapter) {
+    transformedContent = injectPlatformViewedMediaAdapter(
+      transformedContent,
+      options.viewedMediaAdapter,
+    );
+  }
+  const transformed = transformedContent;
   const responseContent = Buffer.from(transformed, 'utf8');
   return {
     ...opened,
@@ -646,7 +1020,7 @@ function writeSkillReportArtifactHeaders(res, opened, options = {}) {
     if (range) headers['Content-Range'] = `bytes ${range.start}-${range.end}/${opened.bytes}`;
   }
   if (opened.mediaType === 'text/html; charset=utf-8') {
-    headers['Content-Security-Policy'] = "sandbox allow-scripts; default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; frame-src http: https: data:; media-src 'self' blob:; connect-src 'self'";
+    headers['Content-Security-Policy'] = "sandbox allow-scripts; default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; frame-src http: https: data:; media-src 'self' blob:; connect-src 'self'; worker-src blob:";
   }
   res.writeHead(range ? 206 : 200, headers);
 }
@@ -911,6 +1285,53 @@ function reportResourceAccessToken(scope) {
     .digest('base64url');
 }
 
+function reportViewedAccessToken(scope) {
+  return crypto.createHmac('sha256', REPORT_VIEWED_ACCESS_SECRET)
+    .update(scope)
+    .digest('base64url');
+}
+
+function signedReportResourceUrl(resourcePath, formatHint = '') {
+  const query = AUTH_USER && AUTH_PASSWORD
+    ? `?${REPORT_RESOURCE_ACCESS_PARAM}=${reportResourceAccessToken(resourcePath)}`
+    : '';
+  const fragment = formatHint ? `#codex-media-format=${encodeURIComponent(formatHint)}` : '';
+  return `${resourcePath}${query}${fragment}`;
+}
+
+function artifactPlaybackSources(resourceScope, alternatives) {
+  return Object.fromEntries([...(alternatives || new Map())].map(([resourceId, alternative]) => {
+    const resourcePath = alternative.resourceId
+      ? `${resourceScope}/${alternative.resourceId}`
+      : `${resourceScope}/${resourceId}/playback`;
+    return [resourceId, {
+      source: signedReportResourceUrl(resourcePath, alternative.format),
+      format: String(alternative.format || '').replace(/^\./, ''),
+      fallbackOnly: !alternative.resourceId,
+    }];
+  }));
+}
+
+function viewedMediaAdapter(pathname, views, playbackAlternatives = new Map()) {
+  const endpointPath = `${pathname}/viewed-media`;
+  return {
+    endpoint: `${endpointPath}?${REPORT_VIEWED_ACCESS_PARAM}=${reportViewedAccessToken(endpointPath)}`,
+    mediaKeys: views.map((view) => view.mediaKey),
+    playbackSources: artifactPlaybackSources(`${pathname}/resources`, playbackAlternatives),
+  };
+}
+
+function artifactMediaViewsPath(pathname) {
+  return /^\/api\/sessions\/[^/]+\/skill-reports\/[^/]+\/artifacts\/[^/]+\/viewed-media$/
+    .test(String(pathname || ''));
+}
+
+function artifactMediaViewAccessValid(req, pathname, searchParams) {
+  if (req.method !== 'POST' || !artifactMediaViewsPath(pathname)) return false;
+  const supplied = searchParams?.get(REPORT_VIEWED_ACCESS_PARAM) || '';
+  return Boolean(supplied) && secureEqual(supplied, reportViewedAccessToken(pathname));
+}
+
 function artifactResourceAccessValid(req, pathname, searchParams) {
   const scope = artifactResourceScope(pathname);
   if (!scope || !['GET', 'HEAD'].includes(req.method)
@@ -934,7 +1355,8 @@ function requestCredentialsValid(req, pathname = '', searchParams = null) {
     if (secureEqual(user, AUTH_USER) && secureEqual(password, AUTH_PASSWORD)) return true;
   }
   if (authSessionFromRequest(req)) return true;
-  return artifactResourceAccessValid(req, pathname, searchParams);
+  return artifactResourceAccessValid(req, pathname, searchParams)
+    || artifactMediaViewAccessValid(req, pathname, searchParams);
 }
 
 function authorize(req, res, pathname, searchParams) {
@@ -950,14 +1372,15 @@ function authorize(req, res, pathname, searchParams) {
   return false;
 }
 
-function sameOrigin(req) {
+function sameOrigin(req, pathname = '', searchParams = null) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return true;
   const origin = req.headers.origin;
   if (!origin) return true;
   try {
-    return new URL(origin).host === req.headers.host;
+    return new URL(origin).host === req.headers.host
+      || artifactMediaViewAccessValid(req, pathname, searchParams);
   } catch {
-    return false;
+    return artifactMediaViewAccessValid(req, pathname, searchParams);
   }
 }
 
@@ -1482,7 +1905,7 @@ const server = http.createServer(async (req, res) => {
   const isApiRoute = pathname.startsWith('/api/');
   const isAuthSessionProbe = pathname === '/api/auth/session' && req.method === 'GET';
   if (isApiRoute && !isAuthSessionProbe && !authorize(req, res, pathname, url.searchParams)) return;
-  if (isApiRoute && !sameOrigin(req)) {
+  if (isApiRoute && !sameOrigin(req, pathname, url.searchParams)) {
     json(res, { error: 'Cross-origin write requests are forbidden' }, 403);
     return;
   }
@@ -2081,7 +2504,9 @@ const server = http.createServer(async (req, res) => {
             json(res, { error: 'Registered artifact is not available' }, 404);
             return;
           }
-          artifact = await withSignedArtifactResourceUrls(artifact, `${pathname}/resources`);
+          artifact = await withSignedArtifactResourceUrls(artifact, `${pathname}/resources`, {
+            documentTitle: true,
+          });
           if (req.method === 'HEAD') await headSkillReportArtifactHandle(res, artifact);
           else await streamSkillReportArtifactHandle(res, artifact);
           return;
@@ -2139,6 +2564,17 @@ const server = http.createServer(async (req, res) => {
       }
     }
     {
+      const params = routeParams(/^\/api\/sessions\/([^/]+)\/skill-invocations$/, pathname);
+      if (params && req.method === 'GET') {
+        json(res, listSkillInvocations(requireSessionId(params[0]), {
+          limit: Number(url.searchParams.get('limit') || 100),
+          offset: Number(url.searchParams.get('offset') || 0),
+          turnId: url.searchParams.get('turnId') || '',
+        }));
+        return;
+      }
+    }
+    {
       const params = routeParams(/^\/api\/sessions\/([^/]+)\/executions$/, pathname);
       if (params && req.method === 'GET') {
         json(res, listCommandExecutions(requireSessionId(params[0]), {
@@ -2167,6 +2603,89 @@ const server = http.createServer(async (req, res) => {
       if (params && req.method === 'GET') {
         json(res, getSessionSkillUsage(requireSessionId(params[0])));
         return;
+      }
+    }
+    {
+      const params = routeParams(/^\/api\/sessions\/([^/]+)\/skill-reports\/([^/]+)\/artifacts\/([^/]+)\/viewed-media$/, pathname);
+      if (params && ['GET', 'POST'].includes(req.method)) {
+        const taskId = requireSessionId(params[0]);
+        if (req.method === 'GET') {
+          const views = listSkillReportArtifactMediaViews(taskId, params[1], params[2]);
+          if (!views) {
+            json(res, { error: 'Report artifact not found' }, 404);
+            return;
+          }
+          json(res, {
+            artifactId: params[2],
+            mediaKeys: views.map((view) => view.mediaKey),
+            viewed: views,
+          });
+          return;
+        }
+        let mediaKey = url.searchParams.get(REPORT_VIEWED_MEDIA_KEY_PARAM);
+        if (mediaKey == null) {
+          const body = await readBody(req);
+          if (!body || typeof body !== 'object' || Array.isArray(body)
+            || typeof body.mediaKey !== 'string'
+            || Object.keys(body).some((key) => key !== 'mediaKey')) {
+            throw Object.assign(new Error('Body must contain only a mediaKey string'), { statusCode: 400 });
+          }
+          mediaKey = body.mediaKey;
+        }
+        const view = markSkillReportArtifactMediaViewed(
+          taskId,
+          params[1],
+          params[2],
+          mediaKey,
+        );
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        json(res, view, view.created ? 201 : 200);
+        return;
+      }
+    }
+    {
+      const params = routeParams(/^\/api\/sessions\/([^/]+)\/skill-reports\/([^/]+)\/artifacts\/([^/]+)\/resources\/([^/]+)\/playback$/, pathname);
+      if (params && ['GET', 'HEAD'].includes(req.method)) {
+        const taskId = requireSessionId(params[0]);
+        const releaseLogStream = req.method === 'GET' ? acquireLogStreamSlot() : null;
+        try {
+          const playback = await openHlsPlaybackFile({
+            taskId,
+            reportId: params[1],
+            artifactId: params[2],
+            resourceId: params[3],
+            openResource: (resourceId) => openSkillReportArtifactResourceFile(
+              taskId,
+              params[1],
+              params[2],
+              resourceId,
+            ),
+          });
+          if (!playback) {
+            json(res, { error: 'Report artifact resource not found' }, 404);
+            return;
+          }
+          const range = artifactByteRange(req.headers.range, playback.bytes);
+          if (range === false) {
+            await playback.fileHandle.close();
+            res.writeHead(416, {
+              'Content-Range': `bytes */${playback.bytes}`,
+              'Accept-Ranges': 'bytes',
+              'Cache-Control': 'private, no-store',
+              'X-Content-Type-Options': 'nosniff',
+            });
+            res.end();
+            return;
+          }
+          if (req.method === 'HEAD') {
+            await headSkillReportArtifactHandle(res, playback, { range, mediaResource: true });
+          } else {
+            await streamSkillReportArtifactHandle(res, playback, { range, mediaResource: true });
+          }
+          return;
+        } finally {
+          releaseLogStream?.();
+        }
       }
     }
     {
@@ -2227,7 +2746,21 @@ const server = http.createServer(async (req, res) => {
             json(res, { error: 'Report artifact not found' }, 404);
             return;
           }
-          artifact = await withSignedArtifactResourceUrls(artifact, `${pathname}/resources`);
+          const views = artifact.mediaType === 'text/html; charset=utf-8'
+            ? listSkillReportArtifactMediaViews(taskId, params[1], params[2])
+            : null;
+          const playbackAlternatives = views
+            ? skillReportArtifactPlaybackAlternatives(taskId, params[1], params[2])
+            : null;
+          artifact = await withSignedArtifactResourceUrls(artifact, `${pathname}/resources`, {
+            documentTitle: true,
+            viewedMediaAdapter: views
+              ? viewedMediaAdapter(pathname, views, playbackAlternatives)
+              : null,
+            resourceFormatHints: views
+              ? skillReportArtifactPlayerFormatHints(taskId, params[1], params[2])
+              : null,
+          });
           await headSkillReportArtifactHandle(res, artifact);
           return;
         }
@@ -2245,7 +2778,21 @@ const server = http.createServer(async (req, res) => {
             json(res, { error: 'Report artifact not found' }, 404);
             return;
           }
-          artifact = await withSignedArtifactResourceUrls(artifact, `${pathname}/resources`);
+          const views = artifact.mediaType === 'text/html; charset=utf-8'
+            ? listSkillReportArtifactMediaViews(taskId, params[1], params[2])
+            : null;
+          const playbackAlternatives = views
+            ? skillReportArtifactPlaybackAlternatives(taskId, params[1], params[2])
+            : null;
+          artifact = await withSignedArtifactResourceUrls(artifact, `${pathname}/resources`, {
+            documentTitle: true,
+            viewedMediaAdapter: views
+              ? viewedMediaAdapter(pathname, views, playbackAlternatives)
+              : null,
+            resourceFormatHints: views
+              ? skillReportArtifactPlayerFormatHints(taskId, params[1], params[2])
+              : null,
+          });
           await streamSkillReportArtifactHandle(res, artifact);
           return;
         } finally {

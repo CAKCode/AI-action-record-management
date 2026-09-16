@@ -86,6 +86,11 @@ function pathsOverlap(left, right) {
     || (!rightToLeft.startsWith('..') && !path.isAbsolute(rightToLeft));
 }
 
+function pathContains(parent, target) {
+  const relative = path.relative(path.resolve(parent), path.resolve(target));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 function assertRootIsNotPlatformStorage(root, options) {
   const protectedRoots = [
     options.dataDir,
@@ -112,15 +117,21 @@ function regularStat(target, label) {
   return stat;
 }
 
-function treeBytes(target, label) {
+function treeInventory(target, label) {
   const stat = regularStat(target, label);
-  if (!stat) return 0;
-  if (stat.isFile()) return stat.size;
-  let total = 0;
+  if (!stat) return { bytes: 0, newestMtimeMs: 0 };
+  if (stat.isFile()) return { bytes: stat.size, newestMtimeMs: stat.mtimeMs };
+  const inventory = { bytes: 0, newestMtimeMs: stat.mtimeMs };
   for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
-    total += treeBytes(path.join(target, entry.name), label);
+    const child = treeInventory(path.join(target, entry.name), label);
+    inventory.bytes += child.bytes;
+    inventory.newestMtimeMs = Math.max(inventory.newestMtimeMs, child.newestMtimeMs);
   }
-  return total;
+  return inventory;
+}
+
+function treeBytes(target, label) {
+  return treeInventory(target, label).bytes;
 }
 
 function listVideoCandidates(root, cutoffMs, protectedPaths) {
@@ -147,17 +158,22 @@ function listVideoCandidates(root, cutoffMs, protectedPaths) {
       skipped.push({ sourcePath, reason: 'younger_than_retention' });
       continue;
     }
-    if (protectedPaths.some((protectedPath) => pathsOverlap(sourcePath, protectedPath))) {
+    if (protectedPaths.some((protectedPath) => pathContains(sourcePath, protectedPath))) {
       skipped.push({ sourcePath, reason: 'active_or_pending_reference' });
       continue;
     }
     try {
+      const inventory = treeInventory(sourcePath, `Media candidate ${sourcePath}`);
+      if (inventory.newestMtimeMs > cutoffMs) {
+        skipped.push({ sourcePath, reason: 'contains_recent_output' });
+        continue;
+      }
       candidates.push({
         sourcePath,
         root,
         runId: entry.name,
-        bytes: treeBytes(sourcePath, `Media candidate ${sourcePath}`),
-        mtimeMs: stat.mtimeMs,
+        bytes: inventory.bytes,
+        mtimeMs: inventory.newestMtimeMs,
       });
     } catch (error) {
       skipped.push({ sourcePath, reason: error.code || 'unsafe_tree' });
