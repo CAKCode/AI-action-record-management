@@ -6284,7 +6284,8 @@ function buildExternalFollowUpPrompt(attempt) {
     `META: ${attempt.metaPath || '(not provided)'}`,
     'Inspect DONE, STATE and META before PID because process IDs can be reused.',
     'If it is still running, report the current observation. The platform will schedule the next durable check.',
-    'If it is terminal, collect the final result and report success or failure with concrete evidence.',
+    'If it is terminal, collect the final result with concrete evidence.',
+    'If the task objective and governing Skill already authorize a dependent phase, advance that phase in this same Turn before reporting. Do not wait for another user message or scheduled check; respect explicit launch-only and stop boundaries.',
     customPrompt,
   ].filter(Boolean).join('\n');
 }
@@ -9242,7 +9243,9 @@ function finalizeSessionTurn(data) {
     // Background detection is part of finalization ownership: a stale worker
     // must not create schedules after another worker has recovered the task.
     detectExternalAttemptsForTurn(taskId, data.turnId, data.attemptId);
-    reconcileExternalAttempts(taskId, { preserveTerminalSchedule: command.type !== 'scheduled' });
+    // If terminal evidence appears after a scheduled check's last observation,
+    // keep one immediate collection Turn instead of dropping the handoff.
+    reconcileExternalAttempts(taskId, { preserveTerminalSchedule: true });
     const finishedAt = String(data.finishedAt || nowIso());
     const requestedFinalStatus = String(data.finalStatus || 'failed');
     const attemptStatus = requestedFinalStatus === 'waiting_review'
