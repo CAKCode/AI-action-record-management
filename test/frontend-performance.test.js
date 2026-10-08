@@ -520,7 +520,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
 
   vm.runInContext("state.lang = 'en'; renderCache.clear(); renderBridgeInventory(); renderProtectionStatus()", context);
   assert.match(element('#bridgeInventoryList').innerHTML, /Task Owned/);
-  assert.match(element('#bridgeInventoryList').innerHTML, /Reclaim Runtime/);
+  assert.match(element('#bridgeInventoryList').innerHTML, /Delete &amp; Release Disk/);
   assert.match(element('#bridgeInventoryState').textContent, /3 safe/);
   assert.match(element('#protectionGrid').innerHTML, /Data Integrity &amp; Recovery Protection|Platform Data/);
   assert.match(element('#protectionGrid').innerHTML, /Rotation Pending/);
@@ -616,7 +616,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
 
   vm.runInContext("openBridgeReclaim('session-1111111111111111')", context);
   assert.equal(vm.runInContext('state.selectedBridgeSessionId', context), '');
-  assert.match(element('#toastMessage').textContent, /当前不可回收/);
+  assert.match(element('#toastMessage').textContent, /当前不可删除/);
   vm.runInContext("openBridgeReclaim('session-2222222222222222')", context);
   assert.equal(vm.runInContext('state.selectedBridgeSessionId', context), 'session-2222222222222222');
   assert.equal(element('#bridgeReclaimTarget').textContent, 'session-2222222222222222');
@@ -640,7 +640,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     sessions: bridgeInventory.sessions.filter((session) => session.sessionId !== 'session-2222222222222222'),
   };
   responseOverrides.set('GET /api/runtime/bridge-sessions', { payload: reclaimedInventory });
-  responseOverrides.set('POST /api/runtime/bridge-sessions/session-2222222222222222/reclaim', {
+  responseOverrides.set('DELETE /api/runtime/bridge-sessions/session-2222222222222222/reclaim', {
     payload: { job: { id: 'cleanup-1', status: 'pending' } },
   });
   const firstReclaim = vm.runInContext('submitBridgeReclaim({ preventDefault() {} })', context);
@@ -648,12 +648,12 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   await Promise.all([firstReclaim, duplicateReclaim]);
   const reclaimRequests = requestDetails.filter((request) => request.url === '/api/runtime/bridge-sessions/session-2222222222222222/reclaim');
   assert.equal(reclaimRequests.length, 1);
-  assert.equal(reclaimRequests[0].method, 'POST');
+  assert.equal(reclaimRequests[0].method, 'DELETE');
   assert.deepEqual(reclaimRequests[0].body, { confirmationSessionId: 'session-2222222222222222' });
   assert.equal(element('#bridgeReclaimModal').classList.contains('hidden'), true);
   assert.equal(vm.runInContext('state.bridgeReclaimSubmitting', context), false);
   assert.doesNotMatch(element('#bridgeInventoryList').innerHTML, /session-2222222222222222/);
-  assert.match(element('#toastMessage').textContent, /回收作业已入队/);
+  assert.match(element('#toastMessage').textContent, /删除作业已入队/);
   vm.runInContext("setView('overview')", context);
 
   const requestCountBeforeDisabledRun = requests.length;
@@ -949,7 +949,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(STYLES_SOURCE, /\.business-regression-command pre\s*\{[^}]*font:\s*var\(--detail-font-command\)\/1\.65/s);
   assert.match(STYLES_SOURCE, /\.business-timeline-content p\s*\{[^}]*font-size:\s*var\(--detail-font-body\)/s);
   assert.doesNotMatch(STYLES_SOURCE, /\.business-(?:summary|regression|timeline)[^{]*\{[^}]*(?:font-size|font):\s*(?:1[6-9]|[2-9][0-9])px/s);
-  assert.match(STYLES_SOURCE, /@media \(max-width:\s*768px\)[\s\S]*#taskDetailModal\s*\{[^}]*padding:\s*0[\s\S]*#taskDetailModal\s+\.task-detail-modal\s*\{[^}]*height:\s*100dvh/s);
+  assert.match(STYLES_SOURCE, /@media \(max-width:\s*768px\)[\s\S]*#taskDetailModal\s*\{[^}]*padding:\s*12px[\s\S]*#taskDetailModal\s+\.task-detail-modal\s*\{[^}]*height:\s*calc\(100dvh - 24px\)/s);
   assert.match(STYLES_SOURCE, /@media \(max-width:\s*768px\)[\s\S]*#taskDetailModal\[data-detail-tab="task-terminal"\][\s\S]*\.codex-cli-terminal\s*\{[^}]*padding:/s);
   assert.match(STYLES_SOURCE, /\.attempt-terminal-host \.xterm-rows\s*\{[^}]*font-family:\s*"Courier New"[^}]*white-space:\s*pre/s);
   assert.match(STYLES_SOURCE, /\.attempt-terminal-host \.xterm-fg-2[^}]*color:\s*#a6e3a1/s);
@@ -1701,6 +1701,64 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.doesNotMatch(vm.runInContext(
     `businessRegressionTitle(${JSON.stringify(explicitRuns[2])}, 2)`, context,
   ), /Rerun/);
+
+  const sharedRunId = 'run-shared-initial';
+  const sharedRun = [{
+    id: 'step-shared', label: 'GW51 full mark', ordinal: 1,
+    runs: [{ id: sharedRunId, runKey: 'initial', runKind: 'initial', runNumber: 0,
+      status: 'running', startedAt: '2026-09-29T01:00:00.000Z' }],
+  }];
+  const sharedReport = {
+    skillId: 'cloud-recording-test', reportType: 'test-result', stepRunId: sharedRunId,
+    primaryExecution: { command: 'python3 -m pytest -v test_cloud.py', status: 'running',
+      startedAt: '2026-09-29T01:00:00.000Z' },
+  };
+  const snapshotArtifact = {
+    id: 'snapshot-artifact', key: 'snapshot', kind: 'pytest-html', fileName: 'snapshot.html',
+    bytes: 4096, url: '/api/sessions/shared/reports/snapshot',
+  };
+  const sharedReports = [{
+    ...sharedReport, id: 'snapshot-revision-2', reportKey: 'test:snapshot', revision: 2,
+    status: 'failed', publishedAt: '2026-09-29T01:10:00.000Z',
+    artifacts: [snapshotArtifact],
+  }, {
+    ...sharedReport, id: 'snapshot-revision-3', reportKey: 'test:snapshot', revision: 3,
+    status: 'partial', publishedAt: '2026-09-29T01:12:00.000Z', artifacts: [],
+  }, {
+    ...sharedReport, id: 'snapshot-retry', reportKey: 'test:snapshot-retry', revision: 1,
+    status: 'failed', publishedAt: '2026-09-29T01:13:00.000Z',
+    artifacts: [{ ...snapshotArtifact, id: 'snapshot-retry-artifact', fileName: 'retry.html',
+      url: '/api/sessions/shared/reports/retry' }],
+  }, {
+    ...sharedReport, id: 'restful-running', reportKey: 'test:restful', revision: 1,
+    status: 'running', publishedAt: '2026-09-29T01:15:00.000Z', artifacts: [],
+    registeredArtifacts: [{ key: 'restful', kind: 'pytest-html', fileName: 'restful.html',
+      executionStatus: 'running', url: '/api/sessions/shared/external/restful' }],
+  }];
+  const sharedSummary = vm.runInContext(`businessSummaryTimeline(
+    ${JSON.stringify({ id: 'shared', name: 'Shared run', status: 'running',
+      createdAt: '2026-09-29T00:55:00.000Z' })},
+    ${JSON.stringify(sharedReports)}, [], [], [], ${JSON.stringify(sharedRun)}
+  )`, context);
+  assert.equal((sharedSummary.match(/<strong>snapshot\.html<\/strong>/g) || []).length, 1);
+  assert.equal((sharedSummary.match(/<strong>retry\.html<\/strong>/g) || []).length, 1);
+  assert.equal((sharedSummary.match(/<strong>restful\.html<\/strong>/g) || []).length, 1);
+  assert.ok(sharedSummary.includes('artifact=%2Fapi%2Fsessions%2Fshared%2Freports%2Fsnapshot'));
+  assert.ok(sharedSummary.includes('artifact=%2Fapi%2Fsessions%2Fshared%2Fexternal%2Frestful'));
+  assert.ok(sharedSummary.includes('artifact=%2Fapi%2Fsessions%2Fshared%2Freports%2Fretry'));
+
+  const legacyReports = sharedReports.map((report) => ({
+    ...report, stepRunId: '',
+    primaryExecution: { ...report.primaryExecution, commandPath: '/tmp/shared-run.cmd' },
+  }));
+  const legacyRuns = vm.runInContext(
+    `businessTestRuns(${JSON.stringify(legacyReports)}, [], [])`, context,
+  );
+  assert.equal(legacyRuns.length, 1);
+  const legacyLinks = vm.runInContext(`businessRunArtifactLinks(${JSON.stringify(legacyRuns[0])})`, context);
+  assert.equal((legacyLinks.match(/<strong>snapshot\.html<\/strong>/g) || []).length, 1);
+  assert.equal((legacyLinks.match(/<strong>retry\.html<\/strong>/g) || []).length, 1);
+  assert.equal((legacyLinks.match(/<strong>restful\.html<\/strong>/g) || []).length, 1);
 
   const reportOnlyTestResult = {
     id: 'report-only-result', reportKey: 'cloud-recording:report-only', revision: 1,
@@ -2512,11 +2570,11 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(APP_SOURCE, /upsertDashboardTask\(savedTask\)[\s\S]*await openTaskDetail\(savedTask\?\.id \|\| id\)/);
   assert.doesNotMatch(APP_SOURCE, /await loadDashboard\(\);\s*\n\s*if \(!isEditing\) openTaskDetail/);
   assert.doesNotMatch(APP_SOURCE, /status === 'finished'/);
-  assert.match(STYLES_SOURCE, /\.task-detail-modal\s*\{[^}]*width:\s*min\(1680px, 100%\)[^}]*height:\s*calc\(100vh - 32px\)/s);
+  assert.match(STYLES_SOURCE, /\.task-detail-modal\s*\{[^}]*width:\s*min\(1440px, calc\(100vw - 96px\)\)[^}]*height:\s*calc\(100dvh - 80px\)/s);
   assert.match(STYLES_SOURCE, /\.task-detail-head\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto/s);
   assert.match(STYLES_SOURCE, /\.detail-title-line h2\s*\{[^}]*white-space:\s*normal[^}]*overflow-wrap:\s*anywhere[^}]*word-break:\s*break-word/s);
   assert.match(STYLES_SOURCE, /\.tabs\s*\{[^}]*height:\s*46px[^}]*flex-wrap:\s*nowrap[^}]*overflow-x:\s*auto/s);
-  assert.match(STYLES_SOURCE, /\.tabs button\s*\{[^}]*width:\s*164px[^}]*min-width:\s*164px[^}]*flex:\s*0 0 164px/s);
+  assert.match(STYLES_SOURCE, /\.tabs button\s*\{[^}]*flex:\s*0 0 auto[^}]*white-space:\s*nowrap/s);
   assert.match(STYLES_SOURCE, /\.toast\s*\{[^}]*height:\s*auto[^}]*max-height:\s*min\(12rem, calc\(100dvh - 3rem\)\)[^}]*grid-template-columns:\s*minmax\(0, 1fr\)[^}]*overflow-x:\s*hidden[^}]*overflow-y:\s*auto[^}]*padding:\s*1\.25rem 1\.5rem/s);
   assert.match(STYLES_SOURCE, /@media \(max-width:\s*860px\)[\s\S]*\.toast\s*\{[^}]*right:\s*0\.625rem[^}]*left:\s*0\.625rem[^}]*width:\s*auto[^}]*min-width:\s*0[^}]*height:\s*auto[^}]*max-height:\s*min\(10rem, calc\(100dvh - 1\.25rem\)\)[^}]*padding:\s*1rem 1\.125rem/s);
   assert.match(STYLES_SOURCE, /\.toast-message\s*\{[^}]*width:\s*auto[^}]*min-width:\s*0[^}]*white-space:\s*pre-wrap[^}]*overflow-wrap:\s*anywhere[^}]*word-break:\s*break-word/s);

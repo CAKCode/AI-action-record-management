@@ -96,6 +96,35 @@ test('the worker has no active task concurrency limit', () => {
   assert.doesNotMatch(startScript, /CODEX_WORKER_MAX_CONCURRENCY/);
 });
 
+test('tasks persist project classification and custom tags with legacy defaults', () => {
+  const legacy = store.saveSession('task-classification-legacy', {
+    name: 'Legacy classification', objective: 'Keep the historical default.', workingDir: workspaceRoot,
+  });
+  assert.equal(legacy.project, 'cloudRecord');
+  assert.deepEqual(legacy.tags, []);
+
+  const taskId = 'task-classification-roundtrip';
+  const created = store.saveSession(taskId, {
+    name: 'Task classification', objective: 'Persist project and tags.', workingDir: workspaceRoot,
+    project: 'media-platform', tags: ['h265', 'nightly', 'h265'],
+  });
+  assert.equal(created.project, 'media-platform');
+  assert.deepEqual(created.tags, ['h265', 'nightly']);
+
+  const updated = store.saveSession(taskId, {
+    name: created.name, objective: created.objective, workingDir: workspaceRoot,
+    project: 'cloudRecord', tags: 'rerun, nightly',
+  });
+  assert.equal(updated.project, 'cloudRecord');
+  assert.deepEqual(updated.tags, ['rerun', 'nightly']);
+
+  const exported = store.exportConfigBundle();
+  const entry = exported.sessions.find((session) => session.id === taskId);
+  assert.deepEqual({ project: entry.project, tags: entry.tags }, {
+    project: 'cloudRecord', tags: ['rerun', 'nightly'],
+  });
+});
+
 test('worker heartbeats do not write while platform maintenance is active', () => {
   const database = getDatabase();
   const before = database.prepare("SELECT value FROM metadata WHERE key='worker_heartbeat'").get()?.value || null;
@@ -1383,15 +1412,8 @@ test('a terminal transition during a scheduled Turn keeps one future result coll
 
   const [claimed] = store.claimDueScheduledJobs(schedulerWorker, 1);
   store.dispatchClaimedScheduledJob(claimed.id, schedulerWorker);
-  const followUpCommand = store.claimPendingCommands(followUpWorker, 10)
-    .find((command) => command.task_id === taskId);
-  assert.ok(followUpCommand);
-  assert.equal(store.acquireTaskLease(taskId, followUpWorker), true);
-  const followUpTurn = store.beginSessionTurn({
-    taskId, commandId: followUpCommand.id, workerId: followUpWorker, input: followUpCommand.input,
-    persistentSessionKey: `single:${taskId}`, skillSnapshotId: null,
-  }).turn;
-  const followUpAttemptId = store.createAttempt(taskId, followUpTurn.id, 1, followUpWorker);
+  assert.equal(store.claimPendingCommands(followUpWorker, 10)
+    .find((command) => command.task_id === taskId), undefined);
 
   fs.writeFileSync(`${taskBase}.done`, '1\n', 'utf8');
   fs.writeFileSync(`${taskBase}.state`, 'finished\n', 'utf8');
@@ -1404,9 +1426,22 @@ test('a terminal transition during a scheduled Turn keeps one future result coll
   const reconciled = store.reconcileRunningExternalAttempts()
     .find((result) => result.id === external.id);
   assert.equal(reconciled.status, 'failed');
-  const schedulesDuringTurn = store.listScheduledJobs(taskId);
-  assert.equal(schedulesDuringTurn.filter((job) => job.status === 'dispatched').length, 1);
-  assert.equal(schedulesDuringTurn.filter((job) => job.status === 'pending').length, 1);
+  const schedulesAfterReconcile = store.listScheduledJobs(taskId);
+  assert.equal(schedulesAfterReconcile.filter((job) => job.status === 'pending').length, 1);
+  const terminalJob = schedulesAfterReconcile.find((job) => job.status === 'pending');
+  getDatabase().prepare("UPDATE scheduled_jobs SET due_at='2000-01-01T00:00:00.000Z' WHERE id=?")
+    .run(terminalJob.id);
+  const [terminalClaim] = store.claimDueScheduledJobs(schedulerWorker, 1);
+  store.dispatchClaimedScheduledJob(terminalClaim.id, schedulerWorker);
+  const followUpCommand = store.claimPendingCommands(followUpWorker, 10)
+    .find((command) => command.task_id === taskId);
+  assert.ok(followUpCommand);
+  assert.equal(store.acquireTaskLease(taskId, followUpWorker), true);
+  const followUpTurn = store.beginSessionTurn({
+    taskId, commandId: followUpCommand.id, workerId: followUpWorker, input: followUpCommand.input,
+    persistentSessionKey: `single:${taskId}`, skillSnapshotId: null,
+  }).turn;
+  const followUpAttemptId = store.createAttempt(taskId, followUpTurn.id, 1, followUpWorker);
 
   const waiting = store.finalizeSessionTurn({
     taskId, turnId: followUpTurn.id, attemptId: followUpAttemptId,
@@ -1415,18 +1450,14 @@ test('a terminal transition during a scheduled Turn keeps one future result coll
     resultText: 'Stale running observation.',
     finalStatus: 'waiting_review', retryCount: 0,
   });
-  assert.equal(waiting.status, 'waiting_scheduled');
+  assert.equal(waiting.status, 'waiting_review');
   assert.equal(waiting.activeExternalAttempts, 0);
-  assert.equal(waiting.activeScheduledJobs, 1);
-  const next = store.listScheduledJobs(taskId).find((job) => job.status === 'pending');
-  assert.ok(next);
-  assert.ok(Date.parse(next.dueAt) <= Date.now());
-  assert.match(next.payload.prompt, /advance that phase in this same Turn/);
-  assert.match(next.payload.prompt, /respect explicit launch-only and stop boundaries/);
-  assert.equal(store.requestSessionStop(taskId), true);
+  assert.equal(waiting.activeScheduledJobs, 0);
+  assert.equal(store.listScheduledJobs(taskId).find((job) => job.id === terminalJob.id).status, 'completed');
+  assert.equal(store.completeSession(taskId).status, 'completed');
 });
 
-test('a terminal first observed while finalizing a scheduled Turn gets an immediate follow-up', () => {
+test('a terminal first observed by the scheduler creates one immediate collection Turn', () => {
   const taskId = 'terminal-at-scheduled-finalization-task';
   const taskBase = path.join(workspaceRoot, 'terminal-at-scheduled-finalization');
   fs.writeFileSync(`${taskBase}.log`, '[START]\n', 'utf8');
@@ -1448,6 +1479,19 @@ test('a terminal first observed while finalizing a scheduled Turn gets an immedi
   const [scheduled] = store.claimDueScheduledJobs('finalization-scheduler', 1);
   assert.ok(scheduled);
   store.dispatchClaimedScheduledJob(scheduled.id, 'finalization-scheduler');
+  assert.equal(store.claimPendingCommands('finalization-follow-up-worker', 10)
+    .find((candidate) => candidate.task_id === taskId), undefined);
+
+  fs.writeFileSync(`${taskBase}.done`, '1\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.state`, 'finished\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.meta`, [
+    `started_at=${external.startedAt}`, `ended_at=${new Date().toISOString()}`,
+    'exit_code=1', '',
+  ].join('\n'), 'utf8');
+  getDatabase().prepare("UPDATE scheduled_jobs SET due_at='2000-01-01T00:00:00.000Z' WHERE id=?")
+    .run(scheduled.id);
+  const [terminalSchedule] = store.claimDueScheduledJobs('finalization-scheduler', 1);
+  store.dispatchClaimedScheduledJob(terminalSchedule.id, 'finalization-scheduler');
   const workerId = 'finalization-follow-up-worker';
   const command = store.claimPendingCommands(workerId, 10)
     .find((candidate) => candidate.task_id === taskId);
@@ -1459,27 +1503,18 @@ test('a terminal first observed while finalizing a scheduled Turn gets an immedi
   }).turn;
   const attemptId = store.createAttempt(taskId, turn.id, 1, workerId);
 
-  fs.writeFileSync(`${taskBase}.done`, '1\n', 'utf8');
-  fs.writeFileSync(`${taskBase}.state`, 'finished\n', 'utf8');
-  fs.writeFileSync(`${taskBase}.meta`, [
-    `started_at=${external.startedAt}`, `ended_at=${new Date().toISOString()}`,
-    'exit_code=1', '',
-  ].join('\n'), 'utf8');
-
   const waiting = store.finalizeSessionTurn({
     taskId, turnId: turn.id, attemptId, commandId: command.id, workerId,
     exitCode: 0, summary: 'Last observation was still running.',
     resultText: 'GW53 remains active. DONE: absent; STATE: running.',
     finalStatus: 'waiting_review', retryCount: 0,
   });
-  assert.equal(waiting.status, 'waiting_scheduled');
+  assert.equal(waiting.status, 'waiting_review');
   assert.equal(waiting.activeExternalAttempts, 0);
-  assert.equal(waiting.activeScheduledJobs, 1);
+  assert.equal(waiting.activeScheduledJobs, 0);
   assert.equal(store.getExternalAttempt(taskId, external.id).status, 'failed');
-  const next = store.listScheduledJobs(taskId).find((job) => job.status === 'pending');
-  assert.ok(next);
-  assert.ok(Date.parse(next.dueAt) <= Date.now());
-  assert.equal(store.requestSessionStop(taskId), true);
+  assert.equal(store.listScheduledJobs(taskId).find((job) => job.id === scheduled.id).status, 'completed');
+  assert.equal(store.completeSession(taskId).status, 'completed');
 });
 
 test('reused background paths ignore stale terminal files until the new generation writes evidence', () => {
@@ -1846,6 +1881,23 @@ test('explicit converter background registration is linked and operator stop can
     .run(taskId);
   const [job] = store.claimDueScheduledJobs(schedulerWorker, 1);
   store.dispatchClaimedScheduledJob(job.id, schedulerWorker);
+  assert.equal(store.claimPendingCommands(followUpWorker, 10).find((command) => command.task_id === taskId), undefined);
+  const deferredJob = store.listScheduledJobs(taskId)[0];
+  assert.equal(deferredJob.status, 'pending');
+  assert.ok(Date.parse(deferredJob.dueAt) > Date.now());
+
+  fs.writeFileSync(`${taskBase}.done`, '1\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.state`, 'finished\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.meta`, [
+    `started_at=${external.startedAt}`,
+    `ended_at=${new Date().toISOString()}`,
+    'exit_code=0',
+    '',
+  ].join('\n'), 'utf8');
+  database.prepare("UPDATE scheduled_jobs SET due_at='2000-01-01T00:00:00.000Z' WHERE id=?")
+    .run(deferredJob.id);
+  const [terminalJob] = store.claimDueScheduledJobs(schedulerWorker, 1);
+  store.dispatchClaimedScheduledJob(terminalJob.id, schedulerWorker);
   const followUpCommand = store.claimPendingCommands(followUpWorker, 10).find((command) => command.task_id === taskId);
   assert.ok(followUpCommand);
   assert.equal(store.acquireTaskLease(taskId, followUpWorker), true);
@@ -1861,7 +1913,7 @@ test('explicit converter background registration is linked and operator stop can
     summary: 'Stopped by operator.', finalStatus: 'stopped', retryCount: 0,
   });
   assert.equal(stopped.status, 'stopped');
-  assert.equal(store.listExternalAttempts(taskId)[0].status, 'cancelled');
+  assert.equal(store.listExternalAttempts(taskId)[0].status, 'succeeded');
   assert.equal(store.listScheduledJobs(taskId)[0].status, 'cancelled');
   assert.equal(store.listSessionWorklogs(taskId).some((event) => event.kind === 'schedule.retry_scheduled'), false);
 });
@@ -1883,6 +1935,14 @@ test('scheduled command startup failures retry durably and terminate monitoring 
   const database = getDatabase();
   database.prepare("UPDATE tasks SET status='waiting_scheduled' WHERE id=?").run(taskId);
   database.prepare('UPDATE scheduled_jobs SET max_attempts=2 WHERE external_attempt_id=?').run(external.id);
+  fs.writeFileSync(`${taskBase}.done`, '1\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.state`, 'finished\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.meta`, [
+    `started_at=${external.startedAt}`,
+    `ended_at=${new Date().toISOString()}`,
+    'exit_code=0',
+    '',
+  ].join('\n'), 'utf8');
 
   const firstScheduler = 'scheduled-startup-first-scheduler';
   const [firstJob] = store.claimDueScheduledJobs(firstScheduler, 1);
@@ -1903,7 +1963,7 @@ test('scheduled command startup failures retry durably and terminate monitoring 
   assert.equal(retryingJob.commandId, '');
   assert.equal(retryingJob.attemptCount, 1);
   assert.match(retryingJob.lastError, /temporarily unavailable/);
-  assert.equal(store.getExternalAttempt(taskId, external.id).status, 'running');
+  assert.equal(store.getExternalAttempt(taskId, external.id).status, 'succeeded');
   assert.equal(database.prepare('SELECT status FROM commands WHERE id=?').get(firstCommand.id).status, 'failed');
 
   database.prepare("UPDATE scheduled_jobs SET due_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(firstJob.id);
@@ -1926,12 +1986,10 @@ test('scheduled command startup failures retry durably and terminate monitoring 
   assert.equal(failedTask.activeScheduledJobs, 0);
   assert.equal(failedJob.status, 'failed');
   assert.equal(failedJob.attemptCount, 2);
-  assert.equal(lostExternal.status, 'lost');
-  assert.equal(lostExternal.result.monitoringFailure.commandId, secondCommand.id);
+  assert.equal(lostExternal.status, 'succeeded');
   const kinds = store.listSessionWorklogs(taskId).map((event) => event.kind);
   assert.ok(kinds.includes('schedule.retry_scheduled'));
   assert.ok(kinds.includes('schedule.failed'));
-  assert.ok(kinds.includes('external.attempt.lost'));
   assert.ok(kinds.includes('session.failed'));
 });
 

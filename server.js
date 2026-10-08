@@ -2073,7 +2073,7 @@ const server = http.createServer(async (req, res) => {
     }
     {
       const params = routeParams(/^\/api\/runtime\/bridge-sessions\/([^/]+)\/reclaim$/, pathname);
-      if (params && req.method === 'POST') {
+      if (params && ['POST', 'DELETE'].includes(req.method)) {
         const body = await readBody(req);
         if (!body || typeof body !== 'object' || Array.isArray(body)
           || typeof body.confirmationSessionId !== 'string'

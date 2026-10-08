@@ -592,6 +592,8 @@ function rowToSession(row) {
     objective: row.objective,
     workingDir: row.working_dir,
     notes: row.notes,
+    project: normalizeTaskProject(row.project),
+    tags: normalizeTaskTags(parseJson(row.tags_json, [])),
     enabled: Boolean(row.enabled),
     status: row.status,
     summary: row.summary,
@@ -619,6 +621,14 @@ function rowToSession(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function normalizeTaskProject(value) {
+  return String(value ?? 'cloudRecord').trim() || 'cloudRecord';
+}
+
+function normalizeTaskTags(value) {
+  return unique(toArray(value));
 }
 
 function enrichSessionsWithScheduling(db, sessions) {
@@ -1494,7 +1504,7 @@ function saveSessionInTransaction(db, id, data, context = {}) {
     resolveWorkingDir(data.workingDir ?? existing.working_dir);
     db.prepare(`
       UPDATE tasks SET
-        name = ?, objective = ?, working_dir = ?, notes = ?, enabled = ?,
+        name = ?, objective = ?, working_dir = ?, notes = ?, project = ?, tags_json = ?, enabled = ?,
         auto_resume = ?, max_retries = ?, version = version + 1, updated_at = ?
       WHERE id = ?
     `).run(
@@ -1502,6 +1512,8 @@ function saveSessionInTransaction(db, id, data, context = {}) {
       String(data.objective ?? existing.objective).trim(),
       String(data.workingDir ?? existing.working_dir).trim() || '.',
       String(data.notes ?? existing.notes).trim(),
+      normalizeTaskProject(data.project ?? existing.project),
+      JSON.stringify(normalizeTaskTags(data.tags ?? parseJson(existing.tags_json, []))),
       (data.enabled ?? Boolean(existing.enabled)) ? 1 : 0,
       (data.autoResume ?? Boolean(existing.auto_resume)) ? 1 : 0,
       Math.min(MAX_TASK_RETRIES, Math.max(0, Number(data.maxRetries ?? existing.max_retries ?? 2))),
@@ -1514,14 +1526,16 @@ function saveSessionInTransaction(db, id, data, context = {}) {
     resolveWorkingDir(data.workingDir || '.');
     db.prepare(`
       INSERT INTO tasks (
-        id, name, objective, working_dir, notes, enabled, status, summary,
+        id, name, objective, working_dir, notes, project, tags_json, enabled, status, summary,
         last_run_at, last_finished_at, archived_at, run_count, current_pid,
         persistent_session_key, auto_resume, max_retries, retry_count, recovery_count,
         last_brief, last_error, recovery_state, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       normalizedId, String(data.name || normalizedId).trim(), String(data.objective || '').trim(),
-      String(data.workingDir || '.').trim() || '.', String(data.notes || '').trim(), data.enabled === false ? 0 : 1,
+      String(data.workingDir || '.').trim() || '.', String(data.notes || '').trim(),
+      normalizeTaskProject(data.project), JSON.stringify(normalizeTaskTags(data.tags)),
+      data.enabled === false ? 0 : 1,
       status, String(data.summary || ''), String(data.lastRunAt || ''), String(data.lastFinishedAt || ''),
       status === 'completed' ? String(data.archivedAt || data.lastFinishedAt || now) : '', Number(data.runCount || 0),
       String(data.persistentSessionKey || data.bridgeSessionKey || ''), data.autoResume === false ? 0 : 1,
@@ -1541,6 +1555,8 @@ function saveSessionInTransaction(db, id, data, context = {}) {
       ...(data.objective != null ? { objective: data.objective } : {}),
       ...(data.workingDir != null ? { workingDir: data.workingDir } : {}),
       ...(data.notes != null ? { notes: data.notes } : {}),
+      ...(data.project != null ? { project: normalizeTaskProject(data.project) } : {}),
+      ...(data.tags != null ? { tags: normalizeTaskTags(data.tags) } : {}),
       ...(data.enabled != null ? { enabled: data.enabled } : {}),
       ...(data.autoResume != null ? { autoResume: data.autoResume } : {}),
       ...(data.maxRetries != null ? { maxRetries: data.maxRetries } : {}),
@@ -1566,7 +1582,8 @@ function updateSession(session, expectedWorkerId = '') {
   const now = nowIso();
   const changed = db.prepare(`
     UPDATE tasks SET
-      name=@name, objective=@objective, working_dir=@workingDir, notes=@notes, enabled=@enabled,
+      name=@name, objective=@objective, working_dir=@workingDir, notes=@notes,
+      project=@project, tags_json=@tagsJson, enabled=@enabled,
       status=@status, summary=@summary, last_run_at=@lastRunAt, last_finished_at=@lastFinishedAt,
       archived_at=@archivedAt, run_count=@runCount, current_pid=@currentPid,
       current_pid_start_ticks=@currentPidStartTicks, current_process_group_id=@currentProcessGroupId,
@@ -1590,6 +1607,8 @@ function updateSession(session, expectedWorkerId = '') {
     currentPid: merged.currentPid || null,
     currentPidStartTicks: merged.currentPid ? String(merged.currentPidStartTicks || '') : '',
     currentProcessGroupId: merged.currentPid ? (merged.currentProcessGroupId || null) : null,
+    project: normalizeTaskProject(merged.project),
+    tagsJson: JSON.stringify(normalizeTaskTags(merged.tags)),
     leaseOwner: merged.leaseOwner || null,
     leaseExpiresAt: merged.leaseExpiresAt || null,
     persistentSessionKey: merged.persistentSessionKey || merged.bridgeSessionKey || '',
@@ -2721,17 +2740,39 @@ function registeredSkillReportArtifacts(db, row, report) {
   return parseJson(external.artifact_declarations_json, [])
     .filter((artifact) => artifact && typeof artifact === 'object'
       && ['pytest-html', 'failure-analysis-markdown'].includes(artifact.kind))
-    .map((artifact) => ({
-      key: String(artifact.key || ''),
-      kind: artifact.kind,
-      fileName: artifact.kind === 'pytest-html'
-        ? pytestArtifactDisplayFileName(artifact.path)
-        : path.basename(String(artifact.path || '')),
-      executionStatus: external.status,
-      url: `/api/sessions/${encodeURIComponent(row.task_id)}`
-        + `/external-attempts/${encodeURIComponent(externalAttemptId)}`
-        + `/artifacts/${encodeURIComponent(String(artifact.key || ''))}`,
-    }))
+    .map((artifact) => {
+      const registered = {
+        key: String(artifact.key || ''),
+        kind: artifact.kind,
+        fileName: artifact.kind === 'pytest-html'
+          ? pytestArtifactDisplayFileName(artifact.path)
+          : path.basename(String(artifact.path || '')),
+        executionStatus: external.status,
+        url: `/api/sessions/${encodeURIComponent(row.task_id)}`
+          + `/external-attempts/${encodeURIComponent(externalAttemptId)}`
+          + `/artifacts/${encodeURIComponent(String(artifact.key || ''))}`,
+      };
+      if (external.status === 'running' || artifact.kind !== 'pytest-html') return registered;
+      try {
+        const stat = fs.lstatSync(String(artifact.path || ''));
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size === 0) {
+          return { ...registered, available: false, availabilityReason: 'empty_or_missing' };
+        }
+        const fd = fs.openSync(artifact.path, 'r');
+        try {
+          const preview = Buffer.alloc(Math.min(Number(stat.size), 64 * 1024));
+          fs.readSync(fd, preview, 0, preview.length, 0);
+          if (!pytestHtmlHasReportDocument(preview)) {
+            return { ...registered, available: false, availabilityReason: 'empty_or_placeholder' };
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch {
+        return { ...registered, available: false, availabilityReason: 'missing_or_unreadable' };
+      }
+      return registered;
+    })
     .filter((artifact) => artifact.key && artifact.fileName);
 }
 
@@ -3095,9 +3136,22 @@ function pytestHtmlHasActiveReloadPrompt(content) {
   });
 }
 
+function pytestHtmlHasReportDocument(content) {
+  const html = Buffer.isBuffer(content) ? content.toString('utf8') : String(content || '');
+  if (!html.trim()) return false;
+  return /<!doctype\b|<html\b|<head\b|<body\b/i.test(html);
+}
+
 function assertCompletedPytestHtml(content, label) {
   if (pytestHtmlHasActiveReloadPrompt(content)) {
     throw statusError(`${label} is incomplete: pytest is still running`, 409);
+  }
+  assertPytestHtmlDocument(content, label);
+}
+
+function assertPytestHtmlDocument(content, label) {
+  if (!pytestHtmlHasReportDocument(content)) {
+    throw statusError(`${label} is empty or was not generated by pytest-html`, 409);
   }
 }
 
@@ -4130,11 +4184,12 @@ function externalArtifactMediaType(filePath) {
 
 function externalArtifactDeclaration(db, taskId, attemptId, artifactKey) {
   const row = db.prepare(`
-    SELECT artifact_declarations_json FROM external_attempts WHERE task_id=? AND id=?
+    SELECT status, artifact_declarations_json FROM external_attempts WHERE task_id=? AND id=?
   `).get(taskId, String(attemptId || ''));
   if (!row) return null;
-  return parseJson(row.artifact_declarations_json, [])
-    .find((artifact) => artifact && artifact.key === String(artifactKey || '')) || null;
+  const artifact = parseJson(row.artifact_declarations_json, [])
+    .find((item) => item && item.key === String(artifactKey || ''));
+  return artifact ? { ...artifact, executionStatus: row.status } : null;
 }
 
 function externalArtifactResourceRoot(db, taskId, attemptId, declaration) {
@@ -6472,6 +6527,11 @@ async function openExternalAttemptArtifactFile(taskId, attemptId, artifactKey, o
   if (mediaType === 'text/html; charset=utf-8') {
     try {
       const snapshot = await readExternalArtifactSnapshot(opened);
+      if (declaration.executionStatus === 'running') {
+        assertPytestHtmlDocument(snapshot, 'Registered pytest HTML report');
+      } else {
+        assertCompletedPytestHtml(snapshot, 'Registered pytest HTML report');
+      }
       await opened.handle.close();
       opened = null;
       const sourcePath = path.resolve(declaration.path);
@@ -8574,6 +8634,21 @@ function claimDueScheduledJobs(workerId, limit = 20) {
 
 function dispatchClaimedScheduledJob(jobId, workerId) {
   const db = ensureStorage();
+  const claimedJob = db.prepare(`
+    SELECT * FROM scheduled_jobs WHERE id=? AND status='leased' AND lease_owner=?
+  `).get(jobId, workerId);
+  const claimedExternal = claimedJob?.external_attempt_id
+    ? db.prepare('SELECT * FROM external_attempts WHERE id=?').get(claimedJob.external_attempt_id)
+    : null;
+
+  // External processes are already reconciled by the platform worker. A due
+  // check only needs to wake Codex after the process reaches a terminal state;
+  // polling an active process must not create a full scheduled Turn.
+  if (!platformMaintenanceFromDatabase(db, nowIso())
+    && claimedJob?.kind === 'external_check' && claimedExternal?.status === 'running') {
+    reconcileExternalAttempts(claimedJob.task_id, { preserveTerminalSchedule: true });
+  }
+
   let dispatched = null;
   db.transaction(() => {
     const now = nowIso();
@@ -8593,6 +8668,29 @@ function dispatchClaimedScheduledJob(jobId, workerId) {
           last_error='Task or background generation is no longer dispatchable', finished_at=?, updated_at=?
         WHERE id=?
       `).run(now, now, job.id);
+      return;
+    }
+    if (job.kind === 'external_check' && external?.status === 'running') {
+      const nextDueAt = new Date(Date.now()
+        + (boundedExternalCheckSeconds(external.check_interval_seconds) * 1000)).toISOString();
+      db.prepare(`
+        UPDATE scheduled_jobs
+        SET status='pending', due_at=?, lease_owner=NULL, lease_expires_at=NULL,
+          command_id=NULL, last_error='', finished_at='', updated_at=?
+        WHERE id=? AND status='leased' AND lease_owner=?
+      `).run(nextDueAt, now, job.id, workerId);
+      insertSessionWorklog(db, job.task_id, {
+        kind: 'schedule.external_check_deferred',
+        message: `Observed active background execution ${external.id}; deferred the next check without starting a Codex Turn.`,
+        payload: {
+          scheduledJobId: job.id,
+          externalAttemptId: external.id,
+          generation: Number(external.generation),
+          sequence: Number(job.sequence),
+          nextDueAt,
+          observation: String(external.last_observation || ''),
+        },
+      });
       return;
     }
     const payload = parseJson(job.payload_json, {});
@@ -8852,6 +8950,9 @@ function sessionMatchesCreateRequest(task, taskId, data) {
     && task.objective === String(data.objective || '').trim()
     && task.working_dir === (String(data.workingDir || '.').trim() || '.')
     && task.notes === String(data.notes || '').trim()
+    && normalizeTaskProject(task.project) === normalizeTaskProject(data.project)
+    && JSON.stringify(normalizeTaskTags(parseJson(task.tags_json, [])))
+      === JSON.stringify(normalizeTaskTags(data.tags))
     && Boolean(task.enabled) === true
     && Boolean(task.auto_resume) === (data.autoResume !== false)
     && Number(task.max_retries) === Math.min(
@@ -10073,6 +10174,8 @@ function exportConfigBundle() {
       objective: session.objective,
       workingDir: session.workingDir,
       notes: session.notes,
+      project: session.project,
+      tags: session.tags,
       enabled: session.enabled,
       autoResume: session.autoResume,
       maxRetries: session.maxRetries,

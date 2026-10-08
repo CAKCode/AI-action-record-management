@@ -72,6 +72,8 @@ BASE_URL=http://127.0.0.1:8091
 | `objective` | string | 创建必填 | 任务目标、边界和验收条件 |
 | `workingDir` | string | 否 | 默认 `.`；相对第一个任务根目录解析，也可使用白名单内绝对路径 |
 | `notes` | string | 否 | 操作备注，不作为本轮运行指令 |
+| `project` | string | 否 | 项目分类；默认 `cloudRecord`，历史任务也按此兼容值返回 |
+| `tags` | string[] 或逗号分隔字符串 | 否 | 自定义标签，最多 100 个，每项最多 100 个字符；平台会去重并保留输入顺序 |
 | `maxRetries` | number | 否 | 瞬时错误重试和中断自动恢复的上限，默认 `2`，范围 `0..20` |
 | `autoResume` | boolean | 否 | Worker 中断或服务重启后是否自动恢复，默认 `true` |
 | `enabled` | boolean | 否 | 配置是否启用，默认 `true` |
@@ -126,6 +128,8 @@ curl -fsS "$BASE_URL/api/sessions" \
     "name": "验证发布版本",
     "objective": "运行测试并汇总结果。",
     "workingDir": "project-a",
+    "project": "cloudRecord",
+    "tags": ["nightly", "h265"],
     "maxRetries": 2,
     "autoResume": true
   }'
@@ -139,6 +143,8 @@ curl -fsS "$BASE_URL/api/sessions" \
   "name": "验证发布版本",
   "objective": "运行测试并汇总结果。",
   "workingDir": "project-a",
+  "project": "cloudRecord",
+  "tags": ["nightly", "h265"],
   "status": "idle",
   "summary": "",
   "runCount": 0,
@@ -187,6 +193,8 @@ curl -fsS "$BASE_URL/api/sessions?limit=100&offset=0&status=waiting_review,faile
 ```
 
 返回按 `updatedAt` 倒序排列的完整任务对象数组。`limit` 默认 `100`、最大 `500`，`offset` 默认 `0`；`status` 可传逗号分隔的已定义状态列表，包含未知状态时返回 `400`。不传 `status` 时查询全部状态。如只需首页统计，使用 `GET /api/dashboard`。
+
+返回对象包含 `project` 和 `tags`；缺省与历史任务使用 `project=cloudRecord`、`tags=[]`。创建、更新和配置导入导出支持这些字段。当前列表 API 不提供服务端项目或标签筛选参数；页面按已加载列表过滤，外部调用方应先分页读取再自行筛选。分类不会改变任务执行流程或 Skill 选择。
 
 ```json
 [
@@ -511,11 +519,21 @@ curl -fsS "$BASE_URL/api/sessions/verify-release/external-attempts?limit=100"
 
 `GET|HEAD /api/sessions/:id/external-attempts/:attemptId/artifacts/:artifactKey`
 
-按后台执行明确登记的 artifact key 返回私有、只读的文件快照；客户端不能提交文件系统路径。运行中的 HTML 使用与托管报告相同的 CSP sandbox，并以 `private, no-store` 返回。每次请求只读取打开瞬间已有的字节，pytest 后续追加内容不会进入当前响应；刷新页面可获取更新。HTML 会注入只读受控资源基址，因此同目录的 CSS、脚本、字体、图片、case log 和媒体仍按 pytest 原始加载顺序工作。
+按后台执行明确登记的 artifact key 返回私有、只读的文件快照；客户端不能提交文件系统路径。运行中的 HTML 使用与托管报告相同的 CSP sandbox，并以 `private, no-store` 返回。每次请求只读取打开瞬间已有的字节，pytest 后续追加内容不会进入当前响应；刷新页面可获取更新。平台尽力内嵌本地 CSS 和脚本，并将受支持的日志、媒体和图片引用改写为该登记项的资源 URL；不向原业务 HTML 写回内容。可选依赖仍在写入时可能保留原内容，预览不保证所有相对依赖已就绪。
+
+| 条件 | 响应 |
+| --- | --- |
+| 已登记、HTML 有文档结构、External 为 `running` | `200`；保留可见的 pytest-html 刷新按钮 |
+| artifact key 未登记或文件尚未生成 | `404` |
+| HTML 为空、只有标题占位或缺少文档结构 | `409` |
+| External 已终态，但 HTML 仍含活动刷新按钮 | `409`，报告未完成终态写入 |
+| 源 HTML 超过 64 MiB | `413` |
+
+判断使用 External Attempt 的当前状态，不使用 Skill Report 的旧 `running` 状态。源文件正在重写导致快照读取不完整时可能返回 `409`，应在写入后刷新。运行中快照没有正式归档副本的持久性和摘要保证。
 
 `GET|HEAD /api/sessions/:id/external-attempts/:attemptId/artifacts/:artifactKey/resources/:resourcePath`
 
-只返回上述 HTML 使用的同目录相对资源。服务会校验 Task、Attempt、artifact key、相对路径、真实路径和普通文件类型，拒绝符号链接、目录逃逸和超过 64 MiB 的资源；媒体资源支持单段 `Range`。文件尚未生成、key 未登记或资源不存在时返回 `404`。终态托管完成后，结构化报告会改用带完整性校验的正式 artifact URL。
+只返回上述 HTML 使用的本地相对资源，以源 HTML 目录解析，并受 META 的执行目录边界约束；例如 `../videos` 可通过编码后的相对路径访问。服务会校验 Task、Attempt、artifact key、相对路径、真实路径和普通文件类型，拒绝符号链接、目录逃逸和超过 64 MiB 的资源；媒体资源支持单段 `Range`。文件尚未生成、key 未登记或资源不存在时返回 `404`。终态托管完成后，结构化报告会改用带完整性校验的正式 artifact URL。
 
 终态托管由 Worker 每次限量领取一条记录完成。复制使用源文件前后指纹校验、私有临时文件、`fsync` 和同目录不覆盖式原子发布；字节数与 SHA-256 在同一状态事务中入库。发布后进程中断时，下一 Worker 会复验并补记已存在副本。源文件缺失、变化或类型不安全不会静默忽略，会写入工作日志和审计，并通过 `archiveNextRetryAt` 退避重试。
 
@@ -531,6 +549,8 @@ curl -fsS -D - "$BASE_URL/api/sessions/verify-release/external-attempts/external
 `GET /api/sessions/:id/scheduled-jobs?limit=100&offset=0&status=pending,dispatched`
 
 返回持久化调度记录，包括 `generation`、`sequence`、`dueAt`、`status`、`attemptCount`、`maxAttempts`、`commandId`、`lastError` 和继承自关联后台执行的 `skills`。`payload` 保存恢复同一 Session 所需的自包含检查上下文。调度器自身不是业务 Skill，不创建伪造的 Skill 调用记录。
+
+关联 External 仍运行时，Worker 将同一作业退回 `pending` 并顺延 `dueAt`，记录 `schedule.external_check_deferred`；不会创建 Codex Turn，也不会增加派发 `attemptCount`。External 终态后才派发结果收集命令。这里的轻量顺延仅适用于 `external_check`，不能把任意定时业务都视为无需 Codex 的状态轮询。
 
 ```bash
 curl -fsS "$BASE_URL/api/sessions/verify-release/scheduled-jobs?limit=100"
@@ -655,9 +675,13 @@ curl -fsS "$BASE_URL/api/sessions/verify-release/skill-reports?limit=100&offset=
 
 每条记录包含报告所属的 `sessionId`、`stepRunId`、`turnId`、`attemptId`，冻结的 `skillId`、`skillVersion`、`skillContentHash`，以及 `reportKey`、`revision`、`reportHash`、`reportType`、状态、摘要、指标和通用区块。`observedAt` 是业务结果的观察时间，`publishedAt` 是平台持久化时间。所有新报告使用 Schema v2，必须显式提交 `artifacts` 数组；运行中和终态 Run 报告都提交 `executionEvidence.externalAttemptId`，平台由此绑定 `stepRunId`。同一 `reportKey` 的 revision 不能跨 Step Run。API 用 `artifactDeclarations` 返回该报告正文的原始声明；用只读 `registeredArtifacts` 返回关联 External Attempt 已登记文件的 `key`、`kind`、`fileName`、`executionStatus` 和受控快照 `url`，不返回源路径；用 `artifacts` 返回已经成功托管的文件元数据、摘要和正式打开 URL。
 
-平台只消费显式声明，或在当前报告发布时从具体 pytest `--html` 输出做受约束的补登记；不会从摘要、普通 Section 字段或旧 Task 猜测文件。自动补登记要求 External Attempt 属于当前 Task、具备有效 Turn/Attempt 来源，并且报告工作目录与 META 权威工作目录一致且路径在其中。运行中即可投影登记项，只有终态归档阶段才要求 External Attempt 已终态并使用 META 的权威工作目录完成证据校验。每个已知 pytest HTML 仍应在 `codex-background-track register` 时通过可重复的 `--artifact pytest-html:<stable-key>:<absolute-path>` 登记，平台立即显示登记项并在源文件生成后提供只读快照，随后自动合并到终态报告；这同时支持直接 pytest 和 wrapper。同一执行可登记多份 HTML，终态报告还可追加 Fail 分析 Markdown。`codex-skill-report` 在发布事务中取得新 artifact 作业的租约并同步归档，Worker 不会并发复制同一批媒体；发布进程退出后 Worker 可在租约到期时接管，复制和摘要校验期间持续续租。单个文件缺失、超过 64 MiB、目录清理失败或校验失败不会覆盖已经成功托管的文件，持久化作业会重试并保留失败证据。相同 Step Run 的后续修订会逐个复用声明和源文件 SHA-256 均未变化的 artifact；新增失败分析等其他 artifact 不会让原有媒体重新归档，同路径内容变化时仍正常生成新归档。多个独立 pytest 应使用各自的 external attempt 和 `reportKey`，允许在同一目录并行；不同报告及其同名媒体使用隔离的托管命名空间。旧 Task 不做历史 artifact 补录。
+平台只消费显式声明，或在当前报告发布时从具体 pytest `--html` 输出做受约束的补登记；不会从摘要、普通 Section 字段或旧 Task 猜测文件。自动补登记要求 External Attempt 属于当前 Task、具备有效 Turn/Attempt 来源，并且报告工作目录与 META 权威工作目录一致且路径在其中。运行中即可投影登记项，只有终态归档阶段才要求 External Attempt 已终态并使用 META 的权威工作目录完成证据校验。每个已知 pytest HTML 仍应在 `codex-background-track register` 时通过可重复的 `--artifact pytest-html:<stable-key>:<absolute-path>` 登记，平台立即显示登记项并在源文件生成后提供只读快照，随后自动合并到终态报告；这同时支持直接 pytest 和 wrapper。同一执行可登记多份 HTML，终态报告还可追加 Fail 分析 Markdown。`registeredArtifacts` 对终态 External Attempt 的空文件、占位 HTML 或不可读文件返回 `available=false`，前端不再生成打开链接。`codex-skill-report` 在发布事务中取得新 artifact 作业的租约并同步归档，Worker 不会并发复制同一批媒体；发布进程退出后 Worker 可在租约到期时接管，复制和摘要校验期间持续续租。单个文件缺失、超过 64 MiB、目录清理失败或校验失败不会覆盖已经成功托管的文件，持久化作业会重试并保留失败证据。相同 Step Run 的后续修订会逐个复用声明和源文件 SHA-256 均未变化的 artifact；新增失败分析等其他 artifact 不会让原有媒体重新归档，同路径内容变化时仍正常生成新归档。多个独立 pytest 应使用各自的 external attempt 和 `reportKey`，允许在同一目录并行；不同报告及其同名媒体使用隔离的托管命名空间。旧 Task 不做历史 artifact 补录。
 
-报告引用的本地 `logs/*.txt` 在总量未超过 64 MiB artifact 上限时以内嵌只读文本形式归档；若内嵌全部唯一日志会使 HTML 超限，HTML 报告本体仍会归档并可打开，日志改为该 artifact 下的独立受认证文本资源，链接不会降级为 `Log omitted: artifact size limit` 占位。独立日志资源不占用媒体清单和分片的 10,000 项额度，因此大型并发报告不会因视频资源先达到上限而漏掉后续 case 日志。`cloud-recording-test`、`cloud-recording-gw-deploy` 或 `rtsc-cicd-deploy` 已实际执行但最新报告仍为非终态时，平台会在 Task 进入待审核状态时写入一份标记为 fallback 的终态报告；测试兜底使用 External Attempt，部署兜底优先使用该 Skill 最后的非发布命令，避免后续 pytest 退出码污染部署状态。CICD/GW 上报契约只要求开始和结束两个 revision；业务轨迹只投影每个 `reportKey` 的首条开始和最后一条终态结束，已有中间 revision 继续保留在历史 API 中但不显示为业务节点。其他类型报告仍只投影最新 revision。
+报告引用的本地 `logs/*.txt` 在总量未超过 64 MiB artifact 上限时以内嵌只读文本形式归档；若内嵌全部唯一日志会使 HTML 超限，HTML 报告本体仍会归档并可打开，日志改为该 artifact 下的独立受认证文本资源，链接不会降级为 `Log omitted: artifact size limit` 占位。独立日志资源不占用媒体清单和分片的 10,000 项额度，因此大型并发报告不会因视频资源先达到上限而漏掉后续 case 日志。
+
+终态 External 的 HTML 源文件为空、只包含 `<title>` 占位或缺少文档结构时，平台返回 `available=false`，页面隐藏该登记入口；原始 External Attempt 日志与已有托管 artifact 仍可查看。`availabilityReason` 可为 `empty_or_missing`、`empty_or_placeholder` 或 `missing_or_unreadable`；字段未返回不等于文件已完整归档，仍以实际打开响应和 `artifacts` 为准。运行中报告使用 `artifacts=[]`，登记项通过只读 `registeredArtifacts` 返回；在 `running.artifacts` 顶层声明文件会被拒绝。
+
+`cloud-recording-test`、`cloud-recording-gw-deploy` 或 `rtsc-cicd-deploy` 已实际执行但最新报告仍为非终态时，平台会在 Task 进入待审核状态时写入一份标记为 fallback 的终态报告；测试兜底使用 External Attempt，部署兜底优先使用该 Skill 最后的非发布命令，避免后续 pytest 退出码污染部署状态。CICD/GW 上报契约只要求开始和结束两个 revision；业务轨迹只投影每个 `reportKey` 的首条开始和最后一条终态结束，已有中间 revision 继续保留在历史 API 中但不显示为业务节点。其他类型报告仍只投影最新 revision。
 
 ```json
 [
@@ -880,12 +904,12 @@ curl -fsS "$BASE_URL/api/runtime/bridge-sessions"
 
 字节数是扫描时估算值；与 Worker 并发回收时资源可以在扫描中消失，此时接口继续返回安全快照，不把正常竞态误报为平台故障。
 
-### `POST /api/runtime/bridge-sessions/:sessionId/reclaim`
+### `POST /api/runtime/bridge-sessions/:sessionId/reclaim` / `DELETE /api/runtime/bridge-sessions/:sessionId/reclaim`
 
-为单个精确 Session 创建持久回收作业。请求体只能包含与 URL 完全相同的确认值：
+为单个精确 Session 创建持久删除并释放作业。`DELETE` 是推荐的语义化入口，`POST` 保留兼容现有调用。请求体只能包含与 URL 完全相同的确认值：
 
 ```bash
-curl -fsS -X POST \
+curl -fsS -X DELETE \
   "$BASE_URL/api/runtime/bridge-sessions/session-0123456789abcdef/reclaim" \
   -H 'Content-Type: application/json' \
   -d '{"confirmationSessionId":"session-0123456789abcdef"}'

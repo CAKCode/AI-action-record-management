@@ -147,6 +147,10 @@ test.before(async () => {
       response.end(JSON.stringify({ id: 'atomic-task', status: 'queued' }));
       return;
     }
+    if (request.url === '/api/sessions/task-1' && request.method === 'PUT') {
+      response.end(JSON.stringify({ id: 'task-1', project: 'converter', tags: ['smoke', 'regression'] }));
+      return;
+    }
     if (request.url === '/api/sessions/task-1/attempts/attempt-1/stdout') {
       response.setHeader('content-type', 'text/plain; charset=utf-8');
       response.end(Buffer.from('RAW\0OUTPUT\n'));
@@ -268,7 +272,8 @@ test('API Skill CLI sends typed authenticated requests and preserves failure sem
   const atomicCreate = await runCli([
     'task', 'create', '--start', '--idempotency-key', 'atomic-task-create',
     '--id', 'atomic-task', '--name', 'Atomic task', '--objective', 'Create and start once.',
-    '--working-dir', '.', '--max-retries', '2', '--auto-resume', 'true',
+    '--working-dir', '.', '--project', 'cloudRecord', '--tags', 'release,nightly',
+    '--max-retries', '2', '--auto-resume', 'true',
   ]);
   assert.equal(atomicCreate.status, 0, atomicCreate.stderr);
   assert.equal(JSON.parse(atomicCreate.stdout).status, 'queued');
@@ -279,6 +284,8 @@ test('API Skill CLI sends typed authenticated requests and preserves failure sem
     name: 'Atomic task',
     objective: 'Create and start once.',
     workingDir: '.',
+    project: 'cloudRecord',
+    tags: 'release,nightly',
     maxRetries: 2,
     autoResume: true,
     idempotencyKey: 'atomic-task-create',
@@ -291,6 +298,17 @@ test('API Skill CLI sends typed authenticated requests and preserves failure sem
   assert.equal(missingCreateKey.status, 64);
   assert.match(missingCreateKey.stderr, /--idempotency-key is required with --start/);
   assert.equal(requests.length, requestCountBeforeMissingCreateKey);
+
+  const updatedTask = await runCli([
+    'task', 'update', 'task-1', '--project', 'converter', '--tags', 'smoke,regression',
+  ]);
+  assert.equal(updatedTask.status, 0, updatedTask.stderr);
+  assert.equal(JSON.parse(updatedTask.stdout).project, 'converter');
+  const updateRequest = requests.at(-1);
+  assert.equal(updateRequest.url, '/api/sessions/task-1');
+  assert.deepEqual(JSON.parse(updateRequest.body.toString()), {
+    project: 'converter', tags: 'smoke,regression',
+  });
 
   const run = await runCli([
     'task', 'run', 'task-1', '--input', 'Verify state',

@@ -137,6 +137,8 @@ function schema(db) {
       objective TEXT NOT NULL DEFAULT '',
       working_dir TEXT NOT NULL,
       notes TEXT NOT NULL DEFAULT '',
+      project TEXT NOT NULL DEFAULT 'cloudRecord',
+      tags_json TEXT NOT NULL DEFAULT '[]',
       enabled INTEGER NOT NULL DEFAULT 1,
       status TEXT NOT NULL DEFAULT 'idle',
       summary TEXT NOT NULL DEFAULT '',
@@ -719,6 +721,13 @@ function schema(db) {
   if (!taskColumns.has('current_process_group_id')) {
     db.exec('ALTER TABLE tasks ADD COLUMN current_process_group_id INTEGER');
   }
+  if (!taskColumns.has('project')) {
+    db.exec("ALTER TABLE tasks ADD COLUMN project TEXT NOT NULL DEFAULT 'cloudRecord'");
+  }
+  if (!taskColumns.has('tags_json')) {
+    db.exec("ALTER TABLE tasks ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'");
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_project_updated ON tasks(project, updated_at DESC)');
   const attemptColumns = new Set(db.pragma('table_info(attempts)').map((column) => column.name));
   if (!attemptColumns.has('pid_start_ticks')) {
     db.exec("ALTER TABLE attempts ADD COLUMN pid_start_ticks TEXT NOT NULL DEFAULT ''");

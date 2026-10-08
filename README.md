@@ -7,16 +7,19 @@
 - 持久任务：排队、执行、继续、停止、恢复、重置上下文、待确认和完成归档。
 - 明确生命周期：New 创建独立 Task；Reset 保留 Task 并让下次运行创建新 Session；Resume/Restore 始终解析 Task 当前最新 Session，不会回到 reset 前的 Runtime。
 - 并行执行：不同 Task 相互独立，同一规范化工作目录中的多个 Task 也允许并行，平台不会按目录串行化。
+- 项目与标签：创建、编辑和 API 支持 `project` 与自定义 `tags`；历史任务兼容为 `cloudRecord`，列表支持项目与标签组合筛选。
 - 数据保留：Task 明确完成归档后，执行数据、审计和平台托管产物从 `archivedAt` 起保留 30 天，再由 Worker 通过受控清理流程删除。
 - 稳定执行：Web Supervisor、独立 Worker、任务租约、心跳、幂等命令和服务重启恢复。
 - 容量保护：数据、运行状态或任务工作盘空间不足时暂停领取新任务，恢复后原队列继续执行。
 - 在线备份：SQLite 一致性快照经过完整性、外键、SHA-256 和表计数复验后原子发布，支持定时执行与保留数轮转。
 - 平台恢复检查点：任务完全空闲时冻结写入，将已验证数据库、平台数据文件和平台管理的 Session runtime 原子打包并复验；外部 Codex Session home 不作为一致恢复源，默认只保留最新 1 份。
-- 媒体分层：项目代码使用 Git；唯一媒体对象按 SHA-256 做外部增量去重备份；`videos/<run-id>` 每 30 天清理；`standard_videos` 独立备份；已托管报告不重复进入恢复检查点。
-- 后台续跑：PID/LOG/DONE/STATE/META 自动登记，Codex 释放后由持久化调度恢复同一 Session 创建新 Turn。
+- 媒体分层：项目代码使用 Git；唯一媒体对象由外部按 SHA-256 增量去重备份；项目 `task/<run-id>/videos` 完整归档后清除，历史 `videos/<run-id>` 由配置好的定时器每 30 天检查清理；源视频由操作者管理，`standard_videos` 独立备份；已托管报告不重复进入恢复检查点。
+- 后台续跑：PID/LOG/DONE/STATE/META 登记后释放 Codex；运行期间由 Worker 轻量观察，终态后才恢复同一 Session 创建结果收集 Turn，继续推进 workflow。
 - Step/Run 语义：业务步骤保持稳定；Rerun 是同一 Step 下的新 Run，技术 Retry 只增加同一 Run 的 External Attempt generation，避免把任务中的不同步骤误显示成 Rerun。
 - 准确终态：Worker 每秒核对后台 DONE/STATE/META，停止前再同步核对一次；已经结束的 pytest 保留真实 `succeeded/failed`，不会因为取消后续回查被改成 `cancelled`。
 - 统一报告：启动时显式登记每份 pytest HTML；若运行报告遗漏登记但提供了与 External Attempt META 一致的具体 `--html` 输出，平台会安全补登记。运行中立即显示并可打开 `no-store` 只读快照；终态报告自动继承并持久化归档，同一次执行支持多份 HTML，Fail 分析 Markdown 使用同一报告入口，归档失败可恢复重试。
+- 报告展示：同一 Run 汇总多份报告，优先打开托管副本；显示实际 HTML 文件名，终态空文件或占位文件明确标为不可用。已托管视频的 Viewed 状态可跨电脑共享。
+- 运行库存：可盘点和异步删除无引用或已完成任务的原生 Runtime，释放空间并保留平台历史；回收 Runtime 不删除托管报告视频。
 - 直接执行：任务固定使用 Codex 最高权限模式，不启用命令审批或 Codex 沙箱。
 - 原文复盘：按 Session、Turn 和 Attempt 查询完整命令、配置/执行端目录、对应输出、退出码及原始运行事件。
 - 通用任务摘要：根据持久化执行证据自动展示通用任务或 pytest 专用摘要，不要求现有 Task 迁移或预先选择类型。
@@ -28,6 +31,8 @@
 - 多语言：默认中文，可切换英文。
 
 平台只支持 Codex，不提供 Agent、其他后端或模型配置。任务始终使用部署环境提供的默认 Codex Session 能力。
+
+运行中预览依赖 pytest 已写出的源文件，不表示归档完成；媒体归档不保证客户端支持所有编码。项目分类不自动选择业务流程，唯一媒体增量备份需外部实现。完整功能、组件职责和已验证范围见[功能与能力边界](docs/CAPABILITIES.md)。
 
 ## 部署依赖
 
@@ -105,6 +110,7 @@ Shell 中遗留的任务级路径继承给新服务。每个 Task 仍会在
 
 | 文档 | 内容 |
 | --- | --- |
+| [功能与能力边界](docs/CAPABILITIES.md) | 功能总览、报告各阶段行为、组件职责、磁盘边界和验证范围 |
 | [用户手册](docs/USER_GUIDE.md) | Task、Session、后台执行、状态和日常操作 |
 | [部署与运维](docs/OPERATIONS.md) | 运行依赖、目录权限、配置、升级、健康检查和故障处理 |
 | [架构设计](docs/ARCHITECTURE.md) | 组件职责、状态机、不变量和一致性策略 |

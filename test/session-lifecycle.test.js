@@ -2068,6 +2068,7 @@ test('API reference lists every public task management route', () => {
     'GET /api/sessions/:id/latest-log',
     'GET /api/runtime/bridge-sessions',
     'POST /api/runtime/bridge-sessions/:sessionId/reclaim',
+    'DELETE /api/runtime/bridge-sessions/:sessionId/reclaim',
   ];
   for (const route of routes) assert.ok(apiReference.includes(route), `Missing API documentation for ${route}`);
   assert.match(apiReference, /GET \/api\/ready/);
@@ -2103,6 +2104,11 @@ test('Bridge Session inventory API is read-only and reclaim requires an exact bo
     method: 'POST', body: { confirmationSessionId: 'session-0123456789abcdef' },
   });
   assert.equal(missing.response.status, 404);
+
+  const deleteMissing = await request('/api/runtime/bridge-sessions/session-0123456789abcdef/reclaim', {
+    method: 'DELETE', body: { confirmationSessionId: 'session-0123456789abcdef' },
+  });
+  assert.equal(deleteMissing.response.status, 404);
 });
 
 test('legacy finished sessions migrate to completed immutable history', async () => {

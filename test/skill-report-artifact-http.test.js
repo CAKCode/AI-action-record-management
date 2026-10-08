@@ -5,6 +5,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const Database = require('better-sqlite3');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 
@@ -126,7 +127,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
       sample: [{ extras: [{ format_type: 'image', content: registeredImageReference }] }],
     },
   }).replace(/&/g, '&amp;').replace(/"/g, '&#34;');
-  const registeredHtml = `<!doctype html><head><link href="assets/style.css" rel="stylesheet" type="text/css"><script src="assets/app.js"></script></head><body><main id="running">Running artifact</main><iframe src="${registeredLogReference}"></iframe><a href="${registeredVideoReference}" data-src="${registeredVideoReference}">video</a><a href="${registeredPlaylistReference}" data-src="${registeredPlaylistReference}">playlist</a><a href="${registeredMpdReference}" data-src="${registeredMpdReference}">dash</a><img src="${registeredBmpReference}" alt="bmp"><div data-jsonblob="${registeredImageData}"></div></body>`;
+  const registeredHtml = `<!doctype html><head><link href="assets/style.css" rel="stylesheet" type="text/css"><script src="assets/app.js"></script></head><body><main id="running">Running artifact</main><div class="summary__reload__button" onclick="location.reload()">Reload</div><iframe src="${registeredLogReference}"></iframe><a href="${registeredVideoReference}" data-src="${registeredVideoReference}">video</a><a href="${registeredPlaylistReference}" data-src="${registeredPlaylistReference}">playlist</a><a href="${registeredMpdReference}" data-src="${registeredMpdReference}">dash</a><img src="${registeredBmpReference}" alt="bmp"><div data-jsonblob="${registeredImageData}"></div></body>`;
   const registeredLog = 'registered artifact log\n';
   const registeredVideo = Buffer.from('registered video\n', 'utf8');
   const registeredPlaylist = '#EXTM3U\n#EXTINF:1,\nsample.ts\n';
@@ -196,6 +197,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     "const registeredTaskDir = path.join(process.env.CODEX_TASK_WORKSPACE_ROOTS, 'task');",
     "const registeredPath = path.join(registeredTaskDir, 'running.html');",
     "const missingPath = path.join(registeredTaskDir, 'missing.html');",
+    "const emptyPath = path.join(registeredTaskDir, 'empty.html');",
     "const registeredAssets = path.join(registeredTaskDir, 'assets');",
     "const registeredLogs = path.join(registeredTaskDir, 'logs');",
     "const registeredVideos = path.join(process.env.CODEX_TASK_WORKSPACE_ROOTS, 'videos');",
@@ -205,6 +207,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     "fs.mkdirSync(registeredLogs, { recursive: true, mode: 0o700 });",
     "fs.mkdirSync(registeredVideos, { recursive: true, mode: 0o700 });",
     "fs.writeFileSync(registeredPath, registeredHtml, { mode: 0o600 });",
+    "fs.writeFileSync(emptyPath, '', { mode: 0o600 });",
     "fs.writeFileSync(path.join(registeredAssets, 'style.css'), '#running { color: rgb(1, 2, 3); }', { mode: 0o600 });",
     "fs.writeFileSync(path.join(registeredAssets, 'app.js'), 'window.__runningArtifactReady = true;', { mode: 0o600 });",
     "fs.writeFileSync(path.join(registeredAssets, 'extra.png'), registeredImage, { mode: 0o600 });",
@@ -249,7 +252,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     "const now = new Date().toISOString();",
     "const db = getDatabase();",
     "db.prepare(`INSERT INTO external_attempts(id, task_id, chain_key, generation, label, status, log_path, meta_path, artifact_declarations_json, started_at, created_at, updated_at) VALUES (?, ?, ?, 1, ?, 'running', ?, ?, ?, ?, ?, ?)` )",
-    "  .run(externalAttemptId, taskId, 'artifact-http', 'Running report', path.join(registeredTaskDir, 'run.log'), metaPath, JSON.stringify([{ key: 'normal', kind: 'pytest-html', path: registeredPath }, { key: 'missing', kind: 'pytest-html', path: missingPath }]), now, now, now);",
+    "  .run(externalAttemptId, taskId, 'artifact-http', 'Running report', path.join(registeredTaskDir, 'run.log'), metaPath, JSON.stringify([{ key: 'normal', kind: 'pytest-html', path: registeredPath }, { key: 'missing', kind: 'pytest-html', path: missingPath }, { key: 'empty', kind: 'pytest-html', path: emptyPath }]), now, now, now);",
     "db.prepare(`INSERT INTO skill_reports(id, task_id, turn_id, attempt_id, report_key, revision, report_hash, schema_version, skill_id, skill_version, skill_content_hash, report_type, status, title, summary, payload_json, published_at) VALUES (?, ?, NULL, NULL, ?, 1, ?, 1, ?, 1, ?, ?, ?, ?, ?, ?, ?)`)",
     "  .run(reportId, taskId, 'head', hash, 'report-skill', hash, 'test-result', 'succeeded', 'Artifact head', 'Artifact HTTP contract.', '{}', now);",
     "db.prepare(`INSERT INTO skill_report_artifacts(id, task_id, report_id, artifact_key, label, kind, file_name, media_type, managed_path, bytes, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)",
@@ -307,6 +310,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     const registeredScriptUrl = `${registeredUrl}/resources/assets/app.js`;
     const registeredLogUrl = `${registeredUrl}/resources/${registeredLogReference}`;
   const missingRegisteredUrl = `http://127.0.0.1:${port}/api/sessions/${taskId}/external-attempts/${externalAttemptId}/artifacts/missing`;
+  const emptyRegisteredUrl = `http://127.0.0.1:${port}/api/sessions/${taskId}/external-attempts/${externalAttemptId}/artifacts/empty`;
   const unknownRegisteredUrl = `http://127.0.0.1:${port}/api/sessions/${taskId}/external-attempts/${externalAttemptId}/artifacts/unknown`;
   const authorization = `Basic ${Buffer.from('artifact-user:artifact-password').toString('base64')}`;
   const authenticatedFetch = (url, options = {}) => fetch(url, {
@@ -497,6 +501,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     assert.equal(registeredGet.status, 200);
     const registeredPreview = await registeredGet.text();
     assert.match(registeredPreview, /<title>running\.html<\/title>/);
+    assert.match(registeredPreview, /summary__reload__button/);
     assert.doesNotMatch(registeredPreview, /<base\b/);
     assert.match(registeredPreview, /<style type="text\/css">#running/);
     assert.match(registeredPreview, /<script>window\.__runningArtifactReady = true;<\/script>/);
@@ -584,6 +589,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     mismatchedRegisteredLogUrl.search = signedRegisteredLogUrl.search;
     assert.equal((await fetch(mismatchedRegisteredLogUrl)).status, 401);
     assert.equal((await authenticatedFetch(missingRegisteredUrl)).status, 404);
+    assert.equal((await authenticatedFetch(emptyRegisteredUrl)).status, 409);
     assert.equal((await authenticatedFetch(unknownRegisteredUrl)).status, 404);
 
     const markdownHead = await authenticatedFetch(markdownUrl, { method: 'HEAD' });
@@ -632,6 +638,15 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     const mismatchedResourceUrl = new URL(`${resourceUrl}-other`);
     mismatchedResourceUrl.search = signedResourceUrl.search;
     assert.equal((await fetch(mismatchedResourceUrl)).status, 401);
+
+    const database = new Database(path.join(dataDir, 'codex-tasks.db'));
+    try {
+      database.prepare('UPDATE external_attempts SET status=? WHERE id=?')
+        .run('failed', externalAttemptId);
+    } finally {
+      database.close();
+    }
+    assert.equal((await authenticatedFetch(registeredUrl)).status, 409);
   } finally {
     await stop(child);
     fs.rmSync(root, { recursive: true, force: true });

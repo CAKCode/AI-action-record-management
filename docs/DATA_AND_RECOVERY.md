@@ -39,11 +39,14 @@ data/
 | SQLite、WAL、平台运行数据 | 使用平台现有在线数据库备份和恢复检查点；不把媒体目录混入数据库备份。 |
 | 唯一媒体对象 | 使用外部按 SHA-256 内容寻址的增量备份；同一摘要只保留一份对象，清单保存原始路径和引用关系。 |
 | 项目代码 | 使用 Git；生成的视频副本不进入代码备份。 |
-| `videos/<run-id>` 临时目录 | 不进入长期备份，由独立 30 天清理任务处理；清理前先隔离 3 天。 |
+| 项目 `task/<run-id>/videos` 临时目录 | 不进入长期备份；同 Run 报告资源归档完整后由 artifact 作业清除，未挂载文件会保留目录和原因。 |
+| 历史 `videos/<run-id>` 临时目录 | 由配置好的独立定时器每 30 天检查；符合保留条件时先隔离，后续检查达到隔离期才永久删除。 |
 | `standard_videos` 标准库 | 单独规划备份和保留周期，媒体清理任务永不处理。 |
 | 平台已托管报告 | 使用平台从 `archivedAt` 起 30 天的保留策略；报告 artifact 资源不再被每个恢复检查点重复打包。 |
 
 唯一媒体对象的增量备份必须在平台外部执行，并以对象摘要为幂等键；本仓库的清理脚本只负责临时 `videos` 目录的生命周期，不会伪装成媒体备份或删除标准库。
+
+清理能力应按对象区分：运行库存回收只删除原生 Runtime，保留 Task 历史和托管报告视频；非活动未完成 Task 的删除会删除平台 Task 数据和托管产物；完成 Task 到期清理才按 30 天保留策略删除历史。上述操作不等于清空任意业务工作目录，平台也不会清理操作者管理的 `/data/jenkins/videos` 源文件。SQLite 删除记录后，数据库文件不保证立刻缩小；文件回收释放的空间与数据库页复用是不同的容量指标。
 
 Worker 启动时及此后每小时执行一次保留检查，每批最多处理 50 个到期 Task。清理只在取得 `retention_cleanup` 平台维护租约后进行：任务文件先按创建代际原子改名暂存，SQLite 中该 Task、级联历史、任务审计和操作回执随后在事务内删除，提交成功后才清除暂存文件；Bridge Session record、Codex home、复制工作区、chatfile 和锁通过持久 `bridge_cleanup_jobs` 异步回收。文件暂存或事务失败会恢复原路径并保留任务；平台繁忙时延迟到下一轮。
 
@@ -111,9 +114,9 @@ Worker 异常后：
 - Worker 因未捕获异常执行强制退出时，先把内存中的活动执行标记为关机中断，再终止执行组；Turn、Attempt 和任务落为 `interrupted`，不会因 `SIGKILL` 的退出结果误记为普通失败。新 Worker 启动后沿用同一持久 Session 创建恢复 Turn。
 - 定时检查使用独立 15 秒租约；派发前中断会重新领取，派发后的 Codex Turn 中断会关闭旧 Attempt 并把原检查重新排队。
 - Turn 收尾先在事务内验证 Task、命令、Turn、Attempt 和 Worker 租约，再执行后台输出检测与状态对账；旧 Worker 的延迟回调即使携带合法 PID/LOG，也不能在租约恢复后写入后台记录或调度任务。
-- 定时检查从 `dispatched` 到真正创建 Turn 之间发生启动失败时，失败命令会保留，调度记录清除旧 `command_id` 后退回 `pending`，任务释放租约并回到 `waiting_scheduled`。达到调度重试上限后，调度标记 `failed`、外部执行标记 `lost`，并保存最后命令、错误和重试次数，避免后台状态永久悬空。
+- 活动 External 的到期检查先由 Worker 轻量完成，不创建 Codex Turn；检查会在同一个 `scheduled_job` 上顺延。只有 External 已终态时才会从 `leased` 创建 `scheduled` command 和结果收集 Turn。终态收集从 `dispatched` 到真正创建 Turn 之间发生启动失败时，失败命令会保留，调度记录清除旧 `command_id` 后退回 `pending`，任务释放租约并回到 `waiting_scheduled`。达到调度重试上限后，调度标记 `failed`，仅仍处于运行态的外部执行才标记为 `lost`。
 - 启动恢复和 5 秒周期恢复会事务化扫描 `waiting_scheduled`。每个 running External 如果没有同 generation 的 `pending/leased/dispatched` 作业，平台立即创建一条新的持久检查并记录 `schedule.recovered`；同一规则重复运行不会创建重复作业。任务已经没有活动 External 和调度时转为 `waiting_review` 并记录 `tracking_state_recovered`。
-- 每次检查恢复原 `persistentSessionKey`，但创建新的 Turn 和 Attempt，不覆盖之前的 PID、日志或观察记录。
+- 实际派发的结果收集恢复原 `persistentSessionKey`，创建新的 Turn 和 Attempt，不覆盖之前的 PID、日志或观察记录；运行中的 Worker 轻量检查不恢复 Session。
 - 活动 `external_attempts` 或 `scheduled_jobs` 会阻止归档。停止任务会将其标记为取消，防止重启后再次派发。
 
 后台业务结果读取顺序为 `.done`、`.state`、`.meta`，META 支持 JSON 和官方后台脚本使用的 `key=value`。终态文件不能覆盖仍存活的受管运行时：平台使用 cgroup 路径/inode 和 PID 启动时钟、Session、进程组联合校验所有权；只要其中仍有进程或线程，External 与 Task 就保持活动状态。裸 PID 不参与该不变量，因为操作系统可能复用 PID。

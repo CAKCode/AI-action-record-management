@@ -11,6 +11,18 @@ source root (for example `/data/jenkins/videos`) is not removed by the
 platform. `standard_videos` is a separate fixture library and is never a
 cleanup target.
 
+The layout is `task/<run-id>/report/<run-id>.html` alongside the Run's
+`videos/` and `logs/` directories. Cleanup identifies the `task/<run-id>/report/`
+layout, not a required HTML basename; historical `result.html` files use the
+same rule. During archival, the source, project copy, and managed copy may
+temporarily coexist. After verified cleanup, the operator-managed source and
+the platform copy remain. HTML source files are not removed by this media step.
+
+Runtime inventory reclaim is a separate operation: it removes native Bridge
+runtime files while retaining Task history and managed report resources.
+It does not release the managed video tree. Task deletion or completed-Task
+retention owns those resources; see [capability boundaries](CAPABILITIES.md).
+
 The platform removes a completed Run's project `task/<run-id>/videos` copy
 after successful artifact archival. Resource registrations from every report
 in the same Step Run participate in the completeness check. The artifact job

@@ -7,12 +7,16 @@
 | Task 生命周期 | New 创建独立 Task；Reset 保留 Task 和历史但让下一次运行创建新 Session；Resume/Restore 始终继续 Task 最新 Session；显式 Complete 后进入 30 天保留期 |
 | 并发 | 不限制活动 Task 数量，也不按 `workingDir` 串行化；同一目录允许多个 Task 或 pytest 并行，业务输出必须使用每次 Run 唯一的文件名或子目录 |
 | Step 与 Run | Step 表示 `normal`、`long` 等稳定业务步骤；Rerun 是同一 Step 下的新 Run；技术 Retry 复用原 Run，只增加 External Attempt generation |
-| 后台执行 | 外部命令登记 PID/LOG/DONE/STATE/META 后释放 Codex；Worker 持久调度后续 Turn，并每秒核对终态；操作员停止前会再次核对，避免把已经结束的 pytest 错标为取消 |
+| 项目与标签 | 任务配置和 API 保存分类与标签，默认项目为 `cloudRecord`；前端组合筛选已加载列表，不据此选择业务工作流 |
+| 后台执行 | 外部命令登记 PID/LOG/DONE/STATE/META 后释放 Codex；Worker 每秒核对终态，到期仍运行时轻量顺延调度，终态后才创建结果收集 Turn；停止前再次核对 |
 | 业务报告 | 每个 Run 使用稳定 `reportKey` 和自己的 `TRACKING_ID`；启动时可登记一份或多份 pytest HTML，运行中报告立即显示登记项，源文件生成后可打开只读快照；终态自动合并并切换到托管入口；Fail 分析 Markdown 使用相同 artifact 机制 |
 | 报告可靠性 | 运行中快照使用认证、`private, no-store` 和 sandbox CSP，但依赖业务源文件且不代表归档完成；终态 artifact 归档使用持久任务、租约和退避重试，单份 HTML 无效不会阻止同报告其他文件归档 |
+| 运行库存 | 异步回收 `completed_retained` 或 `orphan` Runtime，释放原生文件；平台报告、托管视频与历史保留，已回收 Session 不能恢复 |
 | 审计与恢复 | 保存 Turn、Attempt、命令、原始事件、Skill 版本和人工修正；支持 SQLite 在线备份、平台恢复检查点、受管日志完整性校验和服务重启恢复 |
 
 平台不对旧 Task 猜测 Step/Run 或补录历史 artifact。升级后的运行中 HTML 快照、准确终态和自动托管入口都依赖新执行在启动时按当前协议登记。
+
+支持范围、组件职责与尚未覆盖的能力见[功能与能力边界](CAPABILITIES.md)。
 
 ## 运行要求
 
@@ -166,6 +170,20 @@ npm run verify:data-protection
 ```
 
 数据库迁移在新进程首次打开存储时执行。需要回滚到不理解新 schema 的旧版本时，不能只替换源码；停止服务后恢复升级前已复验的数据库或恢复检查点，并同步恢复所需的 data/runtime 和业务产物。先保留故障现场，禁止在运行中的 SQLite 上手工删列或修改迁移状态。
+
+### 重启后的报告验证
+
+`restart:supervised` 的 JSON 必须满足 `ok=true`、`ready=true`，并核对 `activity` 各项为零。代码更新后的 `/api/ready` 应返回 `200`；仅刷新页面不会让 Node 后端加载新的报告规则。
+
+报告相关隔离测试：
+
+```bash
+node --test test/skill-report-artifact-http.test.js test/frontend-performance.test.js
+```
+
+这些测试覆盖运行中 HTML、空文件、终态不完整 HTML、受控资源、HEAD 与报告查看器。线上浏览器 E2E 应打开真实 Task 的报告查看器，核对实际文件名、报告 iframe 请求和报告主体；报告使用 sandbox，父页面不能直接读取其 DOM，浏览器自动化需进入 iframe 的独立调试上下文。逐 case 日志对应关系和媒体播放需另行验证，不能由页面返回 `200` 推断。
+
+2026-09-30 已完成受控重启：新服务 Ready，活动计数为零；9 月 28 日任务 GW53 托管与登记报告 GET/HEAD 均为 `200`，无头 Chromium 可渲染报告主体且标签显示实际文件名，上述 3 项测试通过。线上验证使用已结束的 Task，运行中预览由隔离 HTTP 测试覆盖，没有据此声明在线活动 pytest 或全部媒体格式逐项验证通过。
 
 ## 配置
 
@@ -372,7 +390,7 @@ curl -fsS http://127.0.0.1:8091/api/ready
 node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_task_api.js" bridge-session list
 ```
 
-先保存列表并逐个核对 `sessionId/category/taskId/taskStatus/resources/bytes`。`task_owned`、`cleanup_inconsistent` 和 `unsafe` 不得回收；`cleanup_queued` 只观察原作业。只有明确确认不再需要恢复原 Codex Session 的 `completed_retained`，或确认无归属的 `orphan`，才执行 `bridge-session reclaim SESSION_ID --yes`，一次只处理一个 ID，然后观察返回 job、`bridgeCleanup` 健康计数及 `bridge.session.cleanup.*` 审计。回收 `completed_retained` 后平台历史和 CLI transcript 仍可查看，但 `/restore` 会返回 `409`。重复同一命令返回原作业，不会创建第二个回收任务。盘点和回收响应不含 Session key 与主机路径；需要修复不安全现场时从受保护的服务日志和本机 runtime 检查，不要直接删除数据库记录或批量 `rm`。
+先保存列表并逐个核对 `sessionId/category/taskId/taskStatus/resources/bytes`。`task_owned`、`cleanup_inconsistent` 和 `unsafe` 不得回收；`cleanup_queued` 只观察原作业。只有明确确认不再需要恢复原 Codex Session 的 `completed_retained`，或确认无归属的 `orphan`，才执行页面上的“删除并释放磁盘”或 `bridge-session reclaim SESSION_ID --yes`，一次只处理一个 ID，然后观察返回 job、`bridgeCleanup` 健康计数及 `bridge.session.cleanup.*` 审计。回收 `completed_retained` 后平台历史和 CLI transcript 仍可查看，但 `/restore` 会返回 `409`。重复同一命令返回原作业，不会创建第二个回收任务。盘点和回收响应不含 Session key 与主机路径；需要修复不安全现场时从受保护的服务日志和本机 runtime 检查，不要直接删除数据库记录或批量 `rm`。
 
 `backups` 和 `recoveryCheckpoints` 都包含 `auditFailureCount`、`unrecordedAuditEventCount`、`lastAuditErrorAt`、`lastAuditError`、`lastAuditRecoveryAt`，以及 outbox 的 `auditQueueDurable`、`outboxFailureCount`、`lastOutboxErrorAt`、`lastOutboxError`。创建/复验响应的 `auditRecorded=false` 表示核心操作已经完成，但审计事务暂未落库；不要重做核心操作。平台先把完整批次原子写入 `CODEX_DESK_DATA_DIR/storage-audit-outbox.json`，再每 30 秒、服务启动时以及下一次同类审计时幂等重放。待写数回到 0 后再确认审计记录；若 `auditQueueDurable=false`，说明 outbox 也未可靠落盘，应立即保护已发布包、数据库和服务日志。
 
@@ -380,7 +398,7 @@ outbox 固定为普通文件 `0600`，采用临时文件、`fsync`、重命名�
 
 存储完整性检查缓存 30 秒。`storage.ok=false` 时健康接口返回 `503`，先停止写入并保留数据目录副本，再执行离线恢复；不要通过反复重启覆盖现场。
 
-`state.ok=false` 同样返回 `503`。先查看非零 `violations`：活动 Task 必须恰好有一个 running Attempt 和有效租约；已登记 PID 必须与 Attempt 的启动时钟/进程组一致；非执行态 Task 不能残留租约，但 Worker 已领取同一任务 `processing` 命令后、创建 Turn 前的短暂 `queued` 状态除外；`completed` Task 不能残留活动 Command、Schedule 或 External；等待后台检查的 running External 必须有活动调度，空的 `waiting_scheduled` 也不应长期存在。Worker 每 5 秒可修复调度类孤儿，但已完成任务残留活动工作、进程身份或 Task/Attempt 不一致都应先保留数据目录副本并检查服务日志，不要直接改库或按旧 PID 杀进程。
+`state.ok=false` 同样返回 `503`。先查看非零 `violations`：活动 Task 必须恰好有一个 running Attempt 和有效租约；已登记 PID 必须与 Attempt 的启动时钟/进程组一致；非执行态 Task 不能残留租约，但 Worker 已领取同一任务 `processing` 命令后、创建 Turn 前的短暂 `queued` 状态除外；`completed` Task 不能残留活动 Command、Schedule 或 External；等待后台检查的 running External 由 Worker 内部轻量观察，即使当前没有可派发的 Codex Turn 也属于正常状态；空的 `waiting_scheduled` 仍不应长期存在。Worker 每 5 秒可修复调度类孤儿，但已完成任务残留活动工作、进程身份或 Task/Attempt 不一致都应先保留数据目录副本并检查服务日志，不要直接改库或按旧 PID 杀进程。
 
 `workerActive` 是当前执行中的 Task 数，`workerMaxConcurrency=0` 表示 Worker 不设活动 Task 并发上限。所有可运行 Task 都会被领取，同一规范化工作目录中的 Task 也可以并行；这是明确支持的执行模式，平台不会为工作目录创建互斥锁或隐式排队。并发执行会随任务数增加进程、内存、文件句柄和工作目录 I/O，调用方必须保证共享目录中的命令和输出路径能够并行，资源保护应通过主机或容器级配额完成，而不是让平台 Task 排队。
 
@@ -434,7 +452,7 @@ outbox 固定为普通文件 `0600`，采用临时文件、`fsync`、重命名�
 1. 在“后台与调度”确认 `nextScheduledAt`、外部执行 generation 和调度状态。
 2. `pending` 且未到时间是正常等待，不占用 Codex/Worker 槽位。
 3. 长时间停留在 `leased` 时检查 Worker；15 秒租约到期后会自动恢复为 `pending`。
-4. `dispatched` 表示已经生成同一 Session 的新 Turn；结合命令队列、Attempt 和 Worker 心跳检查。
+4. 运行中的 External 到期后出现 `schedule.external_check_deferred` 是轻量顺延，不会新增 Turn；`dispatched` 表示结果收集命令已派发，Turn 可能仍等待 Worker 启动，结合命令队列、Attempt 和心跳检查。
 5. DONE/STATE/META 表示业务终态；若受管 cgroup 或身份已校验的进程组仍有成员，任务继续保持后台运行。不要用裸 PID 判断，因为 PID 可能复用。
 6. 需要终止跟踪时使用页面“停止”，不要直接改 SQLite。
 7. `result.ignoredStaleArtifacts` 非空表示固定路径上存在早于当前来源执行的旧终态文件；不要手工修改数据库，应检查 Skill 是否复用了文件名，并等待当前 generation 写入新证据。
@@ -461,6 +479,14 @@ outbox 固定为普通文件 `0600`，采用临时文件、`fsync`、重命名�
 9. Fail 分析 Markdown 通常在终态分析后生成，应由终态报告显式追加 `failure-analysis-markdown` 声明；它和 HTML 都通过同一报告 artifact API 打开。
 
 完整登记命令和报告 Schema 见[用户手册](USER_GUIDE.md#后台任务与定时检查)与[Skill 结构化报告](SKILL_REPORTS.md#发布)。
+
+### pytest 运行中报告打不开
+
+先查询同一 Run 的 External Attempt、登记 key 和源文件状态，再请求对应登记 URL。未生成返回 `404`；空文件或占位文件返回 `409`；超过现有限额返回 `413`。pytest 必须启用运行中报告写入，平台不会代生成文件。
+
+若 External 仍为 `running`、HTML 已生成，但接口提示 `Registered pytest HTML report is incomplete: pytest is still running`，检查 Web 进程是否已加载支持运行中快照的版本。更新源码或刷新浏览器不足以更新内存中的后端；按受控重启步骤发布后再验证。若 External 已终态且刷新按钮仍活动，该 `409` 是终态写入不完整，应核对 pytest 日志与插件结果。
+
+报告不出现在业务轨迹时，检查关联的 `running` Schema v2 报告是否使用 `artifacts=[]` 和正确 `TRACKING_ID`。源 Skill 的旧模板若要求运行中声明 HTML，应按[Skill 接入与更新](SKILL_REPORTS.md#skill-接入与更新)修正；重启不替换已冻结快照。运行中日志或媒体 `404` 则继续检查相对引用和文件是否实际生成，不能仅靠 HTML 的 `200` 判定资源完整。
 
 ### Session 结束后仍有相关进程
 

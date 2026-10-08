@@ -39,11 +39,11 @@
       </div>
 
       <nav class="nav" aria-label="Primary">
-        <button class="nav-item active" data-view="overview"><span class="nav-index">01</span><span data-i18n="navOverview">总览</span></button>
-        <button class="nav-item" data-view="tasks"><span class="nav-index">02</span><span data-i18n="navTasks">任务 Session</span></button>
-        <button class="nav-item" data-view="skills"><span class="nav-index">03</span><span data-i18n="navSkills">Skills</span></button>
-        <button class="nav-item" data-view="runtime"><span class="nav-index">04</span><span data-i18n="navRuntime">运行库存</span></button>
-        <button class="nav-item" data-view="audit"><span class="nav-index">05</span><span data-i18n="navAudit">操作审计</span></button>
+        <button class="nav-item active" data-view="overview"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg><span data-i18n="navOverview">总览</span></button>
+        <button class="nav-item" data-view="tasks"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1"/></svg><span data-i18n="navTasks">任务 Session</span></button>
+        <button class="nav-item" data-view="skills"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m13 2-8 12h6l-1 8 9-13h-6z"/></svg><span data-i18n="navSkills">Skills</span></button>
+        <button class="nav-item" data-view="runtime"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5M12 17.5h5"/></svg><span data-i18n="navRuntime">运行库存</span></button>
+        <button class="nav-item" data-view="audit"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H5v17h14V4h-3M9 3h6v4H9zM9 12h6M9 16h6"/></svg><span data-i18n="navAudit">操作审计</span></button>
       </nav>
 
       <div class="runtime-card">
@@ -60,14 +60,23 @@
           <p id="viewSubtitle">一个任务对应一个独立、可恢复、可审计的 Codex Session。</p>
         </div>
         <div class="topbar-actions">
-          <div class="font-size-control" id="fontSizeControl" role="group">
-            <button type="button" data-font-size="small" aria-pressed="false">A-</button>
-            <button type="button" data-font-size="standard" aria-pressed="false">A</button>
-            <button type="button" data-font-size="large" aria-pressed="false">A+</button>
-          </div>
-          <button class="button secondary compact" id="langToggleBtn" title="Language">EN</button>
-          <button class="button secondary" id="exportBtn" data-i18n="export">导出</button>
-          <button class="button secondary" id="importBtn" data-i18n="import">导入</button>
+          <details class="toolbar-menu" id="workspaceTools">
+            <summary class="button secondary"><span data-i18n="workspaceTools">工具与显示</span><span aria-hidden="true">⌄</span></summary>
+            <div class="toolbar-menu-panel">
+              <div class="display-settings">
+                <span data-i18n="fontSize">文字大小</span>
+                <div class="font-size-control" id="fontSizeControl" role="group">
+                  <button type="button" data-font-size="small" aria-pressed="false">A-</button>
+                  <button type="button" data-font-size="standard" aria-pressed="false">A</button>
+                  <button type="button" data-font-size="large" aria-pressed="false">A+</button>
+                </div>
+              </div>
+              <button class="button secondary compact" id="langToggleBtn" title="Language">EN</button>
+              <div class="menu-divider"></div>
+              <button class="button secondary" id="exportBtn" data-i18n="export">导出</button>
+              <button class="button secondary" id="importBtn" data-i18n="import">导入</button>
+            </div>
+          </details>
           <button class="button secondary" id="syncBtn" data-i18n="syncRuntime">同步 Runtime</button>
           <button class="button primary" id="topNewTaskBtn" data-i18n="newTask">新建任务</button>
         </div>
@@ -82,13 +91,16 @@
       </section>
 
       <section class="view active" id="view-overview">
-        <div class="summary-band">
-          <div class="summary-copy">
-            <span class="section-label" data-i18n="executionMode">执行模式</span>
-            <h2 data-i18n="overviewHeadline">任务即 Session，持续工作直到确认完成</h2>
-            <p data-i18n="overviewDescription">每个任务拥有独立持久 Session；每轮结果可继续处理，确认完成后进入只读历史。</p>
-          </div>
+        <div class="overview-summary">
           <div class="metric-grid" id="metricGrid"></div>
+          <details class="overview-guide">
+            <summary><span data-i18n="workbenchGuide">工作台说明</span><span aria-hidden="true">⌄</span></summary>
+            <div class="summary-copy">
+              <span class="section-label" data-i18n="executionMode">执行模式</span>
+              <h2 data-i18n="overviewHeadline">任务即 Session，持续工作直到确认完成</h2>
+              <p data-i18n="overviewDescription">每个任务拥有独立持久 Session；每轮结果可继续处理，确认完成后进入只读历史。</p>
+            </div>
+          </details>
         </div>
 
         <section class="workspace-section">
@@ -99,9 +111,10 @@
             </div>
             <button class="button primary" data-action="new-task" data-i18n="newTask">新建任务</button>
           </div>
-          <div class="task-grid" id="overviewTaskGrid"></div>
+          <div class="task-grid overview-task-grid" id="overviewTaskGrid"></div>
         </section>
 
+        <div class="overview-secondary">
         <section class="history-section">
           <div class="section-head">
             <div>
@@ -123,17 +136,23 @@
           </div>
           <div class="event-list compact-list" id="overviewAuditList"></div>
         </section>
+        </div>
       </section>
 
       <section class="view" id="view-tasks">
-        <div class="section-toolbar">
+        <div class="section-toolbar task-list-toolbar">
           <div class="segmented" id="taskFilters">
             <button class="active" data-status="current" data-i18n="filterCurrent">当前任务</button>
             <button data-status="running" data-i18n="filterRunning">工作中</button>
             <button data-status="history" data-i18n="filterHistory">历史记录</button>
           </div>
+          <div class="task-classification-filters">
+            <label class="task-filter-field"><span data-i18n="taskProjectFilter">项目</span><select id="taskProjectFilter" aria-label="项目"></select></label>
+            <label class="task-filter-field"><span data-i18n="taskTagFilter">标签</span><select id="taskTagFilter" aria-label="标签"></select></label>
+          </div>
           <button class="button primary" data-action="new-task" data-i18n="newTask">新建任务</button>
         </div>
+        <div class="task-list-caption"><span data-i18n="taskListDescription">任务名称与目标</span><span id="taskListCount"></span></div>
         <div class="task-grid large" id="taskGrid"></div>
         <div class="load-more-row"><button class="button secondary hidden" id="loadMoreTasksBtn" data-i18n="loadMore">加载更多</button></div>
       </section>
@@ -233,6 +252,7 @@
           </div>
           <div class="console-output" id="taskConsoleOutput"></div>
           <form class="prompt-composer" id="continueTaskForm">
+            <label class="composer-label" for="continueInput" data-i18n="nextInstruction">下一步指令</label>
             <textarea id="continueInput" maxlength="524288" data-i18n-placeholder="continuePlaceholder" placeholder="向这个 Session 发送下一条工作指令"></textarea>
             <div class="composer-actions">
               <span id="composerHint"></span>
@@ -288,6 +308,7 @@
   </div>
 
   <div class="toast hidden" id="toast" role="status" aria-live="polite" aria-atomic="true">
+    <span class="toast-marker" id="toastMarker" aria-hidden="true">i</span>
     <span class="toast-message" id="toastMessage"></span>
   </div>
   <input class="hidden" type="file" id="importInput" accept="application/json,.json">

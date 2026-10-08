@@ -3,6 +3,9 @@ const TASK_FIELD_LIMITS = Object.freeze({
   objective: 256 * 1024,
   workingDir: 4096,
   notes: 256 * 1024,
+  project: 100,
+  tag: 100,
+  tags: 100,
   input: 512 * 1024,
   idempotencyKey: 256,
 });
@@ -39,7 +42,7 @@ function validateTaskBody(body, options = {}) {
   if (requireId && (typeof body.id !== 'string' || !body.id.trim())) {
     throw validationError('id must be a non-empty string');
   }
-  for (const field of ['name', 'objective', 'workingDir', 'notes']) {
+  for (const field of ['name', 'objective', 'workingDir', 'notes', 'project']) {
     if (body[field] != null && typeof body[field] !== 'string') {
       throw validationError(`${field} must be a string`);
     }
@@ -54,6 +57,21 @@ function validateTaskBody(body, options = {}) {
     if (body[field] != null && typeof body[field] !== 'boolean') {
       throw validationError(`${field} must be a boolean`);
     }
+  }
+  if (body.tags != null && !Array.isArray(body.tags) && typeof body.tags !== 'string') {
+    throw validationError('tags must be an array or comma-separated string');
+  }
+  const tags = Array.isArray(body.tags)
+    ? body.tags
+    : (typeof body.tags === 'string' ? body.tags.split(',') : []);
+  if (tags.some((tag) => typeof tag !== 'string')) {
+    throw validationError('every tag must be a string');
+  }
+  if (tags.length > TASK_FIELD_LIMITS.tags) {
+    throw validationError(`tags exceeds the maximum count of ${TASK_FIELD_LIMITS.tags}`);
+  }
+  if (tags.some((tag) => tag.length > TASK_FIELD_LIMITS.tag)) {
+    throw validationError(`every tag must be at most ${TASK_FIELD_LIMITS.tag} characters`);
   }
   if (body.maxRetries != null
     && (!Number.isInteger(body.maxRetries) || body.maxRetries < 0 || body.maxRetries > 20)) {

@@ -2,6 +2,8 @@
 
 Skill 结构化报告把业务结论与终端原始输出分开。Skill 负责生成领域内容，平台只校验并持久化通用 Schema，前端不识别 cloud recording、GW 或其他业务字段。
 
+平台、工作流 Skill 与 pytest 插件的职责以及预览、归档、播放之间的区别见[功能与能力边界](CAPABILITIES.md)。报告发布成功只表示结构化内容已持久化；文件托管结果仍需查看返回的 artifact 和归档作业状态。
+
 推荐展示顺序：
 
 1. 主业务命令使用顶层 `primaryExecution`，在任务终端最上方默认展开。
@@ -31,6 +33,15 @@ codex-skill-use cloud-recording-test -- \
 每份报告都必须显式包含 `artifacts` 数组；没有文件时使用 `[]`。运行中和终态 Run 报告都把 `codex-background-track register` 返回的 `TRACKING_ID` 写入 `executionEvidence.externalAttemptId`；平台由此写入并返回 `stepRunId`。启动时已经知道的每份 HTML 应同时通过可重复的 `--artifact pytest-html:<stable-key>:<absolute-path>` 登记到 External Attempt。若运行中报告遗漏了这一步，平台会在 `primaryExecution.command` 含有具体 pytest `--html` 输出、且报告工作目录与 External Attempt 的 META 工作目录一致时安全补登记；不满足这些条件不会猜测文件。运行中报告发布后，平台立即以 `registeredArtifacts` 返回登记项的安全展示字段和受控快照 URL，不返回源路径；平台再把登记项自动合并进每一版终态报告并归档。终态才生成的 Fail Markdown 由终态报告显式追加。报告 revision、后台执行和 artifact 必须属于同一 Step Run。
 
 `cloud-recording-test`、`cloud-recording-gw-deploy` 和 `rtsc-cicd-deploy` 在 Task 进入待审核状态时，如已有 `codex-skill-use` 自动 invocation 或旧命令归因、但最新报告仍是 `pending`、`running` 或 `unknown`，平台会生成一份 `platform-fallback:*` 终态报告，避免业务轨迹缺少结论。测试兜底使用关联的 External Attempt 状态；部署兜底优先使用该 Skill 最后的非 `codex-skill-report` invocation，旧数据再使用命令归因，避免后续 pytest 的退出码覆盖部署结果。该报告明确标注为兜底，只包含平台已经持久化的状态与退出码。CICD/GW 每个 `reportKey` 只要求开始和结束两个 revision；业务轨迹只投影首条开始和最后一条终态结束，历史中间 revision 仍保留用于审计但不再显示为业务节点。其他报告仍只投影最新 revision。
+
+### Skill 接入与更新
+
+1. 为每个独立 Run 分配稳定 `reportKey`，登记时重复传入每份已知 HTML 的 `--artifact`，保存返回的 `STEP_RUN_ID` 和 `TRACKING_ID`。
+2. 启动后发布 Schema v2 的 `running` 修订，使用 `artifacts=[]`，并把 `TRACKING_ID` 写入 `executionEvidence.externalAttemptId`。`registeredArtifacts` 由平台返回，Skill 不提交该字段；在运行中报告顶层声明 HTML 会得到 `pending or running reports cannot declare artifacts`。
+3. 终态结果收集后发布同 Run 的最终修订。平台合并该 External Attempt 已登记的 HTML；后生成的 Fail Markdown 等文件由 Skill 显式追加。
+4. 多份报告必须都关联同一真实 Run，不能用另一个 Run 的登记、文件或退出码凑齐。Task 摘要汇总同 Run 多份报告的 artifact，身份按 `reportKey + kind + key` 区分，托管入口优先于同身份的登记入口。
+
+源 Skill 仍使用 Schema v1 示例，或要求 `running.artifacts` 列出文件时，应同步为上述契约；只重启平台不能修正 Skill 的旧模板。任务首轮冻结 Skill，更新源 Skill 只影响后续新快照，不能改写已创建任务的不可变快照。
 
 ## Schema v2
 
@@ -62,9 +73,11 @@ codex-skill-use cloud-recording-test -- \
 `pytest-html` 和 `failure-analysis-markdown`；前者必须使用 `.html`/`.htm`，后者必须使用
 `.md`。同一报告不能重复 key 或规范化路径，`pending`/`running` 报告不能声明文件。
 运行中的报告仍使用 `artifacts=[]`；其 `registeredArtifacts` 是平台根据同一 External Attempt
-的显式登记或严格的 pytest `--html` 补登记生成的只读响应字段，不是 Skill 上报字段。每项只包含 `key`、`kind`、`fileName`、
-`executionStatus` 和受认证 `url`。文件已经生成时，该 URL 打开请求开始时已有字节的
-`private, no-store` 快照；文件未生成时返回 `404`。HTML 使用 sandbox CSP，且拒绝符号链接、
+的显式登记或严格的 pytest `--html` 补登记生成的只读响应字段，不是 Skill 上报字段。每项包含 `key`、`kind`、`fileName`、
+`executionStatus` 和受认证 `url`；终态 HTML 源文件不可用时还返回 `available=false` 和
+`availabilityReason`。External Attempt 仍为 `running` 且 HTML 已有文档结构时，该 URL 返回请求开始时已有字节的
+`private, no-store` 快照，允许保留可见的 `summary__reload__button`；刷新读取后续写入，不主动推送页面更新。
+文件未生成时返回 `404`；空文件或缺少文档结构返回 `409`。External 已终态但 HTML 仍有活动刷新按钮时返回 `409`，不能提前作为完整归档证据。HTML 使用 sandbox CSP，且拒绝符号链接、
 非普通文件和超过 64 MiB 的源文件。运行中快照依赖业务工作目录，不具备终态托管副本的
 持久性或完整性摘要保证。
 
@@ -78,6 +91,9 @@ Section 仍可展示路径，但不参与归档。每个不超过 64 MiB 的普�
 受控打开 URL，前端逐份显示打开入口。路径必须留在该执行目录内，不能使用环境变量、
 命令替换或符号链接逃逸。某一候选缺失、超限或校验失败时，平台仍继续处理其余候选，
 最后汇总返回错误；已经成功归档的文件保持可打开，重试不会重复登记。
+终态登记项对应的源文件为空、只有标题占位内容或缺少 HTML 文档结构时，
+页面标记为“报告文件未生成或为空”并隐藏该登记项的打开链接；对应 External Attempt 日志仍保留用于定位测试提前失败的原因。
+这是登记项的源文件可用性检查，不等于完整归档校验；已有托管 artifact 仍可从正式 URL 打开。
 任务摘要和结构化报告会分别显示 HTML 与 Fail 分析报告的“打开报告”入口；任务归档后继续从
 托管副本读取，不依赖原 pytest 文件。报告中的
 `logs/<name>.txt` pytest logtxt 相对引用会在归档时复制为只读托管资源并改写为受控 URL，
@@ -113,14 +129,14 @@ video 插件同时使用独立的 `data-media-format`，不再依赖托管 URL �
 仅在引用文件不存在时，回退到与该 HTML 具有相同 inode 的真实目录；回退仍只归档引用图中的
 清单和分片，不扫描或复制整个 `videos` 目录。为避免歧义，测试插件应让 HTML、`videos/` 和
 `logs/` 位于同一 Run 根目录，并登记最终真实 HTML 路径。推荐调用方式为
-`--html task/<run-id>/report/result.html --html-video-source-dir ../videos`；video 插件从源目录
+`--html task/<run-id>/report/<run-id>.html --html-video-source-dir ../videos`；video 插件从源目录
 复制到该 Run 的 `videos/`，平台只从这份项目副本归档。
 资源必须是执行目录内的普通文件；某个资源已经丢失时，平台保留原链接并写入
 `skill.report.artifact.media_partial` 工作日志，不阻塞 HTML 报告本体和其他可用资源归档。
 每份 HTML 使用独立命名空间，即使同一 Task 的多个 pytest 在同一个工作目录并行执行、
 生成同名媒体文件，各报告也不会在托管存储中互相覆盖。
 
-对于遵循 `task/<run-id>/report/result.html` 布局的 Run，平台在 HTML 和全部媒体依赖归档成功、
+对于遵循 `task/<run-id>/report/<filename>.html` 布局的 Run，平台在 HTML 和全部媒体依赖归档成功、
 没有 `media_partial` 警告，并确认 `videos` 中每个文件都已登记为同一 Step Run 的托管资源后，
 删除该 Run 的项目临时目录 `task/<run-id>/videos`。未挂载文件会让整个目录保留并产生
 `skill.report.project_media_cleanup_deferred` 工作日志。这只删除项目本地副本；平台不从此路径
@@ -141,6 +157,8 @@ Viewed 状态初次恢复后，平台和新版 video 插件都只检查新增 DO
 变化不会触发全报告链接扫描。平台在服务历史 artifact 时会精确替换已知旧版 video Observer，
 因此旧报告无需重归档。
 直接打开本地 HTML 仍由插件自己的浏览器存储处理，不依赖平台接口。
+
+Viewed 仅记录同 artifact 的链接被点击，不验证播放成功、观看时长或身份。运行中登记快照没有此托管 artifact 作用域，不承诺共享 Viewed；托管资源可读取也不保证客户端能解码 HEVC 等格式。
 
 同一 Task 的多个独立后台 pytest 应先登记为明确的 Step Run，再分别使用各自的 `TRACKING_ID` 和 `reportKey` 上报，可以在同一目录并行执行。Step 是 `normal`、`long` 等稳定范围；Rerun 是同 Step 下的新 Run；技术 Retry 复用 `STEP_RUN_ID`，只增加 External Attempt generation。一个受控后台命令内连续执行多个 pytest，或一次执行产生多个 HTML 时，启动登记重复提交 `--artifact`，终态报告统一继承。不同报告和不同 HTML artifact 的托管目录相互隔离。
 

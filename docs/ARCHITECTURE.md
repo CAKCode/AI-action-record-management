@@ -23,6 +23,8 @@ systemd / Host Launcher
 
 ## 组件职责
 
+功能总览、组件之间的业务责任和验证范围见[功能与能力边界](CAPABILITIES.md)。项目与标签属于 Task 分类元数据，不是业务路由；GW51/GW53 等执行顺序由工作流 Skill 定义。
+
 | 组件 | 职责 |
 | --- | --- |
 | Host Launcher | 无 systemd 时监管并退避重启 Web Supervisor；持有有限轮转诊断日志；向 Web 传递可核验身份；重复实例立即拒绝 |
@@ -88,16 +90,15 @@ inactive  --reset----> idle
 - 每条外部执行按 `chain_key + generation` 隔离；Step Run 与 chain 一一归属，同一 chain 同时只允许一个活动 generation，避免跨 Run 混用 chain 或两代进程共用 LOG/DONE/STATE/META。前一代终态后可创建新 generation，旧 generation 的未派发回调失效。
 - 后台证据起点先取 Attempt 的开始时间；自动识别真实启动命令后收紧到该命令的开始时间，服务启动时也会修复已有来源关联。DONE/STATE/META 的修改时间早于该起点时记入 `ignoredStaleArtifacts` 并忽略，防止固定路径重用后旧终态误归属新任务。同一活动记录只能绑定一条启动命令。
 - META 同时支持 JSON 和官方 `run-in-background` 的 `key=value` 格式，后者的 `ended_at`、`exit_code` 和 `end_signal` 可直接恢复终态。
-- 每次到期检查从 `scheduled_jobs` 领取，恢复同一持久 Session，并创建新 Turn 和 Attempt。检查结束后 Codex 进程再次释放。
-- 后台任务仍运行时，平台追加观察并创建下一条一次性检查；只有业务终态证据已出现且受管 cgroup/进程组都为空时才停止续排，结果收集完成后任务进入 `waiting_review`。若启动 Turn 收尾时已经观察到 External 终态，平台保留并立即到期首次结果收集作业，使快速失败仍能执行失败分析和结构化报告发布。
-- 若 External 在 scheduled 检查 Turn 执行期间才转为终态，当前 `dispatched` 检查不算未来收集机会；平台会额外保留一条立即到期的 pending 终态检查。即使当前 Turn 提交了过期的“仍在运行”观察，Task 也继续处于 `waiting_scheduled`，直到下一 Turn 完成终态汇总。
+- `scheduled_jobs` 仍负责持久化检查时间和恢复租约，但活动 External 到期时先由 Worker 在平台内完成轻量观察；只要进程仍在运行，检查会顺延且不会创建 Codex Turn。只有业务终态证据已出现且受管 cgroup/进程组都为空时，平台才派发结果收集 Turn；收集完成且没有后续执行或调度时，任务进入 `waiting_review`。
+- 终态收集 Turn 恢复同一持久 Session，并创建新的 Turn 和 Attempt；它可以按照已有 Skill 规则继续推进 GW53、Rerun 或 Fail 分析。若终态在调度作业正在领取或收尾时出现，平台保留一条立即到期的结果收集作业，避免丢失快速失败或终态交接。
 - External 进入终态后，独立归档租约把原始 LOG 按字节托管到 `data/sessions/<task>/external-attempt-output/`。复制前后校验设备、inode、大小、mtime、ctime 和链接数，拒绝符号链接；临时文件 `fsync` 并原子发布后，SQLite 保存字节数、SHA-256、时间和错误状态。旧终态记录由 Worker 每轮一条渐进回填，不在服务启动路径执行无界 I/O。
 - 托管日志按 24 小时周期由独立租约渐进复验，API 读取前也执行完整字节数和 SHA-256 校验。API 的哈希计算、inode/路径指纹确认和响应流共用一个 `O_NOFOLLOW` 只读文件描述符，消除校验完成后按路径重开被替换文件的竞态。校验失败采用 fail-closed：不返回可疑日志，Health/Ready 降级并保留工作日志和审计证据。同一记录的归档和校验异常在健康统计中只计一次。
 - HTTP 请求中断会传播到托管日志哈希循环和所有文件响应流。哈希每处理 1 MiB 检查取消信号，流阶段监听响应关闭并销毁源流；中断只释放请求资源，不会被误记为归档完整性故障。
 - 普通 API 使用 Web 进程内有界响应槽，从路由进入保持到处理函数结束且响应完成或连接关闭；请求体按收到字节刷新空闲计时，纯服务器计算阶段不计时，响应开始后由 socket 网络活动续期。客户端在长操作中途断开只结束响应侧，槽位仍保持到内部操作完成，避免断线绕过并发上限。容量耗尽立即返回带 `Retry-After` 的 `429`，不排队、不执行写事务。Health/Ready 走独立诊断通道，Dashboard 状态排除当前探针自身，确保过载时仍可观察真实占用。
 - Attempt stdout/stderr 与后台原始日志共用 Web 进程内的有界下载槽。槽位覆盖文件打开、后台日志 SHA-256 校验和完整响应源流生命周期；饱和请求即时返回可重试的 `429`，不进入排队，也不阻断 Health/Ready。响应源流用可配置空闲计时器防止慢客户端永久占槽，数据读取和下游 `drain` 都会刷新计时器，因此限制的是持续无进展时间而不是文件总下载时长。静态资源不占槽。
 - 自动修复以首次托管摘要为信任基线，只接受仍完全匹配该摘要的原业务 LOG；损坏副本先原子移入任务内 `.quarantine/`，再以不覆盖式原子发布重建。原证据缺失、不匹配或文件类型不安全时不覆盖现场。
-- 已派发的定时检查如果在创建 Turn 前因执行器、工作目录或启动错误失败，会在同一事务中释放任务租约并退回 `waiting_scheduled`，按调度自身的 `maxAttempts` 退避重试。重试耗尽后调度转为 `failed`，对应外部执行转为 `lost`，不会留下无后续作业的伪 `running` 状态。
+- 已派发的定时检查如果在创建 Turn 前因执行器、工作目录或启动错误失败，会在同一事务中释放任务租约并退回 `waiting_scheduled`，按调度自身的 `maxAttempts` 退避重试。重试耗尽后调度转为 `failed`，仅仍为 `running` 的对应外部执行转为 `lost`，不会覆盖已经确认的业务终态。
 - 调度消息保存完整 PID、状态文件路径和检查指令，不依赖短期对话文本。
 - 操作者停止任务会先结束该任务由平台启动的显式交互 CLI，封存并复验 transcript，再取消未完成检查和后台跟踪记录；平台不会仅凭 PID 强杀未知外部进程。
 - 周期性业务执行不是同一任务的长期复用：每个周期创建新的任务 Session；这里只复用一次业务执行的状态检查链。

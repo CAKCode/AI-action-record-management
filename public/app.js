@@ -112,6 +112,10 @@ const state = {
   fontSize: storedFontSize(),
   view: 'overview',
   taskFilter: 'current',
+  taskProjectFilter: '',
+  taskTagFilter: '',
+  expandedTaskObjectives: new Set(),
+  taskContextExpanded: false,
   detailTab: 'business-summary',
   dashboard: { stats: {}, runtime: {}, sessions: [], recentAudit: [] },
   skills: [],
@@ -213,13 +217,16 @@ const RUNTIME_REASON_KEYS = Object.freeze({
 
 const messages = {
   zh: {
+    workspaceTools: '工具与显示', workbenchGuide: '工作台说明', moreActions: '更多操作', taskReports: '报告', nextInstruction: '下一步指令',
+    taskListDescription: '任务名称与目标', taskListCount: '{count} 个任务', taskObjective: '任务目标',
+    expandObjective: '展开', collapseObjective: '收起', showTaskContext: '任务信息', hideTaskContext: '收起信息',
     brandSubtitle: '持久任务工作台', navOverview: '总览', navTasks: '任务 Session', navSkills: 'Skills', navAudit: '操作审计',
     fontSize: '文字大小', fontSizeSmall: '小号文字', fontSizeStandard: '标准文字', fontSizeLarge: '大号文字',
     export: '导出', import: '导入', syncRuntime: '同步 Runtime', newTask: '新建任务', executionMode: '执行模式',
     overviewHeadline: '任务即 Session，持续工作直到确认完成', overviewDescription: '每个任务拥有独立持久 Session；每轮结果可继续处理，确认完成后进入只读历史。',
     liveFloor: '当前任务', currentSessionsHeading: '任务 Sessions', recentActivity: '最近活动', recentOperations: '最近操作', viewAll: '查看全部',
     completedSessions: '已完成 Sessions', recentHistory: '最近完成记录', viewHistory: '查看历史', loadMore: '加载更多', newer: '较新记录', older: '更早记录',
-    filterCurrent: '当前任务', filterRunning: '工作中', filterHistory: '历史记录',
+    filterCurrent: '当前任务', filterRunning: '工作中', filterHistory: '历史记录', taskProjectFilter: '项目', taskTagFilter: '标签', allProjects: '全部项目', allTags: '全部标签', noFilteredTasks: '没有符合当前筛选条件的任务。',
     skillsNote: '任务首次启动时冻结平台 Skill 与 Codex Skill 快照，恢复时保持版本一致。', newSkill: '新建 Skill', importSkillZip: '导入 ZIP',
     taskId: '任务 ID', eventType: '事件类型', searchAudit: '搜索操作内容', filter: '筛选', persistentSession: '持久 Session',
     businessSummary: '任务摘要', agentRecords: 'Agent 记录', worklog: 'Agent 工作记录', skillInvocations: 'Skill 调用', noSkillInvocations: '本 Session 暂无自动记录的 Skill 调用。', taskTerminal: 'Codex CLI', commands: 'Agent 命令', background: '后台与调度', operations: '操作审计', continuePlaceholder: '输入启动或恢复这个任务的指令',
@@ -235,7 +242,7 @@ const messages = {
     idle: '待启动', pending: '待执行', leased: '执行中', queued: '排队中', running: '工作中', recovering: '恢复中', stopping: '停止中', waiting_scheduled: '后台运行中', waiting_review: '待确认', waiting_input: '待输入', completed: '已完成', succeeded: '成功', failed: '失败', lost: '进程失联', cancelled: '已取消', interrupted: '已中断', stopped: '已停止', recoverable: '可恢复', disabled: '已禁用',
     open: '查看', terminal: '终端', start: '启动任务', recover: '恢复任务', restoreArchived: '恢复并继续', resetSession: '重置上下文', continueTask: '继续任务', reviewTask: '查看结果', complete: '确认完成', stop: '停止', edit: '编辑', delete: '删除', close: '关闭', save: '保存', cancel: '取消',
     noCurrentTasks: '当前没有任务。新建任务会创建一个独立 Session。', noHistory: '还没有已完成的 Session。', noAudit: '没有匹配的操作记录。', noSkills: '没有可用 Skill。',
-    taskName: '任务名称', objective: '任务目标 / 首次指令', workingDir: '工作目录', notes: '备注', enabled: '启用',
+    taskName: '任务名称', objective: '任务目标 / 首次指令', workingDir: '工作目录', notes: '备注', taskProject: '项目分类', taskTags: '自定义标签（逗号分隔）', enabled: '启用',
     maxRetries: '中断重试次数', autoResume: '服务重启后自动恢复', createAndStart: '创建并启动', updateTask: '更新任务', createTask: '新建任务 Session', editTask: '编辑任务',
     idHint: '只允许字母、数字、短横线和下划线', pathHint: '相对路径以任务工作区根目录为基准；绝对路径必须位于允许的根目录内。',
     taskContext: '任务上下文', sessionId: 'Session ID', status: '状态', runCount: '执行次数', recoveryAttempts: '自动恢复次数', createdAt: '创建时间', finishedAt: '完成时间', workspace: '工作区', nextCheck: '下次检查', activeBackground: '活动后台执行', activeSchedules: '活动定时检查',
@@ -246,20 +253,23 @@ const messages = {
     runtimeReady: '执行服务已就绪', runtimeMissing: '执行服务不可用', runtimePaused: '任务执行已暂停', runtimeConnectionIssue: '平台连接异常', runtimeReconnecting: '正在重新连接', runtimeDashboardUnavailable: '平台状态无法刷新', dashboardRequestTimeout: 'Dashboard 请求超时', requestTimeout: '请求超时，结果未知；请刷新状态后再决定是否重试', runtimeUnsupportedPlatform: '当前平台不受支持', runtimeExecutorUnavailable: 'Codex 执行器不可用', runtimeWorkerUnavailable: 'Session Worker 不可用', runtimeExecutionUserUnsafe: '执行账户安全策略未满足', runtimeWorkspaceUnavailable: '任务工作区不可用', runtimeStorageUnavailable: '持久存储不可用', runtimeStorageLow: '持久存储空间不足', runtimeProcessMismatch: '执行进程身份校验失败', runtimeSupervisorUnavailable: 'Web Supervisor 监管中断', runtimeLauncherUnavailable: 'Host Launcher 监管中断', runtimeMaintenance: '平台正在维护', fullAccess: '最高权限', apiRequests: 'API 请求', logStreams: '日志流', synced: '运行状态已同步', imported: '配置已导入', confirmCompleteTask: '确认这个任务已经完成并归档吗？归档后仅保留只读记录，需要时可以显式恢复。', confirmRestoreTask: '恢复这个已归档任务并继续当前最新的 Codex Session 吗？', confirmResetTask: '重置当前 Codex 上下文吗？Task 配置、ID 和历史记录会保留；旧 Runtime 将被回收，后续运行创建新的 Session。', confirmDeleteTask: '确定删除这个 Session 及其全部工作日志吗？', confirmDeleteSkill: '确定删除这个平台 Skill 吗？',
     payload: '事件详情', actor: '操作者', requestId: '请求 ID', turnInput: '本轮指令', fullCommand: '完整命令', commandOutput: '执行输出', attempt: '执行尝试', exitCode: '退出码', pid: '进程 ID', signal: '退出信号', attemptError: '错误', configuredWorkingDir: '配置工作目录', runtimeWorkingDir: '实际执行目录', runtimeDirUnreported: '执行端未上报', noWorklog: '本 Session 暂无 Agent 工作记录。', noOperations: '本 Session 暂无控制面操作记录。', noAttempts: '任务终端正在等待输出。', noExecutions: '本 Session 暂无命令执行记录。', noBackground: '本 Session 暂无后台执行或定时检查。', externalExecution: '后台执行', scheduledCheck: '定时检查', generation: '代次', interval: '检查间隔', backgroundCommand: '后台完整命令', backgroundOutput: '业务进程输出', commandPath: '命令记录', viewFullLog: '查看完整原始输出', sessionStdout: 'Agent stdout', sessionStderr: 'Agent stderr', viewInlineOutput: '打开终端', hideInlineOutput: '收起终端', openRawOutput: '打开完整原始输出', loadingOutput: '正在连接实时终端...', liveOutput: '实时', reconnectingOutput: '重新连接', completeOutput: '已结束', inlineOutputLimit: '已达内嵌上限', emptyOutput: '（空输出）', outputBytes: '字节', logPath: '日志', donePath: '完成标记', statePath: '状态文件', lastObservation: '最近观察', archivePreservation: '日志托管', archiveBytes: '托管字节', archiveSha256: 'SHA-256', archiveError: '托管错误', task: '任务', unknown: '未知', loadFailed: '加载失败', actionFailed: '操作失败',
     checkNotNeeded: '无需检查', scheduleOutcome: '调度结果', backgroundAlreadyFinished: '后台任务已结束，定时检查无需再执行。业务结果请查看关联的后台执行。', backgroundPytestExecution: 'pytest 后台执行', processStartedAt: '实际开始', processFinishedAt: '实际结束', platformConfirmedAt: '平台确认', scheduledDueAt: '计划回查', scheduledFinishedAt: '回查完成', scheduleResolvedAt: '调度结束', linkedBackground: '关联后台', scheduleAttempts: '回查执行', logArchived: '已托管',
-    businessReports: '结构化报告', noBusinessReports: '暂无结构化报告或主要执行记录。', reportRevision: '修订', reportObservedAt: '业务时间', reportPublishedAt: '上报时间', reportRawPayload: '原始报告', pytestHtmlReport: 'Pytest HTML 报告', failureAnalysisReport: 'Fail 分析报告', openHtmlReport: '打开报告', openMarkdownReport: '打开报告', artifactRegisteredRunning: '已登记 · 执行中', artifactRegisteredPending: '已登记 · 待归档', reportStatusPending: '待开始', reportStatusRunning: '执行中', reportStatusSucceeded: '通过', reportStatusFailed: '失败', reportStatusPartial: '部分完成', reportStatusBlocked: '阻塞', reportStatusCancelled: '已取消', reportStatusUnknown: '未知',
+    businessReports: '结构化报告', noBusinessReports: '暂无结构化报告或主要执行记录。', reportRevision: '修订', reportObservedAt: '业务时间', reportPublishedAt: '上报时间', reportRawPayload: '原始报告', pytestHtmlReport: 'Pytest HTML 报告', failureAnalysisReport: 'Fail 分析报告', openHtmlReport: '打开报告', openMarkdownReport: '打开报告', artifactRegisteredRunning: '已登记 · 执行中', artifactRegisteredPending: '已登记 · 待归档', artifactUnavailable: '报告文件未生成或为空', reportStatusPending: '待开始', reportStatusRunning: '执行中', reportStatusSucceeded: '通过', reportStatusFailed: '失败', reportStatusPartial: '部分完成', reportStatusBlocked: '阻塞', reportStatusCancelled: '已取消', reportStatusUnknown: '未知',
     attributedSkills: '实际使用的 Skills', noAttributedSkills: '未声明使用 Skill', correctAttribution: '修正归因', attributionHistory: '归因与修正历史', runtimeDeclared: '运行时声明', operatorCorrection: '人工修正', linked: '关联', unlinked: '移除', correctionReason: '修正原因', correctionReasonHint: '说明为什么增加或移除这些 Skill，原因会永久进入审计记录。', saveCorrection: '保存修正', skillAttributionSaved: 'Skill 归因已保存', unresolvedSkills: '快照中不存在的声明', skillSnapshotOptions: '任务冻结快照中的 Skills', version: '版本', contentHash: '内容哈希', noSnapshotSkills: '该任务尚未冻结 Skill 快照。',
-    navRuntime: '运行库存', runtimeInventoryTitle: '运行库存', runtimeInventorySubtitle: '检查平台数据保护状态，以及原生 Bridge Session Runtime 的占用、归属与安全分类。', nativeRuntime: '原生 Runtime', runtimeInventoryHeadline: '原生 Session 资源与归属', inventoryNotScanned: '尚未扫描', loadingInventory: '正在扫描 Runtime 库存...', inventoryScanned: '扫描于 {time}', refreshInventory: '刷新状态', inventoryTotal: 'Session 总数', inventoryReclaimable: '可回收', inventoryBytes: 'Runtime 占用', inventoryReclaimableBytes: '可回收空间', inventoryStateSummary: '{safe} 安全 · {queued} 回收中 · {unsafe} 需排查', noBridgeSessions: '没有保留的原生 Bridge Session Runtime。',
-    bridgeCategoryTaskOwned: '任务占用', bridgeCategoryCompletedRetained: '已完成保留', bridgeCategoryOrphan: '孤立 Session', bridgeCategoryCleanupQueued: '回收中', bridgeCategoryCleanupInconsistent: '回收不一致', bridgeCategoryUnsafe: '不安全', taskOwner: '任务归属', noTaskOwner: '无任务归属', resourceRecord: 'Record', resourceCodexHome: 'Codex Home', resourceWorkspace: '工作区', resourceChatfile: 'Chatfile', resourceWorkspaceLock: '工作区锁', resourceSessionRunLock: '运行锁', lastRun: '最近运行', neverRun: '从未运行', resourcePresent: '存在', resourceMissing: '缺失', reclaimRuntime: '回收 Runtime', confirmRuntimeReclaim: '确认回收 Runtime', runtimeReclaimWarning: '原生 Session Runtime 删除后不可恢复；平台任务历史和审计记录会继续保留。', targetSession: '目标 Session', typeSessionId: '输入完整 Session ID', sessionIdConfirmation: 'session-0123456789abcdef', bridgeReclaimQueued: 'Runtime 回收作业已入队', bridgeReclaimCompleted: 'Runtime 已回收', bridgeReclaimOutcomeUnknown: '回收请求结果未知；库存已重新核对，可使用同一 Session ID 安全重试。', bridgeSessionNoLongerReclaimable: '该 Session 已不存在或当前不可回收，请刷新库存。', bridgeReclaimInProgress: '已有 Runtime 回收请求正在提交，请等待结果。',
+    navRuntime: '运行库存', runtimeInventoryTitle: '运行库存', runtimeInventorySubtitle: '检查平台数据保护状态，以及原生 Bridge Session Runtime 的占用、归属与安全分类。', nativeRuntime: '原生 Runtime', runtimeInventoryHeadline: '原生 Session 资源与归属', inventoryNotScanned: '尚未扫描', loadingInventory: '正在扫描 Runtime 库存...', inventoryScanned: '扫描于 {time}', refreshInventory: '刷新状态', inventoryTotal: 'Session 总数', inventoryReclaimable: '可回收', inventoryBytes: 'Runtime 占用', inventoryReclaimableBytes: '可释放空间', inventoryStateSummary: '{safe} 安全 · {queued} 回收中 · {unsafe} 需排查', noBridgeSessions: '没有保留的原生 Bridge Session Runtime。',
+    bridgeCategoryTaskOwned: '任务占用', bridgeCategoryCompletedRetained: '已完成保留', bridgeCategoryOrphan: '孤立 Session', bridgeCategoryCleanupQueued: '回收中', bridgeCategoryCleanupInconsistent: '回收不一致', bridgeCategoryUnsafe: '不安全', taskOwner: '任务归属', noTaskOwner: '无任务归属', resourceRecord: 'Record', resourceCodexHome: 'Codex Home', resourceWorkspace: '工作区', resourceChatfile: 'Chatfile', resourceWorkspaceLock: '工作区锁', resourceSessionRunLock: '运行锁', lastRun: '最近运行', neverRun: '从未运行', resourcePresent: '存在', resourceMissing: '缺失', deleteReleaseRuntime: '删除并释放磁盘', confirmRuntimeReclaim: '确认删除并释放 Runtime', runtimeReclaimWarning: '原生 Session Runtime 删除后不可恢复；平台任务历史和审计记录会继续保留。', targetSession: '目标 Session', typeSessionId: '输入完整 Session ID', sessionIdConfirmation: 'session-0123456789abcdef', bridgeReclaimQueued: 'Runtime 删除作业已入队', bridgeReclaimCompleted: 'Runtime 已删除并释放', bridgeReclaimOutcomeUnknown: '删除请求结果未知；库存已重新核对，可使用同一 Session ID 安全重试。', bridgeSessionNoLongerReclaimable: '该 Session 已不存在或当前不可删除，请刷新库存。', bridgeReclaimInProgress: '已有 Runtime 删除请求正在提交，请等待结果。',
     dataProtection: '数据保护', dataProtectionHeading: '数据完整性与恢复保护', loadingProtection: '正在检查数据保护状态...', noProtectionStatus: '尚未检查数据保护状态。', protectionChecked: '检查于 {time}', protectionRefreshFailed: '状态刷新失败：{error}', platformStorage: '平台数据', databaseBackup: '在线数据库备份', recoveryCheckpoint: '平台恢复检查点', terminalLogArchive: '终态日志托管', protectionHealthy: '正常', protectionDegraded: '异常', protectionPending: '待建立', protectionInProgress: '进行中', protectionRotationPending: '待轮转', sqliteCheck: 'SQLite 检查', stateInvariants: '状态约束', storageHeadroom: '最低可用空间', lastSuccess: '最近成功', nextRun: '下次计划', packageRetention: '有效包 / 保留数', auditContinuity: '审计连续性', auditHealthy: '已持久化', auditPending: '{count} 条待写入', invariantIssues: '{count} 项异常', storageAvailable: '{percent}% · {bytes}', rotationPendingDetail: '超出 {count} 份，下次成功发布后轮转', schedulerError: '调度错误', unreadablePackages: '不可读取包', archiveCoverage: '托管覆盖', archiveCoverageDetail: '{archived} / {total} 条终态日志', archiveLastVerified: '最近完整校验', archiveFailures: '托管异常', archiveFailureDetail: '{count} 条需修复',
   },
   en: {
+    workspaceTools: 'Tools & display', workbenchGuide: 'About this workbench', moreActions: 'More actions', taskReports: 'Reports', nextInstruction: 'Next instruction',
+    taskListDescription: 'Task name & objective', taskListCount: '{count} tasks', taskObjective: 'Objective',
+    expandObjective: 'Expand', collapseObjective: 'Collapse', showTaskContext: 'Task info', hideTaskContext: 'Hide info',
     brandSubtitle: 'Persistent Task Desk', navOverview: 'Overview', navTasks: 'Task Sessions', navSkills: 'Skills', navAudit: 'Operation Audit',
     fontSize: 'Text size', fontSizeSmall: 'Small text', fontSizeStandard: 'Standard text', fontSizeLarge: 'Large text',
     export: 'Export', import: 'Import', syncRuntime: 'Sync Runtime', newTask: 'New Task', executionMode: 'Execution Mode',
     overviewHeadline: 'A task is a session that persists until completion', overviewDescription: 'Each task owns one persistent session. Review or continue every turn, then explicitly archive the completed task.',
     liveFloor: 'Current Tasks', currentSessionsHeading: 'Task Sessions', recentActivity: 'Recent Activity', recentOperations: 'Recent Operations', viewAll: 'View All',
     completedSessions: 'Completed Sessions', recentHistory: 'Recent History', viewHistory: 'View History', loadMore: 'Load more', newer: 'Newer', older: 'Older',
-    filterCurrent: 'Current', filterRunning: 'Running', filterHistory: 'History',
+    filterCurrent: 'Current', filterRunning: 'Running', filterHistory: 'History', taskProjectFilter: 'Project', taskTagFilter: 'Tag', allProjects: 'All projects', allTags: 'All tags', noFilteredTasks: 'No tasks match the current filters.',
     skillsNote: 'A versioned snapshot of managed and built-in Codex skills is frozen on the first task turn.', newSkill: 'New Skill', importSkillZip: 'Import ZIP',
     taskId: 'Task ID', eventType: 'Event type', searchAudit: 'Search operations', filter: 'Filter', persistentSession: 'Persistent Session',
     businessSummary: 'Task Summary', agentRecords: 'Agent Records', worklog: 'Agent Worklog', skillInvocations: 'Skill Invocations', noSkillInvocations: 'No automatically recorded Skill invocation exists for this Session.', taskTerminal: 'Codex CLI', commands: 'Agent Commands', background: 'Background & Schedule', operations: 'Operation Audit', continuePlaceholder: 'Enter instructions to start or recover this task',
@@ -275,7 +285,7 @@ const messages = {
     idle: 'Ready', pending: 'Pending', leased: 'Running', queued: 'Queued', running: 'Running', recovering: 'Recovering', stopping: 'Stopping', waiting_scheduled: 'Background Running', waiting_review: 'Review', waiting_input: 'Needs Input', completed: 'Completed', succeeded: 'Succeeded', failed: 'Failed', lost: 'Process lost', cancelled: 'Cancelled', interrupted: 'Interrupted', stopped: 'Stopped', recoverable: 'Recoverable', disabled: 'Disabled',
     open: 'Open', terminal: 'Terminal', start: 'Start Task', recover: 'Recover Task', restoreArchived: 'Restore & Continue', resetSession: 'Reset Context', continueTask: 'Continue Task', reviewTask: 'Review Result', complete: 'Complete', stop: 'Stop', edit: 'Edit', delete: 'Delete', close: 'Close', save: 'Save', cancel: 'Cancel',
     noCurrentTasks: 'No current task. Create one to start an independent session.', noHistory: 'No completed session yet.', noAudit: 'No matching operation record.', noSkills: 'No skill is available.',
-    taskName: 'Task name', objective: 'Task objective / initial instruction', workingDir: 'Working directory', notes: 'Notes', enabled: 'Enabled',
+    taskName: 'Task name', objective: 'Task objective / initial instruction', workingDir: 'Working directory', notes: 'Notes', taskProject: 'Project classification', taskTags: 'Custom tags (comma separated)', enabled: 'Enabled',
     maxRetries: 'Interruption retries', autoResume: 'Auto-recover after service restart', createAndStart: 'Create & Start', updateTask: 'Update Task', createTask: 'New Task Session', editTask: 'Edit Task',
     idHint: 'Letters, numbers, hyphens, and underscores only', pathHint: 'Relative paths resolve from the task workspace root; absolute paths must be under an allowed root.',
     taskContext: 'Task Context', sessionId: 'Session ID', status: 'Status', runCount: 'Runs', recoveryAttempts: 'Auto recoveries', createdAt: 'Created', finishedAt: 'Completed', workspace: 'Workspace', nextCheck: 'Next check', activeBackground: 'Active background runs', activeSchedules: 'Active scheduled checks',
@@ -286,10 +296,10 @@ const messages = {
     runtimeReady: 'Executor ready', runtimeMissing: 'Executor unavailable', runtimePaused: 'Task execution paused', runtimeConnectionIssue: 'Platform connection issue', runtimeReconnecting: 'Reconnecting', runtimeDashboardUnavailable: 'Platform status refresh failed', dashboardRequestTimeout: 'Dashboard request timed out', requestTimeout: 'Request timed out; outcome unknown. Refresh status before retrying.', runtimeUnsupportedPlatform: 'Current platform is unsupported', runtimeExecutorUnavailable: 'Codex executor unavailable', runtimeWorkerUnavailable: 'Session Worker unavailable', runtimeExecutionUserUnsafe: 'Execution account policy is unsafe', runtimeWorkspaceUnavailable: 'Task workspace unavailable', runtimeStorageUnavailable: 'Persistent storage unavailable', runtimeStorageLow: 'Persistent storage is low', runtimeProcessMismatch: 'Execution process identity mismatch', runtimeSupervisorUnavailable: 'Web Supervisor supervision lost', runtimeLauncherUnavailable: 'Host Launcher supervision lost', runtimeMaintenance: 'Platform maintenance in progress', fullAccess: 'Full access', apiRequests: 'API', logStreams: 'Logs', synced: 'Runtime status synchronized', imported: 'Configuration imported', confirmCompleteTask: 'Complete and archive this task? The Codex CLI will end and its transcript will remain available as read-only history.', confirmRestoreTask: 'Restore this archived task and continue its latest Codex Session?', confirmResetTask: 'Reset the current Codex context? The Task configuration, ID, and history remain; the old Runtime is reclaimed and the next run creates a new Session.', confirmDeleteTask: 'Delete this session and all of its worklogs?', confirmDeleteSkill: 'Delete this managed skill?',
     payload: 'Event details', actor: 'Actor', requestId: 'Request ID', turnInput: 'Turn input', fullCommand: 'Full command', commandOutput: 'Execution output', attempt: 'Attempt', exitCode: 'Exit code', pid: 'Process ID', signal: 'Exit signal', attemptError: 'Error', configuredWorkingDir: 'Configured working directory', runtimeWorkingDir: 'Runtime working directory', runtimeDirUnreported: 'Not reported by runtime', noWorklog: 'No Agent worklog has been recorded for this Session.', noOperations: 'No control-plane operation has been recorded for this Session.', noAttempts: 'Task Terminal is waiting for output.', noExecutions: 'No command execution has been recorded for this session.', noBackground: 'No background execution or scheduled check has been recorded for this Session.', externalExecution: 'Background execution', scheduledCheck: 'Scheduled check', generation: 'Generation', interval: 'Check interval', backgroundCommand: 'Full background command', backgroundOutput: 'Business process output', commandPath: 'Command record', viewFullLog: 'View full raw output', sessionStdout: 'Agent stdout', sessionStderr: 'Agent stderr', viewInlineOutput: 'Open terminal', hideInlineOutput: 'Collapse terminal', openRawOutput: 'Open complete raw output', loadingOutput: 'Connecting to live terminal...', liveOutput: 'Live', reconnectingOutput: 'Reconnecting', completeOutput: 'Finished', inlineOutputLimit: 'Inline limit reached', emptyOutput: '(empty output)', outputBytes: 'bytes', logPath: 'Log', donePath: 'Done marker', statePath: 'State file', lastObservation: 'Last observation', archivePreservation: 'Log preservation', archiveBytes: 'Preserved bytes', archiveSha256: 'SHA-256', archiveError: 'Preservation error', task: 'Task', unknown: 'Unknown', loadFailed: 'Load failed', actionFailed: 'Action failed',
     checkNotNeeded: 'No check needed', scheduleOutcome: 'Schedule outcome', backgroundAlreadyFinished: 'The background task has already finished, so this scheduled check did not need to run. See the linked background execution for the business result.', backgroundPytestExecution: 'pytest background execution', processStartedAt: 'Actually started', processFinishedAt: 'Actually finished', platformConfirmedAt: 'Platform confirmed', scheduledDueAt: 'Check planned', scheduledFinishedAt: 'Check completed', scheduleResolvedAt: 'Schedule resolved', linkedBackground: 'Linked execution', scheduleAttempts: 'Check attempts', logArchived: 'Preserved',
-    businessReports: 'Structured Reports', noBusinessReports: 'No structured report or primary execution has been recorded.', reportRevision: 'Revision', reportObservedAt: 'Observed', reportPublishedAt: 'Published', reportRawPayload: 'Raw report', pytestHtmlReport: 'Pytest HTML report', failureAnalysisReport: 'Failure analysis report', openHtmlReport: 'Open report', openMarkdownReport: 'Open report', artifactRegisteredRunning: 'Registered · Running', artifactRegisteredPending: 'Registered · Awaiting archive', reportStatusPending: 'Pending', reportStatusRunning: 'Running', reportStatusSucceeded: 'Passed', reportStatusFailed: 'Failed', reportStatusPartial: 'Partial', reportStatusBlocked: 'Blocked', reportStatusCancelled: 'Cancelled', reportStatusUnknown: 'Unknown',
+    businessReports: 'Structured Reports', noBusinessReports: 'No structured report or primary execution has been recorded.', reportRevision: 'Revision', reportObservedAt: 'Observed', reportPublishedAt: 'Published', reportRawPayload: 'Raw report', pytestHtmlReport: 'Pytest HTML report', failureAnalysisReport: 'Failure analysis report', openHtmlReport: 'Open report', openMarkdownReport: 'Open report', artifactRegisteredRunning: 'Registered · Running', artifactRegisteredPending: 'Registered · Awaiting archive', artifactUnavailable: 'Report file was not generated or is empty', reportStatusPending: 'Pending', reportStatusRunning: 'Running', reportStatusSucceeded: 'Passed', reportStatusFailed: 'Failed', reportStatusPartial: 'Partial', reportStatusBlocked: 'Blocked', reportStatusCancelled: 'Cancelled', reportStatusUnknown: 'Unknown',
     attributedSkills: 'Skills Actually Used', noAttributedSkills: 'No Skill declared', correctAttribution: 'Correct Attribution', attributionHistory: 'Attribution and Correction History', runtimeDeclared: 'Runtime declaration', operatorCorrection: 'Operator correction', linked: 'Linked', unlinked: 'Removed', correctionReason: 'Correction reason', correctionReasonHint: 'Explain why these Skills are added or removed. The reason becomes a permanent audit record.', saveCorrection: 'Save Correction', skillAttributionSaved: 'Skill attribution saved', unresolvedSkills: 'Declarations missing from snapshot', skillSnapshotOptions: 'Skills in the Frozen Task Snapshot', version: 'Version', contentHash: 'Content hash', noSnapshotSkills: 'This task does not have a frozen Skill snapshot yet.',
-    navRuntime: 'Runtime Inventory', runtimeInventoryTitle: 'Runtime Inventory', runtimeInventorySubtitle: 'Inspect platform data protection and native Bridge Session Runtime usage, ownership, and safety.', nativeRuntime: 'Native Runtime', runtimeInventoryHeadline: 'Native Session Resources & Ownership', inventoryNotScanned: 'Not scanned yet', loadingInventory: 'Scanning Runtime inventory...', inventoryScanned: 'Scanned {time}', refreshInventory: 'Refresh Status', inventoryTotal: 'All Sessions', inventoryReclaimable: 'Reclaimable', inventoryBytes: 'Runtime Usage', inventoryReclaimableBytes: 'Reclaimable Space', inventoryStateSummary: '{safe} safe · {queued} reclaiming · {unsafe} need review', noBridgeSessions: 'No retained native Bridge Session Runtime.',
-    bridgeCategoryTaskOwned: 'Task Owned', bridgeCategoryCompletedRetained: 'Completed Retained', bridgeCategoryOrphan: 'Orphan', bridgeCategoryCleanupQueued: 'Reclaiming', bridgeCategoryCleanupInconsistent: 'Cleanup Inconsistent', bridgeCategoryUnsafe: 'Unsafe', taskOwner: 'Task Owner', noTaskOwner: 'No Task Owner', resourceRecord: 'Record', resourceCodexHome: 'Codex Home', resourceWorkspace: 'Workspace', resourceChatfile: 'Chatfile', resourceWorkspaceLock: 'Workspace Lock', resourceSessionRunLock: 'Run Lock', lastRun: 'Last Run', neverRun: 'Never', resourcePresent: 'Present', resourceMissing: 'Missing', reclaimRuntime: 'Reclaim Runtime', confirmRuntimeReclaim: 'Confirm Runtime Reclaim', runtimeReclaimWarning: 'Native Session Runtime cannot be recovered after deletion. Platform task history and audit records remain.', targetSession: 'Target Session', typeSessionId: 'Enter the full Session ID', sessionIdConfirmation: 'session-0123456789abcdef', bridgeReclaimQueued: 'Runtime reclaim job queued', bridgeReclaimCompleted: 'Runtime reclaimed', bridgeReclaimOutcomeUnknown: 'Reclaim outcome is unknown. Inventory was reconciled; retrying the same Session ID is safe.', bridgeSessionNoLongerReclaimable: 'This Session no longer exists or is not reclaimable. Refresh inventory.', bridgeReclaimInProgress: 'A Runtime reclaim request is already being submitted. Wait for its result.',
+    navRuntime: 'Runtime Inventory', runtimeInventoryTitle: 'Runtime Inventory', runtimeInventorySubtitle: 'Inspect platform data protection and native Bridge Session Runtime usage, ownership, and safety.', nativeRuntime: 'Native Runtime', runtimeInventoryHeadline: 'Native Session Resources & Ownership', inventoryNotScanned: 'Not scanned yet', loadingInventory: 'Scanning Runtime inventory...', inventoryScanned: 'Scanned {time}', refreshInventory: 'Refresh Status', inventoryTotal: 'All Sessions', inventoryReclaimable: 'Reclaimable', inventoryBytes: 'Runtime Usage', inventoryReclaimableBytes: 'Releasable Space', inventoryStateSummary: '{safe} safe · {queued} reclaiming · {unsafe} need review', noBridgeSessions: 'No retained native Bridge Session Runtime.',
+    bridgeCategoryTaskOwned: 'Task Owned', bridgeCategoryCompletedRetained: 'Completed Retained', bridgeCategoryOrphan: 'Orphan', bridgeCategoryCleanupQueued: 'Reclaiming', bridgeCategoryCleanupInconsistent: 'Cleanup Inconsistent', bridgeCategoryUnsafe: 'Unsafe', taskOwner: 'Task Owner', noTaskOwner: 'No Task Owner', resourceRecord: 'Record', resourceCodexHome: 'Codex Home', resourceWorkspace: 'Workspace', resourceChatfile: 'Chatfile', resourceWorkspaceLock: 'Workspace Lock', resourceSessionRunLock: 'Run Lock', lastRun: 'Last Run', neverRun: 'Never', resourcePresent: 'Present', resourceMissing: 'Missing', deleteReleaseRuntime: 'Delete & Release Disk', confirmRuntimeReclaim: 'Confirm Runtime Deletion', runtimeReclaimWarning: 'Native Session Runtime cannot be recovered after deletion. Platform task history and audit records remain.', targetSession: 'Target Session', typeSessionId: 'Enter the full Session ID', sessionIdConfirmation: 'session-0123456789abcdef', bridgeReclaimQueued: 'Runtime deletion queued', bridgeReclaimCompleted: 'Runtime deleted and released', bridgeReclaimOutcomeUnknown: 'Deletion outcome is unknown. Inventory was reconciled; retrying the same Session ID is safe.', bridgeSessionNoLongerReclaimable: 'This Session no longer exists or cannot be deleted. Refresh inventory.', bridgeReclaimInProgress: 'A Runtime deletion request is already being submitted. Wait for its result.',
     dataProtection: 'Data Protection', dataProtectionHeading: 'Data Integrity & Recovery Protection', loadingProtection: 'Checking data protection status...', noProtectionStatus: 'Data protection status has not been checked.', protectionChecked: 'Checked {time}', protectionRefreshFailed: 'Status refresh failed: {error}', platformStorage: 'Platform Data', databaseBackup: 'Online Database Backups', recoveryCheckpoint: 'Recovery Checkpoints', terminalLogArchive: 'Terminal Log Preservation', protectionHealthy: 'Healthy', protectionDegraded: 'Degraded', protectionPending: 'Pending', protectionInProgress: 'In Progress', protectionRotationPending: 'Rotation Pending', sqliteCheck: 'SQLite Check', stateInvariants: 'State Invariants', storageHeadroom: 'Lowest Free Space', lastSuccess: 'Last Success', nextRun: 'Next Run', packageRetention: 'Available / Retention', auditContinuity: 'Audit Continuity', auditHealthy: 'Persisted', auditPending: '{count} pending', invariantIssues: '{count} issues', storageAvailable: '{percent}% · {bytes}', rotationPendingDetail: '{count} excess; rotates after next successful publish', schedulerError: 'Scheduler Error', unreadablePackages: 'Unreadable Packages', archiveCoverage: 'Preservation Coverage', archiveCoverageDetail: '{archived} / {total} terminal logs', archiveLastVerified: 'Last Full Verification', archiveFailures: 'Preservation Failures', archiveFailureDetail: '{count} require repair',
   },
 };
@@ -765,6 +775,7 @@ async function requestTaskOperation(task, operation) {
 function toast(message, level = 'info') {
   const element = $('#toast');
   const text = String(message || '');
+  $('#toastMarker').textContent = level === 'error' ? '!' : 'i';
   $('#toastMessage').textContent = text;
   element.className = `toast ${level}`;
   clearTimeout(toast.timer);
@@ -863,29 +874,69 @@ function isReviewTask(task) {
   return REVIEW_STATUSES.includes(task?.status);
 }
 
-function taskCard(task) {
+function taskClassification(task, { showProject = true } = {}) {
+  const project = String(task?.project || 'cloudRecord').trim() || 'cloudRecord';
+  const tags = Array.isArray(task?.tags) ? task.tags : [];
+  return `<span class="task-classification">${showProject ? `<span class="task-project-badge">${escapeHtml(project)}</span>` : ''}${tags.map((tag) => `<span class="task-tag">${escapeHtml(tag)}</span>`).join('')}</span>`;
+}
+
+function taskClassificationValues() {
+  const tasks = state.dashboard.sessions || [];
+  const projects = [...new Set(tasks.map((task) => String(task.project || 'cloudRecord').trim() || 'cloudRecord'))]
+    .sort((left, right) => left.localeCompare(right));
+  const tags = [...new Set(tasks.flatMap((task) => (Array.isArray(task.tags) ? task.tags : [])))]
+    .map((tag) => String(tag).trim()).filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
+  return { projects, tags };
+}
+
+function renderTaskClassificationFilters() {
+  const projectSelect = $('#taskProjectFilter');
+  const tagSelect = $('#taskTagFilter');
+  if (!projectSelect || !tagSelect) return;
+  const { projects, tags } = taskClassificationValues();
+  if (state.taskProjectFilter && !projects.includes(state.taskProjectFilter)) state.taskProjectFilter = '';
+  if (state.taskTagFilter && !tags.includes(state.taskTagFilter)) state.taskTagFilter = '';
+  projectSelect.innerHTML = [`<option value="">${escapeHtml(tr('allProjects'))}</option>`, ...projects.map((project) => `<option value="${escapeHtml(project)}">${escapeHtml(project)}</option>`)].join('');
+  tagSelect.innerHTML = [`<option value="">${escapeHtml(tr('allTags'))}</option>`, ...tags.map((tag) => `<option value="${escapeHtml(tag)}">${escapeHtml(tag)}</option>`)].join('');
+  projectSelect.value = state.taskProjectFilter;
+  tagSelect.value = state.taskTagFilter;
+}
+
+function taskCard(task, layout = 'list') {
   const running = isActiveTask(task);
   const review = isReviewTask(task);
   const attention = ['failed', 'interrupted', 'stopped'].includes(task.status) || task.recoveryState === 'recoverable';
   const actionLabel = review ? tr('reviewTask') : (attention ? tr('recover') : tr('start'));
+  const grid = layout === 'grid';
+  const badge = `<span class="status-badge ${escapeHtml(statusClass(task))}">${escapeHtml(statusLabel(task))}</span>`;
   return `
-    <article class="task-card ${escapeHtml(statusClass(task))}">
-      <button class="card-hit" data-action="open-task" data-id="${escapeHtml(task.id)}" aria-label="${escapeHtml(tr('open'))}"></button>
-      <div class="task-card-head">
-        <div class="task-identity">
-          <span class="session-symbol">S</span>
-          <div><h3>${escapeHtml(task.name)}</h3><code>${escapeHtml(task.id)}</code></div>
+    <article class="task-card${grid ? ' task-card-grid' : ''} ${escapeHtml(statusClass(task))}">
+      ${grid ? `<button type="button" class="card-hit" data-action="open-task" data-id="${escapeHtml(task.id)}" aria-label="${escapeHtml(`${tr('open')} ${task.name}`)}"></button>` : ''}
+      ${grid ? `<div class="task-card-overline"><span class="task-project-badge">${escapeHtml(task.project || 'cloudRecord')}</span>${badge}</div>` : ''}
+      <div class="task-row-main">
+        <div class="task-card-head">
+          <div class="task-identity">
+            <span class="session-symbol">S</span>
+            <div><h3><button class="task-title-button" data-action="open-task" data-id="${escapeHtml(task.id)}">${escapeHtml(task.name)}</button></h3><code>${escapeHtml(task.id)}</code></div>
+          </div>
         </div>
-        <span class="status-badge ${escapeHtml(statusClass(task))}">${escapeHtml(statusLabel(task))}</span>
+        ${taskClassification(task, { showProject: !grid })}
+        <details class="task-description" data-objective-id="${escapeHtml(task.id)}"${state.expandedTaskObjectives.has(task.id) ? ' open' : ''}>
+          <summary><span class="task-objective-label">${escapeHtml(tr('taskObjective'))}</span><span class="task-objective-preview">${escapeHtml(task.objective || task.summary || '-')}</span><span class="objective-expand">${escapeHtml(tr('expandObjective'))}</span><span class="objective-collapse">${escapeHtml(tr('collapseObjective'))}</span></summary>
+          <p class="task-objective">${escapeHtml(task.objective || task.summary || '-')}</p>
+        </details>
       </div>
-      <div class="task-activity" aria-hidden="true"><span></span></div>
-      <p class="task-objective">${escapeHtml(task.objective || task.summary || '-') }</p>
-      <dl class="session-meta">
-        <div><dt>SESSION</dt><dd>${escapeHtml(task.id)}</dd></div>
-        <div><dt>${escapeHtml(tr('workspace'))}</dt><dd>${escapeHtml(task.workingDir || '.')}</dd></div>
-        <div><dt>${escapeHtml(task.nextScheduledAt ? tr('nextCheck') : tr('runCount'))}</dt><dd>${task.nextScheduledAt ? escapeHtml(formatTime(task.nextScheduledAt)) : Number(task.runCount || 0)}</dd></div>
-      </dl>
+      <div class="task-row-status">
+        ${grid ? '' : badge}
+        <dl class="session-meta">
+          <div><dt>${escapeHtml(tr('workspace'))}</dt><dd>${escapeHtml(task.workingDir || '.')}</dd></div>
+          <div><dt>${escapeHtml(tr('runCount'))}</dt><dd>${Number(task.runCount || 0)}</dd></div>
+          ${task.nextScheduledAt || grid ? `<div><dt>${escapeHtml(tr('nextCheck'))}</dt><dd>${task.nextScheduledAt ? escapeHtml(formatTime(task.nextScheduledAt)) : '-'}</dd></div>` : ''}
+        </dl>
+      </div>
       <div class="card-actions">
+        <button class="button secondary small" data-action="open-task-reports" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('taskReports'))}</button>
         <button class="button secondary small" data-action="open-task-terminal" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('terminal'))}</button>
         ${running
           ? `<button class="button danger small" data-action="stop-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('stop'))}</button>`
@@ -898,7 +949,7 @@ function historyRow(task) {
   return `
     <button class="history-row" data-action="open-task" data-id="${escapeHtml(task.id)}">
       <span class="history-mark">S</span>
-      <span class="history-main"><strong>${escapeHtml(task.name)}</strong><small>${escapeHtml(task.summary || task.objective || '-')}</small></span>
+      <span class="history-main"><strong>${escapeHtml(task.name)}</strong><small>${escapeHtml(task.summary || task.objective || '-')}</small>${taskClassification(task)}</span>
       <span class="history-session">${escapeHtml(task.id)}</span>
       <span class="history-time">${escapeHtml(formatTime(task.archivedAt || task.lastFinishedAt))}</span>
       <span class="status-badge completed">${escapeHtml(tr('completed'))}</span>
@@ -1041,8 +1092,13 @@ function reportArtifactDisplayName(artifact, declarations, fallbackLabel) {
   if (artifact?.kind !== 'pytest-html' || !/^result\.html?$/i.test(fileName)) return fileName;
   const declaration = (declarations || []).find((candidate) => (
     candidate?.kind === artifact.kind && String(candidate.key || '') === artifactKey
+      && (!artifact.reportKey || candidate.reportKey === artifact.reportKey)
   ));
   return reportArtifactNameFromPath(declaration?.path) || (artifactKey ? `${artifactKey}.html` : fileName);
+}
+
+function reportArtifactIdentity(artifact) {
+  return `${artifact.reportKey || ''}\0${artifact.kind}\0${artifact.key || artifact.fileName || artifact.id || ''}`;
 }
 
 function reportArtifactViewerUrl(artifactUrl, displayName) {
@@ -1061,9 +1117,9 @@ function reportArtifactLinks(
     { kind: 'failure-analysis-markdown', label: 'failureAnalysisReport', action: 'openMarkdownReport' },
   ];
   const managed = artifacts || [];
-  const managedKeys = new Set(managed.map((artifact) => `${artifact.kind}\0${artifact.key || artifact.fileName || ''}`));
+  const managedKeys = new Set(managed.map(reportArtifactIdentity));
   const pending = (registeredArtifacts || []).filter((artifact) => (
-    !managedKeys.has(`${artifact.kind}\0${artifact.key || artifact.fileName || ''}`)
+    !managedKeys.has(reportArtifactIdentity(artifact))
   ));
   return groups.map((group) => {
     const reports = managed.filter((artifact) => artifact.kind === group.kind && artifact.url);
@@ -1078,6 +1134,9 @@ function reportArtifactLinks(
       ${registrations.map((artifact) => {
     const running = artifact.executionStatus === 'running' || reportStatus === 'running';
     const displayName = reportArtifactDisplayName(artifact, artifactDeclarations, group.label);
+    if (artifact.available === false) {
+      return `<div class="report-artifact-pending report-artifact-unavailable"><strong>${escapeHtml(displayName)}</strong><b>${escapeHtml(tr('artifactUnavailable'))}</b></div>`;
+    }
     const content = `<strong>${escapeHtml(displayName)}</strong><b>${escapeHtml(tr(running ? 'artifactRegisteredRunning' : 'artifactRegisteredPending'))}</b>`;
     return artifact.url
       ? `<a class="report-artifact-pending" href="${escapeHtml(reportArtifactViewerUrl(artifact.url, displayName))}" target="_blank" rel="noopener">${content}</a>`
@@ -1390,7 +1449,7 @@ function latestReportRevisions(reports) {
 function explicitBusinessTestRuns(reports, externalAttempts, executions, steps) {
   const commandExecutions = new Map((executions || []).map((execution) => [execution.id, execution]));
   const reportsByRun = new Map();
-  for (const report of latestReportRevisions(reports)) {
+  for (const report of reports || []) {
     if (!report.stepRunId) continue;
     if (!reportsByRun.has(report.stepRunId)) reportsByRun.set(report.stepRunId, []);
     reportsByRun.get(report.stepRunId).push(report);
@@ -1405,7 +1464,7 @@ function explicitBusinessTestRuns(reports, externalAttempts, executions, steps) 
   for (const step of [...steps].sort((left, right) => left.ordinal - right.ordinal)) {
     for (const stepRun of [...(step.runs || [])].sort((left, right) => left.runNumber - right.runNumber)) {
       const runReports = reportsByRun.get(stepRun.id) || [];
-      const report = [...runReports].sort((left, right) => {
+      const report = latestReportRevisions(runReports).sort((left, right) => {
         const typePriority = Number(isReportedTestResult(left)) - Number(isReportedTestResult(right));
         return typePriority || Date.parse(left.publishedAt || 0) - Date.parse(right.publishedAt || 0);
       }).at(-1);
@@ -1426,6 +1485,7 @@ function explicitBusinessTestRuns(reports, externalAttempts, executions, steps) 
         step,
         stepRun,
         report,
+        artifactReports: runReports,
         externalAttempt,
         command,
         commandPath: primary?.commandPath || externalAttempt?.commandPath || reported?.commandPath || '',
@@ -1453,14 +1513,25 @@ function businessTestRuns(reports, externalAttempts, executions, steps = []) {
   }
   const commandExecutions = new Map((executions || []).map((execution) => [execution.id, execution]));
   const runs = new Map();
+  const reportHistory = new Map();
+  for (const report of reports || []) {
+    const key = report.reportKey || report.id;
+    if (!reportHistory.has(key)) reportHistory.set(key, []);
+    reportHistory.get(key).push(report);
+  }
   const orderedReports = latestReportRevisions(reports).sort((left, right) => (
     Date.parse(left.publishedAt || left.observedAt || 0) - Date.parse(right.publishedAt || right.observedAt || 0)
   ));
 
   for (const report of orderedReports) {
     const primary = report.primaryExecution;
+    const artifactReports = reportHistory.get(report.reportKey || report.id) || [report];
     if (!primary || !isPytestCommand(primary.command)) {
-      if (isReportedTestResult(report)) runs.set(`report:${report.reportKey || report.id}`, reportedTestRun(report));
+      if (isReportedTestResult(report)) {
+        runs.set(`report:${report.reportKey || report.id}`, {
+          ...reportedTestRun(report), artifactReports,
+        });
+      }
       continue;
     }
     const key = reportExecutionKey(report);
@@ -1469,6 +1540,7 @@ function businessTestRuns(reports, externalAttempts, executions, steps = []) {
       ...existing,
       id: existing.id || report.id,
       report,
+      artifactReports: [...(existing.artifactReports || []), ...artifactReports],
       command: primary.command,
       commandPath: primary.commandPath,
       workingDirectory: primary.workingDirectory,
@@ -1783,14 +1855,37 @@ function businessRegressionHtml(run, index) {
     </header>
     <div class="business-regression-meta"><span>${escapeHtml(tr('startedAtShort'))}</span><time datetime="${escapeHtml(run.startedAt || '')}">${escapeHtml(formatTimelineTime(run.startedAt))}</time>${skills}</div>
     <div class="business-regression-command"><span>${escapeHtml(tr('pytestCommand'))}</span><pre><b aria-hidden="true">$</b> ${escapeHtml(run.command)}</pre></div>
-    ${reportArtifactLinks(
-      run.report?.artifacts,
-      run.report?.registeredArtifacts,
-      run.report?.status,
-      run.report?.artifactDeclarations,
-    )}
+    ${businessRunArtifactLinks(run)}
     ${completion}
   </article>`;
+}
+
+function businessRunArtifactLinks(run) {
+  const reports = run.artifactReports?.length ? run.artifactReports : [run.report].filter(Boolean);
+  const artifacts = new Map();
+  const registered = new Map();
+  const declarations = new Map();
+  for (const report of [...reports].sort((left, right) => (
+    Date.parse(left.publishedAt || 0) - Date.parse(right.publishedAt || 0)
+      || Number(left.revision || 0) - Number(right.revision || 0)
+  ))) {
+    const reportKey = report.reportKey || report.id || '';
+    for (const artifact of report.artifacts || []) {
+      const scopedArtifact = { ...artifact, reportKey };
+      artifacts.set(reportArtifactIdentity(scopedArtifact), scopedArtifact);
+    }
+    for (const artifact of report.registeredArtifacts || []) {
+      const scopedArtifact = { ...artifact, reportKey };
+      registered.set(reportArtifactIdentity(scopedArtifact), scopedArtifact);
+    }
+    for (const artifact of report.artifactDeclarations || []) {
+      const scopedArtifact = { ...artifact, reportKey };
+      declarations.set(reportArtifactIdentity(scopedArtifact), scopedArtifact);
+    }
+  }
+  return reportArtifactLinks(
+    [...artifacts.values()], [...registered.values()], run.report?.status, [...declarations.values()],
+  );
 }
 
 function businessRunIndexAt(runs, value) {
@@ -3713,7 +3808,7 @@ function renderOverview() {
   const current = tasks.filter((task) => task.status !== 'completed');
   const history = tasks.filter((task) => task.status === 'completed');
   renderHtml('overviewTasks', '#overviewTaskGrid', current.length
-    ? current.slice(0, 8).map(taskCard).join('')
+    ? current.slice(0, 8).map((task) => taskCard(task, 'grid')).join('')
     : `<div class="empty-state span-all">${escapeHtml(tr('noCurrentTasks'))}</div>`);
   renderHtml('overviewHistory', '#overviewHistoryList', history.length
     ? history.slice(0, 6).map(historyRow).join('')
@@ -3723,21 +3818,30 @@ function renderOverview() {
 
 function filteredTasks() {
   const tasks = state.dashboard.sessions || [];
-  if (state.taskFilter === 'history') return tasks.filter((task) => task.status === 'completed');
-  if (state.taskFilter === 'running') return tasks.filter(isActiveTask);
-  return tasks.filter((task) => task.status !== 'completed');
+  return tasks.filter((task) => {
+    if (state.taskFilter === 'history' && task.status !== 'completed') return false;
+    if (state.taskFilter === 'running' && !isActiveTask(task)) return false;
+    if (state.taskFilter === 'current' && task.status === 'completed') return false;
+    if (state.taskProjectFilter && (task.project || 'cloudRecord') !== state.taskProjectFilter) return false;
+    if (state.taskTagFilter && !(task.tags || []).includes(state.taskTagFilter)) return false;
+    return true;
+  });
 }
 
 function renderTasks() {
+  renderTaskClassificationFilters();
   const tasks = filteredTasks();
+  $('#taskListCount').textContent = trf('taskListCount', { count: tasks.length });
   const historyMode = state.taskFilter === 'history';
   $('#taskGrid').classList.toggle('history-mode', historyMode);
   if (!tasks.length) {
-    renderHtml('tasks', '#taskGrid', `<div class="empty-state span-all">${escapeHtml(tr(historyMode ? 'noHistory' : 'noCurrentTasks'))}</div>`);
+    const emptyKey = state.taskProjectFilter || state.taskTagFilter
+      ? 'noFilteredTasks' : (historyMode ? 'noHistory' : 'noCurrentTasks');
+    renderHtml('tasks', '#taskGrid', `<div class="empty-state span-all">${escapeHtml(tr(emptyKey))}</div>`);
     $('#loadMoreTasksBtn').classList.add('hidden');
     return;
   }
-  renderHtml('tasks', '#taskGrid', historyMode ? tasks.map(historyRow).join('') : tasks.map(taskCard).join(''));
+  renderHtml('tasks', '#taskGrid', historyMode ? tasks.map(historyRow).join('') : tasks.map((task) => taskCard(task)).join(''));
   $('#loadMoreTasksBtn').classList.toggle('hidden', !(state.dashboard.taskPage?.hasMore) || state.taskLimit >= state.taskLimitMax);
 }
 
@@ -3950,7 +4054,7 @@ function bridgeInventoryRow(session) {
         <span><b>${escapeHtml(tr('lastRun'))}</b>${escapeHtml(lastRun)}</span>
       </div>
       <div class="inventory-action">
-        ${session.reclaimable ? `<button class="button danger small" data-action="reclaim-bridge-session" data-id="${escapeHtml(session.sessionId)}"${state.bridgeReclaimSubmitting ? ' disabled' : ''}>${escapeHtml(tr('reclaimRuntime'))}</button>` : ''}
+        ${session.reclaimable ? `<button class="button danger small" data-action="reclaim-bridge-session" data-id="${escapeHtml(session.sessionId)}"${state.bridgeReclaimSubmitting ? ' disabled' : ''}>${escapeHtml(tr('deleteReleaseRuntime'))}</button>` : ''}
       </div>
     </article>`;
 }
@@ -4262,6 +4366,8 @@ function openTaskEditor(task = null) {
     <label class="field"><span>ID</span><input name="id" required maxlength="64" ${task ? 'disabled' : ''} value="${escapeHtml(task?.id || '')}"><small>${escapeHtml(tr('idHint'))}</small></label>
     <label class="field full"><span>${escapeHtml(tr('objective'))}</span><textarea name="objective" required maxlength="262144">${escapeHtml(task?.objective || '')}</textarea></label>
     <label class="field full"><span>${escapeHtml(tr('notes'))}</span><textarea name="notes" maxlength="262144">${escapeHtml(task?.notes || '')}</textarea></label>
+    <label class="field"><span>${escapeHtml(tr('taskProject'))}</span><input name="project" maxlength="100" value="${escapeHtml(task?.project || 'cloudRecord')}"></label>
+    <label class="field"><span>${escapeHtml(tr('taskTags'))}</span><input name="tags" maxlength="10000" value="${escapeHtml((task?.tags || []).join(', '))}"></label>
     <label class="field"><span>${escapeHtml(tr('workingDir'))}</span><input name="workingDir" required maxlength="4096" value="${escapeHtml(task?.workingDir || '.')}"><small>${escapeHtml(tr('pathHint'))}</small></label>
     <label class="field"><span>${escapeHtml(tr('maxRetries'))}</span><input type="number" name="maxRetries" min="0" max="20" value="${Number(task?.maxRetries ?? 2)}"></label>
     <label class="check-field"><input type="checkbox" name="enabled" ${task?.enabled === false ? '' : 'checked'}><span>${escapeHtml(tr('enabled'))}</span></label>
@@ -4291,6 +4397,8 @@ async function saveTask(event) {
     name: form.get('name'),
     objective: form.get('objective'),
     notes: form.get('notes'),
+    project: form.get('project') || 'cloudRecord',
+    tags: [...new Set(String(form.get('tags') || '').split(',').map((tag) => tag.trim()).filter(Boolean))],
     workingDir: form.get('workingDir') || '.',
     maxRetries: Number(form.get('maxRetries') || 0),
     enabled: form.get('enabled') === 'on',
@@ -4336,6 +4444,8 @@ function taskContext(task) {
     <dl>
       <div><dt>${escapeHtml(tr('status'))}</dt><dd><span class="status-badge ${escapeHtml(statusClass(task))}">${escapeHtml(statusLabel(task))}</span></dd></div>
       <div><dt>${escapeHtml(tr('sessionId'))}</dt><dd><code>${escapeHtml(task.id)}</code></dd></div>
+      <div><dt>${escapeHtml(tr('taskProject'))}</dt><dd>${escapeHtml(task.project || 'cloudRecord')}</dd></div>
+      ${task.tags?.length ? `<div><dt>${escapeHtml(tr('taskTags'))}</dt><dd>${escapeHtml(task.tags.join(', '))}</dd></div>` : ''}
       <div><dt>${escapeHtml(tr('workspace'))}</dt><dd><code>${escapeHtml(task.workingDir || '.')}</code></dd></div>
       ${task.notes ? `<div><dt>${escapeHtml(tr('notes'))}</dt><dd>${escapeHtml(task.notes)}</dd></div>` : ''}
       <div><dt>${escapeHtml(tr('runCount'))}</dt><dd>${Number(task.runCount || 0)}</dd></div>
@@ -4356,15 +4466,19 @@ function renderTaskDetail(task) {
   const recover = !running && !review && !archived && Boolean(task.persistentSessionKey || task.bridgeSessionKey);
   const canReset = !running && (archived || Boolean(task.persistentSessionKey || task.bridgeSessionKey));
   $('#taskDetailModal').dataset.detailTab = state.detailTab;
+  $('#taskDetailModal').dataset.contextExpanded = String(state.taskContextExpanded);
   renderHtml('taskDetailHead', '#taskDetailHead', `
-    <div><span class="section-label">${escapeHtml(task.id)}</span><div class="detail-title-line"><h2>${escapeHtml(task.name)}</h2><span class="status-badge ${escapeHtml(statusClass(task))}">${escapeHtml(statusLabel(task))}</span></div></div>
+    <div><div class="detail-title-line"><h2>${escapeHtml(task.name)}</h2><span class="status-badge ${escapeHtml(statusClass(task))}">${escapeHtml(statusLabel(task))}</span></div><div class="detail-subline"><code>${escapeHtml(task.id)}</code>${taskClassification(task)}</div></div>
     <div class="detail-actions">
-      ${!running && !archived ? `<button class="button secondary small" data-action="edit-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('edit'))}</button>` : ''}
+      <button class="button secondary small" data-action="toggle-task-context" aria-controls="taskContext" aria-expanded="${state.taskContextExpanded}">${escapeHtml(tr(state.taskContextExpanded ? 'hideTaskContext' : 'showTaskContext'))}</button>
       ${archived ? `<button class="button primary small" data-action="restore-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('restoreArchived'))}</button>` : ''}
-      ${canReset ? `<button class="button secondary small" data-action="reset-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('resetSession'))}</button>` : ''}
       ${review ? `<button class="button primary small" data-action="complete-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('complete'))}</button>` : ''}
       ${running && task.status !== 'stopping' ? `<button class="button danger small" data-action="stop-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('stop'))}</button>` : ''}
-      ${!running && !archived ? `<button class="button danger small" data-action="delete-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('delete'))}</button>` : ''}
+      ${canReset || (!running && !archived) ? `<details class="toolbar-menu detail-tools"><summary class="button secondary small">${escapeHtml(tr('moreActions'))}<span aria-hidden="true">⌄</span></summary><div class="toolbar-menu-panel">
+        ${!running && !archived ? `<button class="button secondary small" data-action="edit-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('edit'))}</button>` : ''}
+        ${canReset ? `<button class="button secondary small" data-action="reset-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('resetSession'))}</button>` : ''}
+        ${!running && !archived ? `<button class="button danger small" data-action="delete-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('delete'))}</button>` : ''}
+      </div></details>` : ''}
       <button class="icon-button" data-close="taskDetailModal" aria-label="${escapeHtml(tr('close'))}">&#215;</button>
     </div>`);
   renderHtml('taskContext', '#taskContext', taskContext(task));
@@ -4548,7 +4662,10 @@ async function loadTaskConsole(options = {}) {
 }
 
 async function openTaskDetail(id, initialTab = 'business-summary') {
-  if (state.currentTaskId !== id) renderCache.delete('taskConsole');
+  if (state.currentTaskId !== id) {
+    renderCache.delete('taskConsole');
+    state.taskContextExpanded = false;
+  }
   state.currentTaskId = id;
   state.detailTab = initialTab;
   state.detailOffset = 0;
@@ -4897,7 +5014,7 @@ async function submitBridgeReclaim(event) {
   renderBridgeInventory();
   try {
     const result = await api(`/api/runtime/bridge-sessions/${encodeURIComponent(sessionId)}/reclaim`, {
-      method: 'POST',
+      method: 'DELETE',
       body: { confirmationSessionId: sessionId },
     });
     closeModal('bridgeReclaimModal');
@@ -4928,6 +5045,9 @@ async function submitBridgeReclaim(event) {
 }
 
 document.addEventListener('click', async (event) => {
+  $$('.toolbar-menu[open]').forEach((menu) => {
+    if (!menu.contains(event.target) || event.target.closest('[data-action]')) menu.open = false;
+  });
   const nav = event.target.closest('[data-view]');
   if (nav) setView(nav.dataset.view);
   const close = event.target.closest('[data-close]');
@@ -4962,6 +5082,14 @@ document.addEventListener('click', async (event) => {
   if (action.dataset.action === 'open-task') await openTaskDetail(id);
   if (action.dataset.action === 'open-task-terminal') {
     await openTaskDetail(id, 'task-terminal');
+  }
+  if (action.dataset.action === 'open-task-reports') {
+    await openTaskDetail(id, 'business-reports');
+  }
+  if (action.dataset.action === 'toggle-task-context') {
+    state.taskContextExpanded = !state.taskContextExpanded;
+    const task = findTask(state.currentTaskId);
+    if (task) renderTaskDetail(task);
   }
   if (action.dataset.action === 'edit-task') openTaskEditor(findTask(id));
   if (action.dataset.action === 'stop-task') await stopTask(id);
@@ -5023,11 +5151,30 @@ document.addEventListener('click', async (event) => {
   }
 });
 
+document.addEventListener('toggle', (event) => {
+  const description = event.target;
+  const id = description.dataset?.objectiveId;
+  if (!id || !description.isConnected) return;
+  if (description.open) state.expandedTaskObjectives.add(id);
+  else state.expandedTaskObjectives.delete(id);
+  $$('.task-description').forEach((element) => {
+    if (element.dataset.objectiveId === id && element.open !== description.open) element.open = description.open;
+  });
+}, true);
+
 $$('.modal').forEach((modal) => modal.addEventListener('click', (event) => {
   if (event.target === modal) closeModal(modal.id);
 }));
 
 $('#taskForm').addEventListener('submit', saveTask);
+$('#taskProjectFilter').addEventListener('change', (event) => {
+  state.taskProjectFilter = event.target.value;
+  renderTasks();
+});
+$('#taskTagFilter').addEventListener('change', (event) => {
+  state.taskTagFilter = event.target.value;
+  renderTasks();
+});
 $('#skillForm').addEventListener('submit', saveSkill);
 $('#skillAttributionForm').addEventListener('submit', saveSkillAttribution);
 $('#bridgeReclaimForm').addEventListener('submit', submitBridgeReclaim);
@@ -5051,6 +5198,12 @@ $('#fontSizeControl').addEventListener('click', (event) => {
 });
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
+  const openMenu = $$('.toolbar-menu[open]').at(-1);
+  if (openMenu) {
+    openMenu.open = false;
+    openMenu.querySelector('summary').focus();
+    return;
+  }
   if (state.detailTab === 'task-terminal' && state.codexTerminalView) return;
   const modal = [...document.querySelectorAll('.modal:not(.hidden)')].at(-1);
   if (modal) closeModal(modal.id);
