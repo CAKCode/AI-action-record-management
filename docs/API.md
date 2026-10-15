@@ -835,7 +835,7 @@ curl -fsS -X DELETE "$BASE_URL/api/sessions/verify-release" \
 {"ok":true}
 ```
 
-只能删除非活动且未归档的任务。删除会级联清除该任务的 Turn、Attempt、命令、命令执行明细和结构化工作日志，并删除该任务的原始日志及 Skill 快照目录；全局审计仍保留删除操作。文件先移动到删除暂存名，数据库事务同时保存 Bridge runtime 回收作业，提交后 Worker 再释放原生 Session、Codex home、复制工作区、chatfile 和锁。回收失败不会把已经成功的删除误报为失败，作业会持久重试并写审计。活动任务和 `completed` 历史返回 `409`，任务不存在返回 `404` 和 `{"ok":false}`。
+可删除非活动任务，包括 `completed` 已完成历史。删除级联清除该任务的 Turn、Attempt、命令、结构化报告、资源登记、Viewed 状态、调度和工作日志，并删除整个任务托管目录与 Skill 快照，包含 HTML、视频、音频、日志和播放缓存。全局审计保留删除记录。文件先移动到删除暂存名，数据库事务同时保存或转换对应的 Bridge runtime 回收作业，提交后 Worker 再释放原生 Session、Codex home、复制工作区、chatfile 和锁。Runtime 回收失败会持久重试。活动任务须先停止；实际进行中的日志归档/验证或报告文件复制返回 `409`，完成后可重试。任务不存在返回 `404` 和 `{"ok":false}`。普通删除不递归清理共享业务工作目录或 `/data/jenkins/videos` 源文件。
 
 带幂等键的成功删除会保留独立操作回执，因此任务行已经消失后仍可用同一个键重放并得到 `200 {"ok":true}`。该回执绑定操作类型、任务 ID 和可选任务创建时间；同键改做其他操作返回 `409`，旧删除键也不会删除后来复用同 ID 创建的新任务。
 
@@ -891,7 +891,7 @@ curl -fsS "$BASE_URL/api/dashboard?taskLimit=100"
 curl -fsS "$BASE_URL/api/runtime/bridge-sessions"
 ```
 
-响应包含 `summary` 和 `sessions`。`summary` 返回总数、可回收数、总字节、可回收字节、分类计数和扫描时间；每个 Session 返回 `sessionId`、分类、安全性、是否可回收、资源存在标记、估算字节数、Bridge 时间、关联任务状态、已有回收作业和安全错误。接口不返回 Session key、工作目录、Codex home、chatfile 或其他主机路径，也不会自动创建回收作业。
+响应包含 `summary`、原生 Runtime 的 `sessions` 和平台产物的 `tasks`。`summary.totalBytes`/`reclaimableBytes` 继续表示 Runtime 大小；新增 `taskBytes`、`archiveBytes`、`combinedBytes`、`taskCount`、`deletableTaskBytes`。`tasks` 按任务返回 `taskId`、名称、状态、创建代际、`runtimeBytes`、`archiveBytes`、`otherBytes`、`taskBytes`、`totalBytes`、`files`、`unreadableEntries`、`canDelete` 与 `deletionBlockedReason`。归档目录包括 HTML、视频、音频、日志和播放缓存；其他大小包含平台原始输出及 Skill 快照。使用文件长度和目录元数据估算，同一任务内硬链接按 inode 去重，不包含业务源目录、数据库与备份。没有原生 Runtime 的任务也返回。每个原生 Session 的既有字段保持不变，接口不返回 Session key 或主机路径，不会自动创建回收作业。
 
 | 分类 | 含义 | 可手工回收 |
 | --- | --- | --- |

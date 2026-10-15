@@ -123,9 +123,16 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
       reclaimable: 2,
       totalBytes: 1572864,
       reclaimableBytes: 1048576,
+      taskBytes: 3145728,
+      combinedBytes: 4718592,
       categories: { task_owned: 1, orphan: 1, completed_retained: 1 },
       scannedAt: '2026-08-03T06:00:00.000Z',
     },
+    tasks: [
+      { taskId: 'completed-task', name: 'Completed task with videos', taskStatus: 'completed', taskCreatedAt: '2026-08-03T05:00:00Z', runtimeBytes: 262144, archiveBytes: 2097152, otherBytes: 1048576, totalBytes: 3407872, canDelete: true },
+      { taskId: 'files-without-runtime', name: 'Artifacts without Runtime', taskStatus: 'waiting_review', runtimeBytes: 0, archiveBytes: 1024, otherBytes: 0, totalBytes: 1024, canDelete: true },
+      { taskId: 'active-storage', name: 'Active storage', taskStatus: 'running', runtimeBytes: 0, archiveBytes: 0, otherBytes: 0, totalBytes: 0, canDelete: false, deletionBlockedReason: 'active' },
+    ],
     sessions: [
       {
         sessionId: 'session-1111111111111111', category: 'task_owned', safe: true, reclaimable: false,
@@ -298,6 +305,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     clearTimeout,
     window,
   });
+  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../public/report-cards.js'), 'utf8'), context, { filename: 'public/report-cards.js' });
   vm.runInContext(APP_SOURCE, context, { filename: 'public/app.js' });
   await new Promise((resolve) => setImmediate(resolve));
 
@@ -497,6 +505,12 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(element('#bridgeInventoryMetrics').innerHTML, /<strong>3<\/strong>/);
   assert.match(element('#bridgeInventoryMetrics').innerHTML, /1\.5 MiB/);
   assert.match(element('#bridgeInventoryMetrics').innerHTML, /1 MiB/);
+  assert.match(element('#bridgeInventoryMetrics').innerHTML, /3 MiB/);
+  assert.match(element('#bridgeInventoryMetrics').innerHTML, /4\.5 MiB/);
+  assert.match(element('#taskStorageList').innerHTML, /Completed task with videos/);
+  assert.match(element('#taskStorageList').innerHTML, /Artifacts without Runtime/);
+  assert.equal((element('#taskStorageList').innerHTML.match(/data-action="delete-task"/g) || []).length, 2);
+  assert.match(element('#taskStorageList').innerHTML, /停止后可删除/);
   assert.match(element('#bridgeInventoryState').textContent, /3 安全/);
   assert.match(element('#protectionGrid').innerHTML, /平台数据/);
   assert.match(element('#protectionGrid').innerHTML, /在线数据库备份/);
@@ -520,7 +534,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
 
   vm.runInContext("state.lang = 'en'; renderCache.clear(); renderBridgeInventory(); renderProtectionStatus()", context);
   assert.match(element('#bridgeInventoryList').innerHTML, /Task Owned/);
-  assert.match(element('#bridgeInventoryList').innerHTML, /Delete &amp; Release Disk/);
+  assert.match(element('#bridgeInventoryList').innerHTML, /Reclaim Runtime only/);
   assert.match(element('#bridgeInventoryState').textContent, /3 safe/);
   assert.match(element('#protectionGrid').innerHTML, /Data Integrity &amp; Recovery Protection|Platform Data/);
   assert.match(element('#protectionGrid').innerHTML, /Rotation Pending/);
@@ -1415,7 +1429,10 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(externallyRegisteredHtml, /restful\.html/);
   assert.equal((externallyRegisteredHtml.match(/已登记 · 执行中/g) || []).length, 3);
   const externallyRegisteredVisibleHtml = externallyRegisteredHtml.split('<details class="report-raw">')[0];
-  assert.doesNotMatch(externallyRegisteredVisibleHtml, /\/home\/jenkins\//);
+  for (const artifact of externallyRegisteredAttempt.artifactDeclarations || []) {
+    assert.equal(externallyRegisteredVisibleHtml.includes(artifact.path), false);
+  }
+  assert.match(externallyRegisteredVisibleHtml, /report-execution/);
   const externallyRegisteredReports = vm.runInContext(
     `reportsWithRegisteredArtifacts(
       ${JSON.stringify([externallyRegisteredReport])},
@@ -2062,9 +2079,9 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   const businessReportPageHtml = element('#taskConsoleOutput').innerHTML;
   assert.ok(requests.some((url) => url.startsWith('/api/sessions/report-console-task/skill-reports?')));
   assert.match(businessReportPageHtml, /Business result/);
-  assert.match(businessReportPageHtml, /主要执行/);
-  assert.ok(businessReportPageHtml.indexOf('business-executions')
-    < businessReportPageHtml.indexOf('business-reports'));
+  assert.match(businessReportPageHtml, /执行信息/);
+  assert.doesNotMatch(businessReportPageHtml, /class="business-execution"/);
+  assert.equal((businessReportPageHtml.match(/class="report-section report-execution"/g) || []).length, 1);
   assert.doesNotMatch(businessReportPageHtml, /任务终端正在等待输出/);
 
   responseOverrides.set('GET /api/sessions/report-console-task/skill-reports', {

@@ -16,6 +16,14 @@ const { getDatabase } = require('./database');
 const { pathContains, resolveWorkingDir } = require('./workspaces');
 const { validateTaskBody, validateSkillBody } = require('./validation');
 const { normalizeArtifactDeclarations, normalizeSkillReport } = require('./skill-report');
+const { measureTaskStorage } = require('./task-storage');
+const {
+  readVideoCheckReport,
+  rewriteVideoCheckReport,
+  mapVideoCheckDetails,
+  readVideoCheckSummaryScript,
+  videoCheckSummaryScript,
+} = require('./pytest-video-check');
 const {
   nowIso,
   readJson,
@@ -1636,7 +1644,6 @@ function deleteSession(id, context = {}) {
   if (identity.expectedTaskCreatedAt && existing.createdAt !== identity.expectedTaskCreatedAt) {
     throw statusError('Task was replaced after this operation was prepared', 409);
   }
-  if (existing.status === 'completed') throw statusError('Completed sessions are immutable history records', 409);
   if (ACTIVE_STATUSES.includes(existing.status)) throw statusError('Stop the active session before deleting it', 409);
   let stagedFiles = [];
   let replayedReceipt = null;
@@ -1648,7 +1655,7 @@ function deleteSession(id, context = {}) {
       const latest = db.prepare('SELECT * FROM tasks WHERE id = ?').get(normalizedId);
       if (!latest) throw statusError(`Session ${normalizedId} not found`, 404);
       assertExpectedTaskGeneration(latest, identity);
-      if (latest.status === 'completed' || ACTIVE_STATUSES.includes(latest.status)) {
+      if (ACTIVE_STATUSES.includes(latest.status)) {
         throw statusError('Session state changed before deletion', 409);
       }
       if (db.prepare(`
@@ -1657,8 +1664,16 @@ function deleteSession(id, context = {}) {
       `).get(normalizedId)) {
         throw statusError('Session background log archival or verification is still in progress', 409);
       }
+      if (db.prepare("SELECT 1 FROM skill_report_artifact_jobs WHERE task_id=? AND status='processing' LIMIT 1")
+        .get(normalizedId)) {
+        throw statusError('Session report artifact archival is still in progress', 409);
+      }
       stagedFiles = stageTaskFilesForDeletion(normalizedId, latest.created_at);
       enqueueBridgeCleanupJob(db, latest, 'deleted', context);
+      db.prepare(`
+        UPDATE bridge_cleanup_jobs SET reason='deleted', updated_at=?
+        WHERE task_id=? AND task_created_at=? AND session_key=? AND status IN ('pending','retry','processing')
+      `).run(nowIso(), latest.id, latest.created_at, latest.persistent_session_key);
       db.prepare('DELETE FROM tasks WHERE id = ?').run(normalizedId);
       appendAuditEvent({
         scope: 'config', taskId: normalizedId, entityType: 'session', entityId: normalizedId,
@@ -2304,6 +2319,9 @@ function publicBridgeCleanupJob(row) {
 function listBridgeRuntimeInventory() {
   const db = ensureStorage();
   const rows = bridgeRuntimeInventoryRows(db);
+  const tasks = taskStorageInventory(db, rows);
+  const taskBytes = tasks.reduce((sum, task) => sum + task.taskBytes, 0);
+  const archiveBytes = tasks.reduce((sum, task) => sum + task.archiveBytes, 0);
   const counts = {};
   let totalBytes = 0;
   let reclaimableBytes = 0;
@@ -2318,9 +2336,15 @@ function listBridgeRuntimeInventory() {
       reclaimable: rows.filter((row) => row.reclaimable).length,
       totalBytes,
       reclaimableBytes,
+      taskBytes,
+      archiveBytes,
+      combinedBytes: totalBytes + taskBytes,
+      taskCount: tasks.length,
+      deletableTaskBytes: tasks.filter(task => task.canDelete).reduce((sum, task) => sum + task.totalBytes, 0),
       categories: counts,
       scannedAt: nowIso(),
     },
+    tasks,
     sessions: rows.map((row) => ({
       sessionId: row.sessionId,
       category: row.category,
@@ -2337,6 +2361,31 @@ function listBridgeRuntimeInventory() {
       error: row.error,
     })),
   };
+}
+
+function taskStorageInventory(db, runtimes) {
+  const runtimeBytes = new Map();
+  for (const runtime of runtimes) {
+    if (runtime.task) runtimeBytes.set(runtime.task.id, (runtimeBytes.get(runtime.task.id) || 0) + Number(runtime.bytes || 0));
+  }
+  return db.prepare(`
+    SELECT task.id, task.name, task.status, task.created_at,
+      EXISTS(SELECT 1 FROM external_attempts external WHERE external.task_id=task.id
+        AND (external.archive_status='archiving' OR external.archive_verify_status='verifying'))
+      OR EXISTS(SELECT 1 FROM skill_report_artifact_jobs job WHERE job.task_id=task.id AND job.status='processing') AS archiving
+    FROM tasks task ORDER BY task.created_at DESC, task.id
+  `).all().map(task => {
+    const storage = measureTaskStorage(sessionDir(task.id), path.join(SKILL_SNAPSHOTS_DIR, safeId(task.id)));
+    const nativeBytes = runtimeBytes.get(task.id) || 0;
+    return {
+      taskId: task.id, name: task.name, taskStatus: task.status, taskCreatedAt: task.created_at,
+      runtimeBytes: nativeBytes, taskBytes: storage.totalBytes, archiveBytes: storage.archiveBytes,
+      otherBytes: storage.platformBytes + storage.snapshotBytes, totalBytes: nativeBytes + storage.totalBytes,
+      files: storage.files, unreadableEntries: storage.unreadableEntries,
+      canDelete: !ACTIVE_STATUSES.includes(task.status) && !task.archiving,
+      deletionBlockedReason: ACTIVE_STATUSES.includes(task.status) ? 'active' : task.archiving ? 'archiving' : '',
+    };
+  });
 }
 
 function requestBridgeSessionReclaim(sessionId, confirmation, context = {}) {
@@ -3853,7 +3902,7 @@ async function archivePytestMediaResources(htmlContent, options) {
       id: resourceId,
       resourceKey: path.relative(options.containmentRoot, resolvedPath).split(path.sep).join('/'),
       fileName: path.basename(resolvedPath),
-      mediaType: PYTEST_MEDIA_TYPES.get(extension) || 'application/octet-stream',
+      mediaType: EXTERNAL_ARTIFACT_MEDIA_TYPES.get(extension) || 'application/octet-stream',
       managedPath: skillReportArtifactResourceFile(
         options.taskId,
         options.reportId,
@@ -3958,8 +4007,75 @@ async function archivePytestMediaResources(htmlContent, options) {
 
   await archiveReferences(options.logReferences || [], { countsTowardMediaLimit: false });
   await archiveReferences(mediaReferencesInHtml(referenceHtml));
+  let archivedHtml = replaceLiteralReferences(sourceHtml, replacements);
+  const check = readVideoCheckReport(archivedHtml);
+  if (check && !/^(?:\/|[A-Za-z][A-Za-z0-9+.-]*:)/.test(check.descriptor.source)) {
+    const { descriptor, snapshot } = check;
+    try {
+      const summaryResource = await descriptorFor(descriptor.source, artifactDirectories, {
+        countsTowardMediaLimit: false,
+      });
+      const summaryContent = await readStablePytestArtifactFile(summaryResource.resolvedPath, {
+        label: 'Video Check results',
+      });
+      const summary = readVideoCheckSummaryScript(summaryContent.toString('utf8'));
+      if (summary?.run_id !== descriptor.run_id) {
+        throw statusError('Video Check results do not match the report run', 409);
+      }
+      const detailSources = new Set([summary, snapshot].flatMap((payload) => (
+        Object.values(payload?.cases || {}).map((item) => item?.detail_source)
+          .filter((source) => typeof source === 'string' && source)
+      )));
+      const detailReplacements = new Map();
+      const sourceDirectory = path.posix.dirname(descriptor.source.split(/[?#]/, 1)[0]);
+      const archiveJsonCompanion = async (resource) => {
+        if (resource.extension !== '.js') return;
+        try {
+          const json = await descriptorFor(
+            `${path.basename(resource.resolvedPath, '.js')}.json`,
+            path.dirname(resource.resolvedPath),
+            { countsTowardMediaLimit: false },
+          );
+          await archiveDescriptor(json);
+        } catch (error) {
+          if (!error.pytestResourceMissing) warnings.push(`Video Check JSON: ${String(error.message || error)}`);
+        }
+      };
+      for (const source of detailSources) {
+        try {
+          const relativePath = path.posix.join(sourceDirectory, source);
+          const detail = await descriptorFor(relativePath, artifactDirectories, {
+            countsTowardMediaLimit: false,
+          });
+          await archiveDescriptor(detail);
+          await archiveJsonCompanion(detail);
+          // pytest-html prepends the summary URL's directory to detail_source.
+          detailReplacements.set(source, detail.id);
+        } catch (error) {
+          warnings.push(`Video Check ${source}: ${String(error.message || error)}`);
+        }
+      }
+      const rewriteDetails = (payload) => payload?.run_id === descriptor.run_id
+        ? mapVideoCheckDetails(payload, (source) => detailReplacements.get(source) || source)
+        : payload;
+      const archivedSummary = await archiveBufferAtomically(
+        Buffer.from(videoCheckSummaryScript(rewriteDetails(summary)), 'utf8'),
+        summaryResource.managedPath,
+        { onProgress: options.onProgress },
+      );
+      Object.assign(summaryResource, archivedSummary, { status: 'done' });
+      await archiveJsonCompanion(summaryResource);
+      archivedHtml = rewriteVideoCheckReport(archivedHtml, (settings) => (
+        settings.run_id === descriptor.run_id && settings.source === descriptor.source
+          ? { ...settings, source: summaryResource.url }
+          : settings
+      ), rewriteDetails);
+    } catch (error) {
+      warnings.push(`Video Check ${descriptor.source}: ${String(error.message || error)}`);
+    }
+  }
   return {
-    content: Buffer.from(replaceLiteralReferences(sourceHtml, replacements), 'utf8'),
+    content: Buffer.from(archivedHtml, 'utf8'),
     resources: [...descriptors.values()].filter((descriptor) => descriptor.status === 'done'),
     warnings,
   };
@@ -4174,7 +4290,14 @@ function externalArtifactPreviewHtml(content, taskId, attemptId, artifactKey) {
   const imageExtraReplacements = new Map(
     [...pytestImageExtraReferences(html)].map((reference) => [reference, resourceUrl(reference)]),
   );
-  return Buffer.from(replaceLiteralReferences(preview, imageExtraReplacements), 'utf8');
+  const withImages = replaceLiteralReferences(preview, imageExtraReplacements);
+  const withVideoCheck = rewriteVideoCheckReport(withImages, (descriptor) => (
+    typeof descriptor.source === 'string'
+      && !/^(?:\/|[A-Za-z][A-Za-z0-9+.-]*:)/.test(descriptor.source)
+      ? { ...descriptor, source: resourceUrl(descriptor.source) }
+      : descriptor
+  ));
+  return Buffer.from(withVideoCheck, 'utf8');
 }
 
 function externalArtifactMediaType(filePath) {
@@ -5006,13 +5129,16 @@ async function archiveSkillReportArtifacts(sessionId, reportId, context = {}) {
     throw statusError('Completed sessions are immutable history records', 409);
   }
   const report = parseJson(row.payload_json, {});
-  const declarations = Array.isArray(report.artifacts) ? report.artifacts : [];
+  const allDeclarations = Array.isArray(report.artifacts) ? report.artifacts : [];
+  const declarations = Array.isArray(context.artifactKeys)
+    ? allDeclarations.filter((artifact) => context.artifactKeys.includes(artifact.key))
+    : allDeclarations;
   if (!declarations.length) {
     completeSkillReportArtifactJob(db, row.id, context.jobOwner);
     return rowToSkillReport(row, db);
   }
   const evidence = declaredArtifactExecutionEvidence(db, taskId, report, row.step_run_id || '');
-  const reusable = await verifiedReusableSkillReportArtifacts(db, row, report, evidence);
+  const reusable = await verifiedReusableSkillReportArtifacts(db, row, { ...report, artifacts: declarations }, evidence);
   if (reusable.artifactsByKey.size) {
     insertSessionWorklog(db, taskId, {
       turnId: row.turn_id || null,

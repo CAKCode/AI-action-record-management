@@ -187,12 +187,14 @@ async function usableCacheFile(filePath) {
 
 async function materializePlaybackFile(options, cachePath) {
   if (await usableCacheFile(cachePath)) return cachePath;
+  options.assertOwner?.();
   const cacheDirectory = path.dirname(cachePath);
   ensureManagedDirectory(cacheDirectory, { label: 'Report media playback cache' });
   const stagingDirectory = await fs.promises.mkdtemp(
     path.join(cacheDirectory, '.materializing-'),
   );
   try {
+    options.assertOwner?.();
     const playlistUrl = await materializeLocalPlaylist(options, stagingDirectory);
     const stagedOutput = path.join(stagingDirectory, 'playback.mp4');
     await runFfmpeg(fileURLToPath(playlistUrl), stagedOutput);
@@ -233,6 +235,7 @@ async function openHlsPlaybackFile(options) {
     playbackMaterializations.set(cachePath, materialization);
   }
   await materialization;
+  options.assertOwner?.();
 
   const opened = await openRegularFileForRead(cachePath, {
     label: 'Report media playback cache',

@@ -9,6 +9,14 @@ const YAML = require('yaml');
 const { processSkillReportArtifactJob, publishSkillReport } = require('../../src/store');
 const { closeDatabase } = require('../../src/database');
 const { MAX_REPORT_BYTES } = require('../../src/skill-report');
+const { createTemplate } = require('../../public/report-cards');
+
+const TEMPLATE_OPTIONS = new Map([
+  ['--type', 'type'], ['--skill-id', 'skillId'], ['--report-key', 'reportKey'],
+  ['--title', 'title'], ['--status', 'status'], ['--summary', 'summary'],
+  ['--external-attempt', 'externalAttemptId'], ['--command', 'command'],
+  ['--working-dir', 'workingDirectory'], ['--output', 'output'],
+]);
 
 function fail(message, code = 64) {
   process.stderr.write(`codex-skill-report: ${message}\n`);
@@ -16,6 +24,17 @@ function fail(message, code = 64) {
 }
 
 function parseArguments(values) {
+  if (values[0] === 'template') {
+    const options = { action: 'template' };
+    for (let index = 1; index < values.length; index += 2) {
+      const name = TEMPLATE_OPTIONS.get(values[index]);
+      if (!name || values[index + 1] == null || options[name] != null) {
+        throw new Error('usage: codex-skill-report template --type TYPE --skill-id SKILL --report-key KEY [--output FILE]');
+      }
+      options[name] = values[index + 1];
+    }
+    return options;
+  }
   if (values[0] !== 'publish') {
     throw new Error('usage: codex-skill-report publish --file REPORT.json|REPORT.yaml');
   }
@@ -60,6 +79,14 @@ function assertActiveSkill(report) {
 async function main() {
   try {
     const options = parseArguments(process.argv.slice(2));
+    if (options.action === 'template') {
+      const activeSkill = String(process.env.CODEX_ACTIVE_SKILL_IDS || '').split(',').map(value => value.trim()).find(Boolean);
+      const report = createTemplate({ ...options, skillId: options.skillId || activeSkill });
+      const content = `${JSON.stringify(report, null, 2)}\n`;
+      if (options.output) fs.writeFileSync(path.resolve(options.output), content, { mode: 0o600 });
+      else process.stdout.write(content);
+      return;
+    }
     const taskId = String(process.env.CODEX_TASK_ID || '').trim();
     const turnId = String(process.env.CODEX_TASK_TURN_ID || '').trim();
     const attemptId = String(process.env.CODEX_TASK_ATTEMPT_ID || '').trim();

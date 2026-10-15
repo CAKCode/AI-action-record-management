@@ -77,7 +77,7 @@ Worker 启动时及此后每小时执行一次保留检查，每批最多处理 
 
 数据库启用 WAL、外键、忙等待和 `FULL` 同步模式。读后写操作使用 `IMMEDIATE` 事务，避免多进程快照写冲突；数据库、WAL、SHM 和日志在生产进程中使用仅服务账户可读写的权限。
 
-Skill 报告按任务和 `reportKey` 维护追加式修订。立即重复发布相同内容返回已有修订；内容变化后再恢复为旧内容仍创建新修订，使 A -> B -> A 的业务时间线保持完整。每条修订冻结发布 Skill 的版本和内容哈希，并可关联当时的 Turn/Attempt。同一 Step Run 的后续修订会逐个复用声明及源文件 SHA-256 均未变化的 artifact，即使修订新增其他 artifact 也不重复复制原有媒体。任务确认完成后不能再发布；删除未归档任务时报告随任务级联删除，已完成任务则在 30 天窗口内作为只读历史保留。
+Skill 报告按任务和 `reportKey` 维护追加式修订。立即重复发布相同内容返回已有修订；内容变化后再恢复为旧内容仍创建新修订，使 A -> B -> A 的业务时间线保持完整。每条修订冻结发布 Skill 的版本和内容哈希，并可关联当时的 Turn/Attempt。同一 Step Run 的后续修订会逐个复用声明及源文件 SHA-256 均未变化的 artifact，即使修订新增其他 artifact 也不重复复制原有媒体。任务确认完成后不能再发布；显式删除非活动任务时报告和媒体随任务级联删除，支持已完成任务。其余已完成任务继续按 30 天窗口保留。
 
 `skill_reports`、`skill_report_artifacts` 和 `skill_report_artifact_resources` 属于在线数据库备份的新版表计数。报告正文只保存在 SQLite，不依赖 Attempt 日志或任务工作目录。External Attempt 登记路径及报告的 `registeredArtifacts` 只读投影会随数据库恢复，但运行中快照 URL 仍依赖原业务工作目录中的源文件；登记不会把源文件复制进备份，也不构成恢复保证。普通 Section 路径不会触发文件发现；平台只会在当前报告具备匹配 External Attempt/META 证据时补登记具体 pytest `--html` 输出。只有成功归档的 pytest HTML、Fail 分析 Markdown、超限时独立托管的日志文本及媒体子资源会复制到任务托管目录，登记大小和 SHA-256。由于这些报告已经由平台按 30 天策略托管，新的平台恢复检查点不再重复打包 `data/sessions/*/skill-report-artifacts`；恢复数据库中的历史报告若超过在线保留范围，按部分业务恢复处理。测试分析模式按原始证据保存摘要、主命令、指标、字段、JSON、HTML 和内嵌日志中的 AK、SK、Token、Authorization、Cookie、密码及其他凭据值；检测到这些内容不会触发脱敏或终止任务。`sensitivity` 只影响前端默认折叠，不代表脱敏或访问控制。报告、日志、备份和恢复包应按高敏感业务数据限制访问。
 
@@ -97,7 +97,7 @@ Codex 主进程退出后，runner 最多等待 2 秒排空 PTY。若后代进程
 
 Reset 只允许非活动且没有后台执行、定时检查或运行时所有权的 Task。事务保留 Task 配置、ID、Skill 快照、Turn、Attempt、命令、工作日志、审计和全部 transcript，清空结果摘要、运行时间和当前 `persistentSessionKey`，并把旧 key 写入 `bridge_cleanup_jobs`；下一次 Run 再生成新的随机 key。Run、服务恢复、归档 Restore 和交互式 CLI 始终读取 Task 当前 key，恢复检查也只匹配该 key 的回收状态，因此旧 Session 的已完成或失败回收作业不会把恢复指向旧上下文，也不会阻断最新 Session。
 
-Reset、删除未归档任务或手工回收已完成 Runtime 时，平台在 SQLite 事务中写入 `bridge_cleanup_jobs`。提交后 Worker 才回收对应 Bridge Session record、Codex home、复制工作区、chatfile 和锁；Reset 和手工回收不删除 Task 历史，但原 Session 此后不能恢复。回收不跨 SQLite 事务，Worker 中断后由 30 秒租约和指数退避继续；任务 ID 后续复用或同一 Task 建立新 Session 时，旧作业仍绑定原 `created_at` 和精确 Session key，不会删除最新资源。记录重复、损坏、字段不符、路径越界或符号链接时一律停止删除并保留现场，等待修复后重试。
+Reset、删除非活动任务（含已完成历史）或手工回收已完成 Runtime 时，平台在 SQLite 事务中写入 `bridge_cleanup_jobs`。删除任务还会暂存并清除整个托管产物与 Skill 快照目录，包含归档媒体和播放缓存；已有 completed 回收作业会转换为 deleted 作业。提交后 Worker 才回收对应 Bridge record、Codex home、复制工作区、chatfile 和锁；Reset 和仅回收 Runtime 保留 Task 历史。Worker 中断后由 30 秒租约和指数退避继续；旧作业仍绑定原 `created_at` 和精确 Session key，不会删除复用 ID 后的新资源。源视频和共享业务工作目录保留。
 
 升级前遗留的 Bridge Session 通过只读库存接口分类，不在启动、同步、备份或恢复流程中自动删除。库存只公开稳定 Session ID、资源存在性和估算字节，不公开 Session key 或主机路径。手工回收必须提供与 URL 相同的精确 Session ID，且事务重新确认记录仍为无任务引用的 `orphan` 或仅由一个 `completed` 任务代际引用的 `completed_retained`。请求只持久化 `bridge_cleanup_jobs`，实际删除仍由 Worker 重验并执行；重复请求复用同一作业。对 `completed_retained` 的回收不级联平台任务，因此 SQLite 中的任务历史、Turn、工作日志、Agent 回复、命令、Attempt 原始输出与交互式 CLI transcript 继续受备份和恢复流程保护。
 
@@ -137,7 +137,7 @@ Worker 异常后：
 
 恢复和后续 Turn 使用原快照。升级平台 Skill 只影响尚未创建快照的新任务。每次物化都会核对清单、文件集合和 SHA-256；目录被篡改、文件缺失或出现额外文件时，从 SQLite 冻结内容原子重建。快照目录和文件分别使用只读执行权限 `0500`、`0400`。
 
-命令 Skill 归因引用快照中的版本和哈希，但独立保存在 `command_skill_attributions`。每次运行时声明或人工修正都追加新行，不覆盖旧行；当前有效值按命令与 Skill 的最后一条 `linked/unlinked` 记录计算。删除未归档任务时归因随命令级联删除；已完成历史不能删除，但允许追加有原因、有操作者的归因修正。
+命令 Skill 归因引用快照中的版本和哈希，但独立保存在 `command_skill_attributions`。每次运行时声明或人工修正都追加新行，不覆盖旧行；当前有效值按命令与 Skill 的最后一条 `linked/unlinked` 记录计算。删除任务时归因随命令级联删除，已完成历史也支持显式删除。未删除的已完成历史允许追加有原因、有操作者的归因修正。
 
 `skill_invocations` 由 `codex-skill-use` 在本地调用边界自动写入，不等待 Agent 生成结构化报告。后台执行保存 invocation 关联，定时调度通过后台执行继承；记录随 Task 一起进入数据库备份、恢复检查点和 30 天归档保留生命周期。
 

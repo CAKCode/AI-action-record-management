@@ -103,6 +103,13 @@ const {
 const { createStorageAuditRecorder } = require('./src/storage-audit');
 const { createStorageAuditOutbox } = require('./src/storage-audit-outbox');
 const { storageFailureAuditPayload } = require('./src/storage-failure');
+const {
+  readVideoCheckReport,
+  rewriteVideoCheckReport,
+  mapVideoCheckDetails,
+  readVideoCheckSummaryScript,
+  videoCheckSummaryScript,
+} = require('./src/pytest-video-check');
 const { pipeResponseStream } = require('./src/response-stream');
 const { createCodexTerminalManager } = require('./src/codex-terminal');
 const { createInteractiveCliTranscriptStore } = require('./src/interactive-cli-transcript');
@@ -898,6 +905,7 @@ async function withSignedArtifactResourceUrls(opened, resourceScope, options = {
     'text/html; charset=utf-8',
     'application/vnd.apple.mpegurl',
     'application/dash+xml',
+    'text/javascript; charset=utf-8',
   ]);
   const shouldSignResources = Boolean(
     AUTH_USER && AUTH_PASSWORD && resourceScope && rewritableMediaTypes.has(opened.mediaType),
@@ -949,10 +957,44 @@ async function withSignedArtifactResourceUrls(opened, resourceScope, options = {
       `${escapeRegularExpression(resourceScope)}/([^\\s"'\\\\<>&?#]+)`,
       'g',
     );
-    transformedContent = transformedContent.replace(resourcePattern, (resourcePath, resourceId) => {
-      const formatHint = formatHints.get(resourceId) || '';
-      return signedReportResourceUrl(resourcePath, formatHint);
-    });
+    if (opened.mediaType !== 'text/javascript; charset=utf-8') {
+      transformedContent = transformedContent.replace(resourcePattern, (resourcePath, resourceId) => {
+        const formatHint = formatHints.get(resourceId) || '';
+        return signedReportResourceUrl(resourcePath, formatHint);
+      });
+    }
+    const signCheckSource = (source) => {
+      const resourcePath = source.split(/[?#]/, 1)[0];
+      if (!resourcePath.startsWith(`${resourceScope}/`)) return source;
+      // pytest-html appends "?t=" even when a URL already has a query. Put a
+      // trailing cache parameter after the signature so that token stays intact.
+      return `${signedReportResourceUrl(resourcePath)}&codex_video_check_cache=0`;
+    };
+    const signCheckDetails = (payload, summarySource) => {
+      const directory = summarySource.slice(0, summarySource.lastIndexOf('/') + 1);
+      return mapVideoCheckDetails(payload, (source) => {
+        const signed = signCheckSource(directory + source);
+        return signed.startsWith(directory) ? signed.slice(directory.length) : source;
+      });
+    };
+    if (opened.mediaType === 'text/html; charset=utf-8') {
+      const check = readVideoCheckReport(transformedContent);
+      if (check) {
+        transformedContent = rewriteVideoCheckReport(transformedContent, (descriptor) => (
+          { ...descriptor, source: signCheckSource(descriptor.source) }
+        ), (payload) => payload?.run_id === check.descriptor.run_id
+          ? signCheckDetails(payload, check.descriptor.source)
+          : payload);
+      }
+    } else if (opened.mediaType === 'text/javascript; charset=utf-8') {
+      const summary = readVideoCheckSummaryScript(transformedContent);
+      if (summary) {
+        transformedContent = videoCheckSummaryScript(signCheckDetails(
+          summary,
+          `${resourceScope}/${opened.resourcePath || 'results.js'}`,
+        ));
+      }
+    }
   }
   if (shouldInjectViewedAdapter) {
     transformedContent = injectPlatformViewedMediaAdapter(
@@ -2649,11 +2691,17 @@ const server = http.createServer(async (req, res) => {
         const taskId = requireSessionId(params[0]);
         const releaseLogStream = req.method === 'GET' ? acquireLogStreamSlot() : null;
         try {
+          const taskCreatedAt = getSession(taskId)?.createdAt;
           const playback = await openHlsPlaybackFile({
             taskId,
             reportId: params[1],
             artifactId: params[2],
             resourceId: params[3],
+            assertOwner: () => {
+              if (!taskCreatedAt || getSession(taskId)?.createdAt !== taskCreatedAt) {
+                throw Object.assign(new Error('The playback Task was deleted or replaced'), { statusCode: 404 });
+              }
+            },
             openResource: (resourceId) => openSkillReportArtifactResourceFile(
               taskId,
               params[1],

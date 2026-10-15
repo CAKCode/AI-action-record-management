@@ -74,7 +74,7 @@ Reset 只在任务处于非活动状态且没有后台执行、定时检查或�
 - 输入下一条指令，继续使用同一 Session。
 - 点击“确认完成”，把任务转为历史。
 
-确认完成前应检查任务结果和验证记录。确认时平台会先结束正在运行的交互式 Codex CLI，再封存终端内容并归档。完成后任务不能直接继续、编辑或删除，但在 30 天保留窗口内仍可查看任务、Turn、日志和完整 Codex CLI transcript；只读查看不会重新连接 Codex。窗口从确认完成时的 `archivedAt` 起计算，到期后平台自动删除历史和托管 Runtime。
+确认完成前应检查任务结果和验证记录。确认时平台会先结束正在运行的交互式 Codex CLI，再封存终端内容并归档。完成后任务不能直接继续或编辑，可以明确删除任务及全部平台托管产物；保留的历史在 30 天窗口内仍可查看任务、Turn、日志和完整 Codex CLI transcript，只读查看不会重新连接 Codex。窗口从 `archivedAt` 起计算，到期后平台自动清理。
 
 需要重新执行已归档任务时，点击“恢复并继续”。恢复只把任务转回“待输入”，不会立即启动 Codex；再次打开 Codex CLI 或提交新 Turn 时才恢复 Task 当前最新 Session。Reset 前旧 Session 的回收记录不会被当成当前 Session。若已手工回收当前 Runtime，审计与 transcript 仍可查看，但该 Session 不能再恢复；此时仍可 Reset 并用相同 Task 配置建立新 Session。
 
@@ -126,9 +126,9 @@ codex-skill-use cloud-recording-test run-in-background -- \
 
 ## 运行库存与释放磁盘
 
-“运行库存”先盘点原生 Session。`completed_retained` 和 `orphan` 可使用“删除并释放”；点击后创建持久回收作业，由 Worker 异步执行，刷新库存查看结果。`task_owned` 仍被未完成任务引用，不能通过库存按钮直接回收；已排队的清理不会重复入队。
+“运行库存”同时盘点原生 Session 和平台任务产物。顶部展示 Runtime、平台任务文件和合计占用；“任务与归档产物”按 Task 分列 Runtime、归档文件、其他日志/快照及合计大小。没有保留 Runtime 的 Task 仍在产物列表中显示。
 
-库存回收释放原生 record、Codex Home、复制工作区、chatfile 和锁，保留平台任务、报告、托管视频、日志与审计，但该原生 Session 此后不能 Restore。删除非活动、未完成 Task 是另一个操作，会清除该 Task 的平台记录和托管产物；普通删除不会递归清除业务工作目录或 `/data/jenkins/videos`。已完成 Task 的历史按 `archivedAt` 起 30 天保留流程清理，详见[数据与恢复](DATA_AND_RECOVERY.md)。
+“仅回收 Runtime”适用于 `completed_retained` 和 `orphan`，保留报告与视频，后台完成后原 Session 无法 Restore。“删除任务及产物”适用于非活动 Task，包含已完成历史；点击并确认后清理报告、视频、音频、日志、播放缓存和 Skill 快照，后台回收关联 Runtime。任务详情的“更多操作”也提供此入口。实际归档复制正在进行时等待完成，活动任务先停止；删除后列表与占用会刷新。`/data/jenkins/videos` 源文件和共享项目目录保留。详见[数据与恢复](DATA_AND_RECOVERY.md)。
 
 一次后台业务执行及其检查使用同一任务 Session。每天、每小时等周期性业务不是一条 Session 永久复用：每次周期应创建新的任务 Session，使每次结果独立归档和审计。
 

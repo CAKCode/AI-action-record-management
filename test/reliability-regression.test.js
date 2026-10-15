@@ -1223,8 +1223,21 @@ test('durable background checks release Codex, recover scheduler leases, and res
   const [recoveredLease] = store.claimDueScheduledJobs(schedulerWorker, 1);
   assert.equal(recoveredLease.id, staleLease.id);
   const dispatched = store.dispatchClaimedScheduledJob(recoveredLease.id, schedulerWorker);
-  assert.equal(dispatched.status, 'dispatched');
-  assert.equal(store.getSession(taskId).status, 'queued');
+  assert.equal(dispatched, null);
+  assert.equal(store.listScheduledJobs(taskId)[0].status, 'pending');
+  assert.equal(store.getSession(taskId).status, 'waiting_scheduled');
+  assert.equal(store.claimPendingCommands(followUpWorker, 10).find((command) => command.task_id === taskId), undefined);
+  assert.equal(store.listTurns(taskId).length, 1);
+
+  const terminalAt = new Date().toISOString();
+  fs.writeFileSync(`${taskBase}.done`, '0\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.state`, 'finished\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.meta`, [
+    `started_at=${external.startedAt}`, `ended_at=${terminalAt}`, 'exit_code=0', 'end_signal=EXIT', '',
+  ].join('\n'), 'utf8');
+  getDatabase().prepare("UPDATE scheduled_jobs SET due_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(recoveredLease.id);
+  const [readyLease] = store.claimDueScheduledJobs(schedulerWorker, 1);
+  assert.equal(store.dispatchClaimedScheduledJob(readyLease.id, schedulerWorker).status, 'dispatched');
 
   const followUpCommand = store.claimPendingCommands(followUpWorker, 10).find((command) => command.task_id === taskId);
   assert.ok(followUpCommand);
@@ -1236,61 +1249,19 @@ test('durable background checks release Codex, recover scheduler leases, and res
     persistentSessionKey: `single:${taskId}`, skillSnapshotId: null,
   }).turn;
   const followUpAttemptId = store.createAttempt(taskId, followUpTurn.id, 1, followUpWorker);
-  assert.throws(() => store.registerExternalAttempt({
-    taskId,
-    turnId: followUpTurn.id,
-    attemptId: followUpAttemptId,
-    pid: null,
-    logPath: `${taskBase}.log`,
-    donePath: `${taskBase}.done`,
-    statePath: `${taskBase}.state`,
-    metaPath: `${taskBase}.meta`,
-    label: 'converter smoke rerun',
-  }), (error) => error.statusCode === 409 && /active background generation/i.test(error.message));
-  const terminalAt = new Date().toISOString();
-  fs.writeFileSync(`${taskBase}.meta`, [
-    `started_at=${external.startedAt}`,
-    `ended_at=${terminalAt}`,
-    'exit_code=0',
-    'end_signal=EXIT',
-    '',
-  ].join('\n'), 'utf8');
   const handoff = store.finalizeSessionTurn({
     taskId, turnId: followUpTurn.id, attemptId: followUpAttemptId,
     commandId: followUpCommand.id, workerId: followUpWorker, exitCode: 0,
     summary: 'Detached execution succeeded.', resultText: 'DONE=0',
     finalStatus: 'waiting_review', retryCount: 0,
   });
-  assert.equal(handoff.status, 'waiting_scheduled');
+  assert.equal(handoff.status, 'waiting_review');
   assert.equal(handoff.activeExternalAttempts, 0);
-  assert.equal(handoff.activeScheduledJobs, 1);
+  assert.equal(handoff.activeScheduledJobs, 0);
   assert.equal(store.listExternalAttempts(taskId)[0].status, 'succeeded');
   assert.equal(store.listExternalAttempts(taskId)[0].result.exitCode, 0);
-  const [terminalCheck] = store.claimDueScheduledJobs(schedulerWorker, 1);
-  assert.equal(terminalCheck.externalAttemptId, external.id);
-  store.dispatchClaimedScheduledJob(terminalCheck.id, schedulerWorker);
-  const terminalWorker = 'background-terminal-worker';
-  const terminalCommand = store.claimPendingCommands(terminalWorker, 10)
-    .find((command) => command.task_id === taskId);
-  assert.ok(terminalCommand);
-  assert.equal(store.acquireTaskLease(taskId, terminalWorker), true);
-  const terminalTurn = store.beginSessionTurn({
-    taskId, commandId: terminalCommand.id, workerId: terminalWorker,
-    input: terminalCommand.input, persistentSessionKey: `single:${taskId}`,
-    skillSnapshotId: null,
-  }).turn;
-  const terminalAttemptId = store.createAttempt(taskId, terminalTurn.id, 1, terminalWorker);
-  const reviewed = store.finalizeSessionTurn({
-    taskId, turnId: terminalTurn.id, attemptId: terminalAttemptId,
-    commandId: terminalCommand.id, workerId: terminalWorker, exitCode: 0,
-    summary: 'Collected the terminal result.', resultText: 'DONE=0',
-    finalStatus: 'waiting_review', retryCount: 0,
-  });
-  assert.equal(reviewed.status, 'waiting_review');
-  assert.equal(reviewed.activeExternalAttempts, 0);
-  assert.equal(reviewed.activeScheduledJobs, 0);
-  assert.equal(store.listScheduledJobs(taskId).filter((job) => job.status === 'completed').length, 2);
-  assert.equal(store.listTurns(taskId).length, 3);
+  assert.equal(store.listScheduledJobs(taskId).filter((job) => job.status === 'completed').length, 1);
+  assert.equal(store.listTurns(taskId).length, 2);
   assert.equal(store.completeSession(taskId).status, 'completed');
 
   const kinds = store.listSessionWorklogs(taskId).map((event) => event.kind);
@@ -1886,7 +1857,7 @@ test('explicit converter background registration is linked and operator stop can
   assert.equal(deferredJob.status, 'pending');
   assert.ok(Date.parse(deferredJob.dueAt) > Date.now());
 
-  fs.writeFileSync(`${taskBase}.done`, '1\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.done`, '0\n', 'utf8');
   fs.writeFileSync(`${taskBase}.state`, 'finished\n', 'utf8');
   fs.writeFileSync(`${taskBase}.meta`, [
     `started_at=${external.startedAt}`,
@@ -1935,7 +1906,7 @@ test('scheduled command startup failures retry durably and terminate monitoring 
   const database = getDatabase();
   database.prepare("UPDATE tasks SET status='waiting_scheduled' WHERE id=?").run(taskId);
   database.prepare('UPDATE scheduled_jobs SET max_attempts=2 WHERE external_attempt_id=?').run(external.id);
-  fs.writeFileSync(`${taskBase}.done`, '1\n', 'utf8');
+  fs.writeFileSync(`${taskBase}.done`, '0\n', 'utf8');
   fs.writeFileSync(`${taskBase}.state`, 'finished\n', 'utf8');
   fs.writeFileSync(`${taskBase}.meta`, [
     `started_at=${external.startedAt}`,
@@ -2457,7 +2428,7 @@ test('configuration export contains portable configuration only', () => {
   const bundle = store.exportConfigBundle();
   const task = bundle.sessions.find((session) => session.id === 'ownership-task');
   assert.deepEqual(Object.keys(task).sort(), [
-    'autoResume', 'enabled', 'id', 'maxRetries', 'name', 'notes', 'objective', 'workingDir',
+    'autoResume', 'enabled', 'id', 'maxRetries', 'name', 'notes', 'objective', 'project', 'tags', 'workingDir',
   ].sort());
   assert.equal(JSON.stringify(task).includes('single:ownership-task'), false);
   assert.equal(bundle.sessions.some((session) => session.id === 'completed-audit-history'), false);

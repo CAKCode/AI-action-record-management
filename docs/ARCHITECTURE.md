@@ -52,7 +52,7 @@ Web 控制面不依赖执行适配器启动。执行能力不可用时，页面�
 - Codex Turn 结束后可以释放执行进程，同时让逻辑任务停留在 `waiting_scheduled`。
 - 有 `running` 外部执行或 `pending/leased/dispatched` 定时检查时，任务不能完成或归档。
 - 只有 `waiting_review` 或 `waiting_input` 可以显式转为 `completed`。
-- `completed` 是不可直接运行、编辑或删除的只读归档态；显式 Restore 可转回 `waiting_input` 并继续最新 Session，显式 Reset 可保留 Task 历史但放弃该 Session 并回到 `idle`。
+- `completed` 是不可直接运行或编辑的只读归档态；支持显式删除该任务及全部托管产物。Restore 可转回 `waiting_input` 并继续最新 Session，Reset 可保留 Task 历史但放弃该 Session 并回到 `idle`。
 - 完成会终止交互式 CLI、封存并校验 transcript，但保留 Bridge Runtime；Task 删除、Reset 或手工回收会释放对应原生运行资源。
 - Task 的 Skill 快照在首轮执行时冻结，恢复、Reset 后的新 Session 和后续 Turn 都使用同一快照；需要最新 Skill 集合时创建 New Task。
 - Skill 驱动的命令通过 `codex-skill-use` 显式声明一个或多个快照 Skill；平台不按命令关键字推断。

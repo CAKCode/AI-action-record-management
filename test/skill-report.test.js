@@ -7,6 +7,11 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const Database = require('better-sqlite3');
 const YAML = require('yaml');
+const vm = require('node:vm');
+const {
+  readVideoCheckReport,
+  readVideoCheckSummaryScript,
+} = require('../src/pytest-video-check');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-skill-report-'));
@@ -32,6 +37,7 @@ process.env.CODEX_ALLOW_ROOT_EXECUTION = '1';
 const store = require('../src/store');
 const { closeDatabase, getDatabase } = require('../src/database');
 const { normalizeSkillReport } = require('../src/skill-report');
+const { stableBridgeSessionId, sessionTargets } = require('../src/bridge-runtime-cleanup');
 
 function reportFixture(overrides = {}) {
   return {
@@ -268,6 +274,85 @@ async function waitForApi(port, pathname) {
 test.after(() => {
   closeDatabase();
   fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test('completed Task deletion removes archived media, viewed state and pending reclaim while retaining sources', async () => {
+  ensureReportSkill();
+  const taskId = 'completed-media-delete';
+  const runtime = createRunningTask(taskId, 'completed-media-delete-worker');
+  const sourceDir = path.join(projectDir, 'completed-media-delete-source');
+  fs.mkdirSync(sourceDir, { recursive: true });
+  const htmlPath = path.join(sourceDir, 'complete-report.html');
+  const sourceVideo = path.join(sourceDir, 'video.mp4');
+  fs.writeFileSync(sourceVideo, 'video original');
+  fs.writeFileSync(htmlPath, '<!doctype html><html><body><video src="video.mp4"></video></body></html>');
+  const { report } = publishArtifactReport(taskId, runtime, reportFixture({
+    reportKey: 'test:complete-delete', status: 'succeeded',
+    primaryExecution: { ...reportFixture().primaryExecution, workingDirectory: sourceDir, command: `pytest tests --html ${htmlPath}`, status: 'succeeded' },
+  }), [{ key: 'html', kind: 'pytest-html', path: htmlPath }], {
+    exitCode: 0, artifacts: [{ key: 'html', kind: 'pytest-html', path: htmlPath }],
+  });
+  const archived = await store.archiveSkillReportArtifacts(taskId, report.id);
+  const [artifact] = archived.artifacts;
+  const database = getDatabase();
+  assert.ok(database.prepare('SELECT COUNT(*) AS count FROM skill_report_artifact_resources WHERE task_id=?').get(taskId).count > 0);
+  store.markSkillReportArtifactMediaViewed(taskId, report.id, artifact.id, 'video:one');
+  const taskDir = path.join(dataDir, 'sessions', taskId);
+  const cacheDir = path.join(taskDir, 'skill-report-artifacts', '.playback-cache');
+  fs.mkdirSync(cacheDir, { recursive: true });
+  fs.writeFileSync(path.join(cacheDir, 'converted.mp4'), 'cache');
+  store.finalizeSessionTurn({ taskId, turnId: runtime.turn.id, attemptId: runtime.attemptId,
+    commandId: runtime.command.id, workerId: runtime.workerId, exitCode: 0,
+    summary: 'Media archived.', finalStatus: 'waiting_review', retryCount: 0 });
+  database.prepare("UPDATE scheduled_jobs SET status='completed' WHERE task_id=?").run(taskId);
+  store.updateSession({ ...store.getSession(taskId), status: 'waiting_review' });
+  const sessionKey = store.getSession(taskId).persistentSessionKey;
+  const sessionId = stableBridgeSessionId(sessionKey, projectDir);
+  const targets = sessionTargets(sessionKey, sessionId);
+  for (const directory of [targets.workfileDir, targets.skillDir, targets.codexHome, targets.chatfileDir, path.dirname(targets.recordFile)]) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+  fs.writeFileSync(path.join(targets.codexHome, 'runtime.json'), '{}');
+  fs.writeFileSync(targets.recordFile, JSON.stringify({
+    sessionId, botId: 'codex-task-sessions', botName: 'codex-task-sessions', chatKey: sessionKey,
+    workspaceId: `user:codex-task-sessions:${targets.userId}`, workspaceScope: 'user', workspaceMode: 'team',
+    cwdDir: targets.workfileDir, skillDir: targets.skillDir, chatfileDir: targets.chatfileDir, workfileDir: targets.workfileDir,
+    roomfileDir: null, createdAt: Date.now(), updatedAt: Date.now(), threadId: 'delete-runtime-thread',
+  }));
+  store.completeSession(taskId);
+  const inventory = store.listBridgeRuntimeInventory();
+  const storage = inventory.tasks.find(task => task.taskId === taskId);
+  assert.equal(storage.canDelete, true);
+  assert.ok(storage.archiveBytes >= fs.statSync(sourceVideo).size);
+  assert.ok(storage.otherBytes > 0);
+  assert.ok(storage.runtimeBytes > 0);
+  database.prepare("UPDATE skill_report_artifact_jobs SET status='processing' WHERE report_id=?").run(report.id);
+  assert.throws(() => store.deleteSession(taskId), error => error.statusCode === 409 && /artifact archival/.test(error.message));
+  assert.equal(fs.existsSync(taskDir), true);
+  assert.equal(store.listBridgeRuntimeInventory().tasks.find(task => task.taskId === taskId).deletionBlockedReason, 'archiving');
+  database.prepare("UPDATE skill_report_artifact_jobs SET status='completed' WHERE report_id=?").run(report.id);
+  const context = { idempotencyKey: 'completed-delete-request', expectedTaskCreatedAt: store.getSession(taskId).createdAt };
+  assert.equal(store.deleteSession(taskId, context), true);
+  assert.equal(store.deleteSession(taskId, context), true);
+  assert.equal(fs.existsSync(taskDir), false);
+  assert.equal(fs.readFileSync(sourceVideo, 'utf8'), 'video original');
+  assert.equal(fs.existsSync(htmlPath), true);
+  for (const table of ['skill_reports','skill_report_artifacts','skill_report_artifact_resources','skill_report_artifact_jobs','scheduled_jobs','external_attempts','turns','attempts','worklog_events']) {
+    assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE task_id=?`).get(taskId).count, 0, table);
+  }
+  assert.equal(database.prepare('SELECT COUNT(*) AS count FROM skill_report_artifact_media_views WHERE artifact_id=?').get(artifact.id).count, 0);
+  const cleanup = database.prepare('SELECT reason, status FROM bridge_cleanup_jobs WHERE task_id=?').get(taskId);
+  assert.equal(cleanup.reason, 'deleted');
+  assert.equal(cleanup.status, 'pending');
+  const cleanupWorker = 'full-delete-runtime-worker';
+  const job = store.claimBridgeCleanupJobs(cleanupWorker, 100).find(item => item.taskId === taskId);
+  assert.ok(job);
+  const result = store.processBridgeCleanupJob(job, cleanupWorker);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(fs.existsSync(targets.workspaceRoot), false);
+  assert.equal(fs.existsSync(targets.codexHome), false);
+  assert.equal(fs.existsSync(targets.recordFile), false);
+  assert.equal(fs.existsSync(sourceVideo), true);
 });
 
 test('Skill report schema preserves useful sections and forces sensitive evidence closed', () => {
@@ -1958,6 +2043,196 @@ test('multiple pytest HTML artifacts isolate media with identical file names', a
   assert.equal(new Set(resources.map((resource) => resource.artifact_id)).size, 2);
   assert.equal(new Set(resources.map((resource) => resource.id)).size, 2);
   assert.equal(new Set(resources.map((resource) => resource.managed_path)).size, 2);
+});
+
+function videoCheckFixture(directory, runId = 'check-run') {
+  fs.mkdirSync(path.join(directory, 'checks', 'details'), { recursive: true });
+  const payload = {
+    run_id: runId, complete: true, worker_state: 'finished',
+    cases: { case1: { nodeid: 'test_mix', status: 'PASS', detail_source: 'details/case1.js' } },
+  };
+  const detail = { run_id: runId, case_id: 'case1', detail: { nodeid: 'test_mix', status: 'PASS', message: 'actual check response' } };
+  fs.writeFileSync(path.join(directory, 'checks', 'results.js'), `window.__pytestVideoCheck = ${JSON.stringify(payload)};`);
+  fs.writeFileSync(path.join(directory, 'checks', 'results.json'), JSON.stringify(payload));
+  fs.writeFileSync(path.join(directory, 'checks', 'details', 'case1.js'),
+    `window.__pytestVideoCheckDetails = window.__pytestVideoCheckDetails || {};window.__pytestVideoCheckDetails["case1"] = ${JSON.stringify(detail)};`);
+  fs.writeFileSync(path.join(directory, 'checks', 'details', 'case1.json'), JSON.stringify(detail));
+  fs.writeFileSync(path.join(directory, 'checks', 'config.json'), '{"token":"private-checker-config"}');
+  const blob = JSON.stringify({ videoCheck: { run_id: runId, source: 'checks/results.js' }, tests: {} })
+    .replace(/"/g, '&#34;');
+  const html = `<!doctype html><html><body><div data-jsonblob="${blob}"></div>`
+    + `<script id="video-check-snapshot" type="application/json" data-run-id="${runId}">${JSON.stringify(payload)}</script>`
+    + '</body></html>';
+  return { html, payload, detail };
+}
+
+test('Video Check archives independently loadable results and details without copying checker runtime', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-video-check-archive-task';
+  const runtime = createRunningTask(taskId, 'pytest-video-check-archive-worker');
+  const directory = path.join(projectDir, 'video-check-archive');
+  const htmlPath = path.join(directory, 'report.html');
+  const fixture = videoCheckFixture(directory);
+  fs.writeFileSync(htmlPath, fixture.html);
+  const { report } = publishArtifactReport(taskId, runtime, reportFixture({
+    reportKey: 'pytest:video-check-archive', status: 'succeeded',
+    primaryExecution: { ...reportFixture().primaryExecution, command: `pytest tests --html ${htmlPath}`, workingDirectory: projectDir, status: 'succeeded', exitCode: 0 },
+  }), [{ key: 'html', kind: 'pytest-html', path: htmlPath }], { exitCode: 0 });
+  const [artifact] = (await store.archiveSkillReportArtifacts(taskId, report.id)).artifacts;
+  const rows = getDatabase().prepare('SELECT * FROM skill_report_artifact_resources WHERE artifact_id=?').all(artifact.id);
+  assert.deepEqual(rows.map(r => r.file_name).sort(), ['case1.js', 'case1.json', 'results.js', 'results.json']);
+  assert.equal(rows.find(r => r.file_name === 'results.js').media_type, 'text/javascript; charset=utf-8');
+  const opened = await store.openSkillReportArtifactFile(taskId, report.id, artifact.id);
+  let archived;
+  try { archived = readVideoCheckReport(await opened.fileHandle.readFile('utf8')); }
+  finally { await opened.fileHandle.close(); }
+  const summaryRow = rows.find(r => r.file_name === 'results.js');
+  const detailRow = rows.find(r => r.file_name === 'case1.js');
+  assert.ok(archived.descriptor.source.endsWith(`/resources/${summaryRow.id}`));
+  assert.equal(archived.snapshot.cases.case1.detail_source, detailRow.id);
+  assert.equal(archived.snapshot.cases.case1.status, fixture.payload.cases.case1.status);
+  assert.equal(fs.readFileSync(htmlPath, 'utf8'), fixture.html);
+
+  // Repair a legacy managed HTML that still points to its local checker files.
+  const managedPath = getDatabase().prepare('SELECT managed_path FROM skill_report_artifacts WHERE id=?').get(artifact.id).managed_path;
+  fs.writeFileSync(managedPath, fixture.html);
+  getDatabase().prepare('UPDATE skill_report_artifacts SET bytes=?, sha256=? WHERE id=?').run(
+    Buffer.byteLength(fixture.html), require('node:crypto').createHash('sha256').update(fixture.html).digest('hex'), artifact.id,
+  );
+  await store.archiveSkillReportArtifacts(taskId, report.id);
+  assert.ok(readVideoCheckReport(fs.readFileSync(managedPath, 'utf8')).descriptor.source.endsWith(`/resources/${summaryRow.id}`));
+  assert.ok(store.listSessionWorklogs(taskId).some(e => e.kind === 'skill.report.artifact.repaired'));
+  assert.equal(getDatabase().prepare('SELECT COUNT(*) AS n FROM skill_report_artifact_resources WHERE artifact_id=?').get(artifact.id).n, 4);
+
+  // The archived UI must keep working after the local checker output disappears.
+  fs.rmSync(path.join(directory, 'checks'), { recursive: true });
+  const context = { window: {} };
+  for (const row of [summaryRow, detailRow]) {
+    const resource = await store.openSkillReportArtifactResourceFile(taskId, report.id, artifact.id, row.id);
+    try { vm.runInNewContext(await resource.fileHandle.readFile('utf8'), context); }
+    finally { await resource.fileHandle.close(); }
+  }
+  assert.equal(context.window.__pytestVideoCheck.cases.case1.detail_source, detailRow.id);
+  assert.equal(context.window.__pytestVideoCheckDetails.case1.detail.message, 'actual check response');
+});
+
+test('Video Check backfill can target one artifact without creating other declared archives', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-video-check-backfill-scope-task';
+  const runtime = createRunningTask(taskId, 'pytest-video-check-backfill-scope-worker');
+  const directory = path.join(projectDir, 'video-check-backfill-scope');
+  const htmlPath = path.join(directory, 'report.html');
+  const otherPath = path.join(directory, 'other.html');
+  const fixture = videoCheckFixture(directory);
+  fs.writeFileSync(htmlPath, fixture.html);
+  fs.writeFileSync(otherPath, '<!doctype html><html><body>unrelated report</body></html>');
+  const { report } = publishArtifactReport(taskId, runtime, reportFixture({
+    reportKey: 'pytest:video-check-backfill-scope', status: 'succeeded',
+    primaryExecution: { ...reportFixture().primaryExecution, command: `pytest tests --html ${htmlPath} && pytest tests --html ${otherPath}`, workingDirectory: projectDir, status: 'succeeded', exitCode: 0 },
+  }), [{ key: 'html', kind: 'pytest-html', path: htmlPath }, { key: 'other', kind: 'pytest-html', path: otherPath }], { exitCode: 0 });
+  await store.archiveSkillReportArtifacts(taskId, report.id, { artifactKeys: ['html'] });
+  const artifacts = getDatabase().prepare('SELECT artifact_key FROM skill_report_artifacts WHERE report_id=?').all(report.id);
+  assert.deepEqual(artifacts, [{ artifact_key: 'html' }]);
+  assert.equal(fs.readFileSync(otherPath, 'utf8'), '<!doctype html><html><body>unrelated report</body></html>');
+});
+
+test('Video Check preview keeps polling current results and loading per-case details', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-video-check-preview-task';
+  const runtime = createRunningTask(taskId, 'pytest-video-check-preview-worker');
+  const directory = path.join(projectDir, 'video-check-preview');
+  const htmlPath = path.join(directory, 'report.html');
+  const fixture = videoCheckFixture(directory);
+  fs.writeFileSync(htmlPath, fixture.html);
+  const external = registerArtifactExecution(taskId, runtime, projectDir, `pytest tests --html ${htmlPath}`, {
+    running: true, artifacts: [{ key: 'html', kind: 'pytest-html', path: htmlPath }],
+  });
+  const preview = await store.openExternalAttemptArtifactFile(taskId, external.id, 'html');
+  const check = readVideoCheckReport(preview.content.toString('utf8'));
+  assert.equal(check.descriptor.source, `/api/sessions/${taskId}/external-attempts/${external.id}/artifacts/html/resources/checks/results.js`);
+  assert.equal(check.snapshot.cases.case1.detail_source, 'details/case1.js');
+  for (const status of ['RUNNING', 'WARN']) {
+    const payload = { ...fixture.payload, complete: status === 'WARN', cases: { case1: { ...fixture.payload.cases.case1, status } } };
+    fs.writeFileSync(path.join(directory, 'checks', 'results.js'), `window.__pytestVideoCheck = ${JSON.stringify(payload)};`);
+    const resource = await store.openExternalAttemptArtifactResourceFile(taskId, external.id, 'html', 'checks/results.js');
+    try { assert.equal(readVideoCheckSummaryScript(await resource.fileHandle.readFile('utf8')).cases.case1.status, status); }
+    finally { await resource.fileHandle.close(); }
+  }
+});
+
+test('Video Check signed archived and live scripts load without browser credentials', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-video-check-signed-task';
+  const runtime = createRunningTask(taskId, 'pytest-video-check-signed-worker');
+  const directory = path.join(projectDir, 'video-check-signed');
+  const htmlPath = path.join(directory, 'report.html');
+  const fixture = videoCheckFixture(directory);
+  fs.writeFileSync(htmlPath, fixture.html);
+  const declarations = [{ key: 'html', kind: 'pytest-html', path: htmlPath }];
+  const { report, external } = publishArtifactReport(taskId, runtime, reportFixture({
+    reportKey: 'pytest:video-check-signed', status: 'succeeded',
+    primaryExecution: { ...reportFixture().primaryExecution, command: `pytest tests --html ${htmlPath}`, workingDirectory: projectDir, status: 'succeeded', exitCode: 0 },
+  }), declarations, { exitCode: 0, artifacts: declarations });
+  const [artifact] = (await store.archiveSkillReportArtifacts(taskId, report.id)).artifacts;
+  const listener = http.createServer();
+  await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
+  const port = listener.address().port;
+  await new Promise(resolve => listener.close(resolve));
+  const server = spawn(process.execPath, ['server.js'], {
+    cwd: ROOT_DIR,
+    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), CODEX_DISABLE_WORKER: '1',
+      CODEX_DESK_AUTH_USER: 'check-test', CODEX_DESK_AUTH_PASSWORD: 'check-test-password',
+      CODEX_DB_BACKUP_INTERVAL_HOURS: '0', CODEX_RECOVERY_CHECKPOINT_INTERVAL_HOURS: '0' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  server.stdout.on('data', c => { output += c; });
+  server.stderr.on('data', c => { output += c; });
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    await waitForApi(port, '/api/health');
+    for (const artifactUrl of [artifact.url, `/api/sessions/${taskId}/external-attempts/${external.id}/artifacts/html`]) {
+      const response = await fetch(base + artifactUrl, { headers: { Authorization: `Basic ${Buffer.from('check-test:check-test-password').toString('base64')}` } });
+      assert.equal(response.status, 200, `${artifactUrl}: ${output}`);
+      const check = readVideoCheckReport(await response.text());
+      const summary = await fetch(base + check.descriptor.source + '?t=123');
+      assert.equal(summary.status, 200);
+      assert.match(summary.headers.get('content-type'), /javascript/);
+      const payload = readVideoCheckSummaryScript(await summary.text());
+      assert.equal(payload.cases.case1.status, 'PASS');
+      const directoryUrl = check.descriptor.source.slice(0, check.descriptor.source.lastIndexOf('/') + 1);
+      for (const state of [check.snapshot, payload]) {
+        const detailUrl = directoryUrl + state.cases.case1.detail_source + '?t=123';
+        const detail = await fetch(base + detailUrl);
+        assert.equal(detail.status, 200);
+        const context = { window: {} };
+        vm.runInNewContext(await detail.text(), context);
+        assert.equal(context.window.__pytestVideoCheckDetails.case1.detail.message, 'actual check response');
+      }
+    }
+  } finally {
+    server.kill('SIGTERM');
+    await new Promise(resolve => { if (server.exitCode != null) resolve(); else server.once('exit', resolve); });
+  }
+});
+
+test('Video Check missing details do not block other resources or the archived HTML', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-video-check-missing-task';
+  const runtime = createRunningTask(taskId, 'pytest-video-check-missing-worker');
+  const directory = path.join(projectDir, 'video-check-missing');
+  const htmlPath = path.join(directory, 'report.html');
+  const fixture = videoCheckFixture(directory);
+  fs.writeFileSync(htmlPath, fixture.html);
+  fs.unlinkSync(path.join(directory, 'checks', 'details', 'case1.js'));
+  const { report } = publishArtifactReport(taskId, runtime, reportFixture({
+    reportKey: 'pytest:video-check-missing', status: 'succeeded',
+    primaryExecution: { ...reportFixture().primaryExecution, command: `pytest tests --html ${htmlPath}`, workingDirectory: projectDir, status: 'succeeded', exitCode: 0 },
+  }), [{ key: 'html', kind: 'pytest-html', path: htmlPath }], { exitCode: 0 });
+  const [artifact] = (await store.archiveSkillReportArtifacts(taskId, report.id)).artifacts;
+  assert.ok(artifact);
+  const warning = store.listSessionWorklogs(taskId).find(e => e.kind === 'skill.report.artifact.media_partial');
+  assert.match(JSON.stringify(warning.payload), /Video Check.*case1\.js/);
 });
 
 test('pytest HTML archival embeds referenced logtxt files for offline report viewing', async () => {

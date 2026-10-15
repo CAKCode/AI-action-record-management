@@ -217,6 +217,13 @@ const RUNTIME_REASON_KEYS = Object.freeze({
 
 const messages = {
   zh: {
+    deleteTaskArtifacts: '删除任务及产物', taskArtifactsDeleted: '任务及平台产物已删除，Runtime 由后台回收。', reclaimRuntimeOnly: '仅回收 Runtime', taskStorageLabel: 'TASK STORAGE',
+    taskStorageHeading: '任务与归档产物', taskStorageNote: '包含报告、视频、音频、日志、播放缓存和 Skill 快照。/data/jenkins/videos 源文件由你手动清理。',
+    storageInventoryHeadline: '任务与 Runtime 占用', storageInventoryLabel: 'STORAGE INVENTORY', storageInventorySubtitle: '查看任务运行环境、归档产物及合计占用，回收 Runtime 或删除任务及产物。', reclaimableRuntimeBytes: 'Runtime 可释放',
+    archivedStorage: '归档产物', otherTaskStorage: '日志与快照等', combinedStorage: '合计占用', platformTaskStorage: '平台任务产物',
+    deleteAfterStop: '停止后可删除', deleteAfterArchive: '正在归档', noTaskStorage: '没有保留的任务产物。', storageEstimatePartial: '部分文件无法统计', taskChangedRefresh: '任务已变更，请刷新后再操作。',
+    confirmDeleteTaskArtifacts: '删除任务「{name}」及其报告、视频、音频、日志、播放缓存和 Runtime？/data/jenkins/videos 源文件保留。',
+    reportExecution: '执行信息', unreportedExecutions: '尚未关联报告的执行',
     workspaceTools: '工具与显示', workbenchGuide: '工作台说明', moreActions: '更多操作', taskReports: '报告', nextInstruction: '下一步指令',
     taskListDescription: '任务名称与目标', taskListCount: '{count} 个任务', taskObjective: '任务目标',
     expandObjective: '展开', collapseObjective: '收起', showTaskContext: '任务信息', hideTaskContext: '收起信息',
@@ -260,6 +267,13 @@ const messages = {
     dataProtection: '数据保护', dataProtectionHeading: '数据完整性与恢复保护', loadingProtection: '正在检查数据保护状态...', noProtectionStatus: '尚未检查数据保护状态。', protectionChecked: '检查于 {time}', protectionRefreshFailed: '状态刷新失败：{error}', platformStorage: '平台数据', databaseBackup: '在线数据库备份', recoveryCheckpoint: '平台恢复检查点', terminalLogArchive: '终态日志托管', protectionHealthy: '正常', protectionDegraded: '异常', protectionPending: '待建立', protectionInProgress: '进行中', protectionRotationPending: '待轮转', sqliteCheck: 'SQLite 检查', stateInvariants: '状态约束', storageHeadroom: '最低可用空间', lastSuccess: '最近成功', nextRun: '下次计划', packageRetention: '有效包 / 保留数', auditContinuity: '审计连续性', auditHealthy: '已持久化', auditPending: '{count} 条待写入', invariantIssues: '{count} 项异常', storageAvailable: '{percent}% · {bytes}', rotationPendingDetail: '超出 {count} 份，下次成功发布后轮转', schedulerError: '调度错误', unreadablePackages: '不可读取包', archiveCoverage: '托管覆盖', archiveCoverageDetail: '{archived} / {total} 条终态日志', archiveLastVerified: '最近完整校验', archiveFailures: '托管异常', archiveFailureDetail: '{count} 条需修复',
   },
   en: {
+    deleteTaskArtifacts: 'Delete task & artifacts', taskArtifactsDeleted: 'Task and managed artifacts deleted. Runtime reclamation runs in the background.', reclaimRuntimeOnly: 'Reclaim Runtime only', taskStorageLabel: 'TASK STORAGE',
+    taskStorageHeading: 'Tasks & archived artifacts', taskStorageNote: 'Reports, video, audio, logs, playback caches and Skill snapshots. Source files in /data/jenkins/videos remain for manual cleanup.',
+    storageInventoryHeadline: 'Task & Runtime usage', storageInventoryLabel: 'STORAGE INVENTORY', storageInventorySubtitle: 'Inspect Runtime and archived artifact usage, reclaim Runtime or delete a Task and its managed files.', reclaimableRuntimeBytes: 'Reclaimable Runtime',
+    archivedStorage: 'Archived artifacts', otherTaskStorage: 'Logs, snapshots, etc.', combinedStorage: 'Combined usage', platformTaskStorage: 'Platform task files',
+    deleteAfterStop: 'Stop before deleting', deleteAfterArchive: 'Archival in progress', noTaskStorage: 'No retained task artifacts.', storageEstimatePartial: 'Some files could not be measured', taskChangedRefresh: 'The task has changed. Refresh before continuing.',
+    confirmDeleteTaskArtifacts: 'Delete task “{name}” together with its reports, video, audio, logs, playback caches and Runtime? Source files in /data/jenkins/videos remain.',
+    reportExecution: 'Execution evidence', unreportedExecutions: 'Executions without a linked report',
     workspaceTools: 'Tools & display', workbenchGuide: 'About this workbench', moreActions: 'More actions', taskReports: 'Reports', nextInstruction: 'Next instruction',
     taskListDescription: 'Task name & objective', taskListCount: '{count} tasks', taskObjective: 'Objective',
     expandObjective: 'Expand', collapseObjective: 'Collapse', showTaskContext: 'Task info', hideTaskContext: 'Hide info',
@@ -846,7 +860,7 @@ function updateViewHeading() {
     overview: ['overviewTitle', 'overviewSubtitle'],
     tasks: ['tasksTitle', 'tasksSubtitle'],
     skills: ['skillsTitle', 'skillsSubtitle'],
-    runtime: ['runtimeInventoryTitle', 'runtimeInventorySubtitle'],
+    runtime: ['runtimeInventoryTitle', 'storageInventorySubtitle'],
     audit: ['auditTitle', 'auditSubtitle'],
   };
   const [title, subtitle] = map[state.view];
@@ -2272,15 +2286,17 @@ function skillReportList(reports) {
     <div class="business-reports-heading"><span class="section-label">${escapeHtml(tr('businessReports'))}</span><strong>${reports.length}</strong></div>
     <div class="business-report-list">${reports.map((report) => {
     const status = reportStatusPresentation(report.status);
+    const card = globalThis.CodexReportCards?.definition(report.reportType)
+      || { id: 'business', labels: { zh: '业务结果', en: 'Business result' } };
     const observed = report.observedAt
       ? `<span>${escapeHtml(tr('reportObservedAt'))} <time>${escapeHtml(formatTime(report.observedAt))}</time></span>`
       : '';
     const metrics = (report.metrics || []).length
       ? `<div class="report-metrics">${report.metrics.map((metric) => `<div class="report-metric tone-${escapeHtml(metric.tone || 'neutral')}"><span>${escapeHtml(metric.label)}</span><strong>${escapeHtml(reportDisplayValue(metric.value))}</strong></div>`).join('')}</div>`
       : '';
-    return `<article class="business-report report-status-${escapeHtml(report.status)}">
+    return `<article class="business-report report-card-${escapeHtml(card.id)} report-status-${escapeHtml(report.status)}" data-report-key="${escapeHtml(report.reportKey || report.id || '')}">
       <header class="business-report-head">
-        <div><span class="report-skill">${escapeHtml(report.skillId)} <code>v${Number(report.skillVersion || 0)}</code></span><h3>${escapeHtml(report.title)}</h3></div>
+        <div><div class="report-card-kicker"><span class="report-card-type">${escapeHtml(card.labels[state.lang])}</span><span class="report-skill">${escapeHtml(report.skillId)} <code>v${Number(report.skillVersion || 0)}</code></span></div><h3>${escapeHtml(report.title)}</h3></div>
         <span class="report-status tone-${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>
       </header>
       <p class="business-report-summary">${escapeHtml(report.summary)}</p>
@@ -2292,6 +2308,7 @@ function skillReportList(reports) {
       report.status,
       report.artifactDeclarations,
     )}
+      ${reportExecutionDetails(report)}
       <div class="report-sections">${(report.sections || []).map(skillReportSection).join('')}</div>
       <details class="report-raw"><summary>${escapeHtml(tr('reportRawPayload'))}</summary><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre></details>
     </article>`;
@@ -2299,14 +2316,43 @@ function skillReportList(reports) {
   </section>`;
 }
 
+function reportExecutionDetails(report) {
+  const execution = report.primaryExecution;
+  if (!execution?.command) return '';
+  const fields = [
+    ['runtimeWorkingDir', execution.workingDirectory],
+    ['commandPath', execution.commandPath],
+    ['exitCode', execution.exitCode],
+    ['startedAtShort', execution.startedAt ? formatTime(execution.startedAt) : ''],
+    ['finishedAtShort', execution.finishedAt ? formatTime(execution.finishedAt) : ''],
+  ].filter(([, value]) => value != null && value !== '');
+  return `<details class="report-section report-execution"><summary>${escapeHtml(tr('reportExecution'))}</summary><div class="report-section-body">
+    <pre class="business-command">${escapeHtml(execution.command)}</pre>
+    <dl class="report-fields">${fields.map(([key, value]) => `<div><dt>${escapeHtml(tr(key))}</dt><dd><code>${escapeHtml(String(value))}</code></dd></div>`).join('')}</dl>
+  </div></details>`;
+}
+
+function reportCoversExecution(report, attempt) {
+  const id = report.executionEvidence?.externalAttemptId;
+  if (id) return id === attempt.id;
+  const execution = report.primaryExecution;
+  if (execution?.commandPath && execution.commandPath === attempt.commandPath) return true;
+  return Boolean(execution?.startedAt && attempt.startedAt
+    && execution.startedAt === attempt.startedAt && execution.command === attempt.command);
+}
+
 function businessReportPage(reports, externalAttempts) {
   reports = reportsWithRegisteredArtifacts(reports, externalAttempts);
-  const executions = businessExecutionList(reports, externalAttempts);
+  const unreported = externalAttempts.filter(attempt => !reports.some(report => reportCoversExecution(report, attempt)));
+  const executions = businessExecutionList([], unreported);
   const reportList = skillReportList(reports);
   if (!executions && !reportList) {
     return `<div class="empty-state">${escapeHtml(tr('noBusinessReports'))}</div>`;
   }
-  return `<div class="business-report-page">${executions}${reportList}</div>`;
+  const remaining = executions
+    ? `<section class="unreported-executions"><h3>${escapeHtml(tr('unreportedExecutions'))}</h3>${executions}</section>`
+    : '';
+  return `<div class="business-report-page">${reportList}${remaining}</div>`;
 }
 
 function operationAuditList(events) {
@@ -4054,9 +4100,23 @@ function bridgeInventoryRow(session) {
         <span><b>${escapeHtml(tr('lastRun'))}</b>${escapeHtml(lastRun)}</span>
       </div>
       <div class="inventory-action">
-        ${session.reclaimable ? `<button class="button danger small" data-action="reclaim-bridge-session" data-id="${escapeHtml(session.sessionId)}"${state.bridgeReclaimSubmitting ? ' disabled' : ''}>${escapeHtml(tr('deleteReleaseRuntime'))}</button>` : ''}
+        ${session.reclaimable ? `<button class="button secondary small" data-action="reclaim-bridge-session" data-id="${escapeHtml(session.sessionId)}"${state.bridgeReclaimSubmitting ? ' disabled' : ''}>${escapeHtml(tr('reclaimRuntimeOnly'))}</button>` : ''}
       </div>
     </article>`;
+}
+
+function taskStorageRow(task) {
+  const measurements = [
+    ['inventoryBytes', task.runtimeBytes], ['archivedStorage', task.archiveBytes],
+    ['otherTaskStorage', task.otherBytes], ['combinedStorage', task.totalBytes],
+  ];
+  return `<article class="task-storage-row">
+    <div class="task-storage-identity"><button class="task-title-button" data-action="open-task" data-id="${escapeHtml(task.taskId)}">${escapeHtml(task.name || task.taskId)}</button><code>${escapeHtml(task.taskId)}</code><span class="status-badge ${escapeHtml(task.taskStatus)}">${escapeHtml(tr(task.taskStatus))}</span>${task.unreadableEntries ? `<small>${escapeHtml(tr('storageEstimatePartial'))}</small>` : ''}</div>
+    <dl class="task-storage-measurements">${measurements.map(([label, value]) => `<div><dt>${escapeHtml(tr(label))}</dt><dd>${escapeHtml(formatBytes(value))}</dd></div>`).join('')}</dl>
+    <div class="task-storage-actions">${task.canDelete
+      ? `<button class="button danger small" data-action="delete-task" data-id="${escapeHtml(task.taskId)}" data-task-created-at="${escapeHtml(task.taskCreatedAt || '')}">${escapeHtml(tr('deleteTaskArtifacts'))}</button>`
+      : `<span class="inline-note">${escapeHtml(tr(task.deletionBlockedReason === 'archiving' ? 'deleteAfterArchive' : 'deleteAfterStop'))}</span>`}</div>
+  </article>`;
 }
 
 function renderBridgeInventory() {
@@ -4068,7 +4128,9 @@ function renderBridgeInventory() {
     ['inventoryTotal', state.bridgeInventoryLoaded ? Number(summary.total || 0) : '-'],
     ['inventoryReclaimable', state.bridgeInventoryLoaded ? Number(summary.reclaimable || 0) : '-'],
     ['inventoryBytes', state.bridgeInventoryLoaded ? formatBytes(summary.totalBytes) : '-'],
-    ['inventoryReclaimableBytes', state.bridgeInventoryLoaded ? formatBytes(summary.reclaimableBytes) : '-'],
+    ['reclaimableRuntimeBytes', state.bridgeInventoryLoaded ? formatBytes(summary.reclaimableBytes) : '-'],
+    ['platformTaskStorage', state.bridgeInventoryLoaded && summary.taskBytes != null ? formatBytes(summary.taskBytes) : '-'],
+    ['combinedStorage', state.bridgeInventoryLoaded && summary.combinedBytes != null ? formatBytes(summary.combinedBytes) : '-'],
   ];
   renderHtml('bridgeInventoryMetrics', '#bridgeInventoryMetrics', metrics.map(([label, value]) => `
     <div class="metric"><span>${escapeHtml(tr(label))}</span><strong>${escapeHtml(value)}</strong></div>`).join(''));
@@ -4078,6 +4140,11 @@ function renderBridgeInventory() {
       ? sessions.map(bridgeInventoryRow).join('')
       : `<div class="empty-state">${escapeHtml(tr(state.bridgeInventoryLoaded ? 'noBridgeSessions' : 'inventoryNotScanned'))}</div>`);
   renderHtml('bridgeInventoryList', '#bridgeInventoryList', listHtml);
+  const taskStorage = Array.isArray(inventory.tasks) ? inventory.tasks : [];
+  renderHtml('taskStorageList', '#taskStorageList', initialLoading
+    ? `<div class="inventory-loading"><div class="loading-bar"></div></div>`
+    : taskStorage.length ? taskStorage.map(taskStorageRow).join('')
+      : `<div class="empty-state">${escapeHtml(tr(state.bridgeInventoryLoaded && Array.isArray(inventory.tasks) ? 'noTaskStorage' : 'inventoryNotScanned'))}</div>`);
   $('#bridgeInventoryScannedAt').textContent = initialLoading
     ? tr('loadingInventory')
     : (summary.scannedAt ? trf('inventoryScanned', { time: formatTime(summary.scannedAt) }) : tr('inventoryNotScanned'));
@@ -4474,10 +4541,10 @@ function renderTaskDetail(task) {
       ${archived ? `<button class="button primary small" data-action="restore-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('restoreArchived'))}</button>` : ''}
       ${review ? `<button class="button primary small" data-action="complete-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('complete'))}</button>` : ''}
       ${running && task.status !== 'stopping' ? `<button class="button danger small" data-action="stop-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('stop'))}</button>` : ''}
-      ${canReset || (!running && !archived) ? `<details class="toolbar-menu detail-tools"><summary class="button secondary small">${escapeHtml(tr('moreActions'))}<span aria-hidden="true">⌄</span></summary><div class="toolbar-menu-panel">
+      ${canReset || !running ? `<details class="toolbar-menu detail-tools"><summary class="button secondary small">${escapeHtml(tr('moreActions'))}<span aria-hidden="true">⌄</span></summary><div class="toolbar-menu-panel">
         ${!running && !archived ? `<button class="button secondary small" data-action="edit-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('edit'))}</button>` : ''}
         ${canReset ? `<button class="button secondary small" data-action="reset-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('resetSession'))}</button>` : ''}
-        ${!running && !archived ? `<button class="button danger small" data-action="delete-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('delete'))}</button>` : ''}
+        ${!running ? `<button class="button danger small" data-action="delete-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('deleteTaskArtifacts'))}</button>` : ''}
       </div></details>` : ''}
       <button class="icon-button" data-close="taskDetailModal" aria-label="${escapeHtml(tr('close'))}">&#215;</button>
     </div>`);
@@ -4780,19 +4847,29 @@ async function resetTask(id) {
   } catch { scheduleDashboardPoll(0); }
 }
 
-async function deleteTask(id) {
-  if (!window.confirm(tr('confirmDeleteTask'))) return;
-  const task = findTask(id);
-  if (!task) return;
+async function deleteTask(id, expectedCreatedAt = '') {
   try {
+    const task = findTask(id) || await api(`/api/sessions/${encodeURIComponent(id)}`);
+    if (expectedCreatedAt && expectedCreatedAt !== task.createdAt) throw new Error(tr('taskChangedRefresh'));
+    if (!window.confirm(trf('confirmDeleteTaskArtifacts', { name: task.name || task.id }))) return;
     await requestTaskOperation(task, 'delete');
-    closeModal('taskDetailModal');
-    toast(tr('taskDeleted'));
+    if (state.currentTaskId === id) {
+      closeModal('taskDetailModal');
+      state.currentTaskId = '';
+    }
+    state.dashboard.sessions = (state.dashboard.sessions || []).filter(item => item.id !== id);
+    state.expandedTaskObjectives.delete(id);
+    renderOverview();
+    renderTasks();
+    toast(tr('taskArtifactsDeleted'));
   } catch (error) {
     toast(error.message, 'error');
     return;
   }
-  try { await loadDashboard({ force: true }); } catch { scheduleDashboardPoll(0); }
+  try {
+    await loadDashboard({ force: true });
+    if (state.view === 'runtime') await loadBridgeInventory();
+  } catch { scheduleDashboardPoll(0); }
 }
 
 async function openSkillAttributionEditor(executionId) {
@@ -5096,7 +5173,7 @@ document.addEventListener('click', async (event) => {
   if (action.dataset.action === 'complete-task') await completeTask(id);
   if (action.dataset.action === 'restore-task') await restoreArchivedTask(id);
   if (action.dataset.action === 'reset-task') await resetTask(id);
-  if (action.dataset.action === 'delete-task') await deleteTask(id);
+  if (action.dataset.action === 'delete-task') await deleteTask(id, action.dataset.taskCreatedAt);
   if (action.dataset.action === 'new-skill') openSkillEditor();
   if (action.dataset.action === 'edit-skill') {
     try {

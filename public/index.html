@@ -171,12 +171,18 @@
       <section class="view" id="view-runtime">
         <div class="summary-band inventory-summary-band">
           <div class="summary-copy">
-            <span class="section-label" data-i18n="nativeRuntime">NATIVE RUNTIME</span>
-            <h2 data-i18n="runtimeInventoryHeadline">原生 Session 资源与归属</h2>
+            <span class="section-label" data-i18n="storageInventoryLabel">STORAGE INVENTORY</span>
+            <h2 data-i18n="storageInventoryHeadline">任务与 Runtime 占用</h2>
             <p id="bridgeInventoryScannedAt" data-i18n="inventoryNotScanned">尚未扫描</p>
           </div>
           <div class="metric-grid" id="bridgeInventoryMetrics"></div>
         </div>
+        <section class="task-storage-section">
+          <div class="section-head">
+            <div><span class="section-label" data-i18n="taskStorageLabel">TASK STORAGE</span><h2 data-i18n="taskStorageHeading">任务与归档产物</h2><p class="inline-note" data-i18n="taskStorageNote">包含报告、视频、音频、日志、播放缓存和 Skill 快照。源视频由你手动清理。</p></div>
+          </div>
+          <div class="task-storage-list" id="taskStorageList"></div>
+        </section>
         <section class="protection-section">
           <div class="section-head">
             <div>
@@ -315,6 +321,7 @@
   <input class="hidden" type="file" id="skillZipInput" accept="application/zip,application/x-zip-compressed,.zip">
   <script src="/vendor/xterm/xterm.js"></script>
   <script src="/vendor/xterm/addon-fit.js"></script>
+  <script src="/report-cards.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

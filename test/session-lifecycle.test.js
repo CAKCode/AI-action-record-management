@@ -645,9 +645,6 @@ test('a task persists across turns and becomes history only after explicit compl
   });
   assert.equal(storageEdit.status, 0, storageEdit.stderr);
   assert.match(storageEdit.stdout, /^409:Completed sessions are immutable history records/m);
-  const deleted = await request('/api/sessions/verify-task', { method: 'DELETE' });
-  assert.equal(deleted.response.status, 409);
-  assert.equal((await request('/api/sessions/verify-task')).payload.status, 'completed');
 
   const retainedRuntime = createFakeBridgeRuntime(
     completed.payload.persistentSessionKey,
@@ -2985,6 +2982,48 @@ test('deleting a reviewable task removes logs, command executions, and skill sna
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM command_executions WHERE task_id='delete-audit-task'").get().count, 0);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM command_skill_attributions WHERE task_id='delete-audit-task'").get().count, 0);
   db.close();
+});
+
+test('completed Tasks can be deleted with their managed artifacts and the same request can be replayed', async () => {
+  const id = 'completed-artifact-delete';
+  const created = await request('/api/sessions', {
+    method: 'POST', body: { id, name: 'Completed artifact deletion', objective: 'Verify full cleanup', workingDir: projectDir },
+  });
+  assert.equal(created.response.status, 201);
+  const taskDirectory = path.join(dataDir, 'sessions', id);
+  const artifactDirectory = path.join(taskDirectory, 'skill-report-artifacts', 'report-1');
+  const sourceVideo = path.join(projectDir, 'delete-source-preserved.mp4');
+  const neighbor = path.join(dataDir, 'sessions', 'neighbor-delete-preserved');
+  fs.mkdirSync(artifactDirectory, { recursive: true });
+  fs.mkdirSync(neighbor, { recursive: true });
+  fs.writeFileSync(path.join(artifactDirectory, 'video.mp4'), 'managed video');
+  fs.writeFileSync(path.join(artifactDirectory, 'result.html'), '<!doctype html><body>Result</body>');
+  fs.writeFileSync(sourceVideo, 'source video');
+  fs.writeFileSync(path.join(neighbor, 'keep.log'), 'neighbor task');
+  const snapshotFiles = path.join(runtimeDir, 'skill-snapshots', id);
+  fs.mkdirSync(snapshotFiles, { recursive: true });
+  fs.writeFileSync(path.join(snapshotFiles, 'SKILL.md'), '# retained snapshot');
+  const database = new Database(path.join(dataDir, 'codex-tasks.db'));
+  database.prepare("UPDATE tasks SET status='completed', archived_at=? WHERE id=?").run(new Date().toISOString(), id);
+  database.close();
+  const inventory = await request('/api/runtime/bridge-sessions');
+  const storage = inventory.payload.tasks.find(task => task.taskId === id);
+  assert.equal(storage.canDelete, true);
+  assert.ok(storage.archiveBytes > 0);
+  assert.equal(storage.runtimeBytes, 0);
+  const headers = { 'idempotency-key': 'completed-artifact-delete-once', 'x-task-created-at': created.payload.createdAt };
+  const deleted = await request(`/api/sessions/${id}`, { method: 'DELETE', headers });
+  assert.equal(deleted.response.status, 200);
+  assert.equal((await request(`/api/sessions/${id}`)).response.status, 404);
+  assert.equal(fs.existsSync(taskDirectory), false);
+  assert.equal(fs.existsSync(snapshotFiles), false);
+  assert.equal(fs.readFileSync(sourceVideo, 'utf8'), 'source video');
+  assert.equal(fs.readFileSync(path.join(neighbor, 'keep.log'), 'utf8'), 'neighbor task');
+  const replay = await request(`/api/sessions/${id}`, { method: 'DELETE', headers });
+  assert.equal(replay.response.status, 200);
+  assert.deepEqual(replay.payload, { ok: true });
+  const remaining = await request('/api/runtime/bridge-sessions');
+  assert.equal(remaining.payload.tasks.some(task => task.taskId === id), false);
 });
 
 test('expired worker leases become interrupted without duplicate execution', async () => {

@@ -14,6 +14,40 @@ Skill 结构化报告把业务结论与终端原始输出分开。Skill 负责�
 
 折叠只是展示策略，不是权限边界。测试分析模式按原始证据保存报告内容，API、报告页和 HTML artifact 都可以返回完整的 AK、SK、Token、Authorization、Cookie、密码及其他凭据值；这些值不会因为命中凭据特征而触发脱敏或中断。由于报告可能包含高敏感信息，部署环境必须限制报告、日志、备份和恢复包的访问范围。
 
+## 固定登记卡片
+
+各业务共用五类卡片，类型使用现有 `reportType`，不用新增上报协议：
+
+| 卡片 | `reportType` | 主要内容 |
+| --- | --- | --- |
+| 测试结果 | `test-result` | 每轮指标、用例结果、HTML 报告 |
+| 部署结果 | `deployment-result` | 目标、组件、版本、开始/结束和结论 |
+| 失败分析 | `failure-analysis` | 判断、预期/实际、证据和下一步 |
+| 流程进度 | `workflow-progress` | 业务定义的阶段、当前进度和最终结果 |
+| 通用业务结果 | `business-result` | 其余业务的结果和详情 |
+
+卡片统一按标题/状态、结论、指标、报告文件、执行信息、业务详情、原始数据排列。
+任务摘要保持原有展示。结构化报告把主命令等执行信息收进对应报告的可展开区域；
+已经按 External Attempt 关联到报告的执行不再额外展示一张重复执行卡。
+未关联报告的执行仍保留。历史和自定义类型使用通用卡片，服务端不增加类型白名单。
+
+共用 Skill 的版本化源码在 [task-reporting](../skills/task-reporting/SKILL.md)，
+登记字段见其 [cards.md](../skills/task-reporting/references/cards.md)。安装到用户级
+Skill 目录后，新 Task 的 Skill 快照可以发现它；业务 Skill 继续作为真实发布者。
+
+使用平台 helper 直接生成骨架，不需要额外调用模型：
+
+```bash
+codex-skill-use cloud-recording-test -- codex-skill-report template \
+  --type test-result --report-key <logical-run-key> --status running \
+  --external-attempt <TRACKING_ID> --output <run-dir>/report.json
+```
+
+`--type` 也接受 `test`、`deployment`、`analysis`、`workflow`、`business` 简写。
+`--title`、`--summary`、`--command`、`--working-dir` 填入已有事实；未知指标保持空数组，
+业务结果由执行 Skill 填入。省略 `--output` 时输出 JSON，生成不会触发发布或数据库写入。
+模板生成可在本地执行；实际 `publish` 继续使用现有平台上下文。部署仍只登记开始和结束。
+
 ## 发布
 
 报告必须在受管任务的 Skill 快照中，通过 `codex-skill-use` 声明真实发布者：
@@ -112,6 +146,15 @@ MPD，以及 AVIF、BMP、GIF、JPEG、PNG、SVG、WebP 图片会复制到该 HT
 托管 HTML；历史报告中精确匹配受支持版本的 jsDelivr HLS、FLV、DASH 和 Shaka 脚本也会由
 平台内置、摘要校验的兼容资源替换，不依赖查看报告的电脑访问外网。旧 HLS.js 1.5.15 URL
 使用支持 HEVC MPEG-TS 解析的 1.7.1 资源；最终 HEVC 解码仍取决于客户端浏览器和系统。
+
+启用 Video Check 的报告还会归档 `videoCheck.source` 指向的 `results.js`、同一 Run 的
+最终快照和结果脚本引用的 `details/*.js`，以及这些文件已有的 `.json` 配套结果。
+平台改写归档副本中的结果和详情链接；展开详情只读取该 HTML artifact 的托管资源，
+无需访问项目目录或检查服务。运行中预览使用当前 Run 的实时资源，可继续获取检查更新。
+归档按报告引用收集文件，不复制 checker 的 `config.json`、队列或运行进程文件。
+各 Run 的检查资源相互隔离，随 Task 的归档产物一并统计和删除；缺失资源会记录
+`media_partial`，其余检查结果和 HTML 仍可使用。源 HTML 和检查目录保持原样。
+
 M3U8 清单及其本地子清单、分片、初始化段和密钥会递归归档；MPD 中显式列出的
 本地资源会归档。资源端点支持 HEAD 和单段 HTTP Range，浏览器可以拖动和按需读取媒体。
 Audio、AV 和 Video M3U8 可以同时作为 HTML 顶层链接；同一路径又被其他清单引用时，每个
