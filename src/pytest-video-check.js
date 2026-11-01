@@ -17,9 +17,57 @@ function scriptJson(value) {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
+// Locate only the top-level object we need. Decoding and parsing the tests field
+// for every read used to dominate response time for large pytest reports.
+function videoCheckAttributeField(attribute) {
+  const tokens = /&(?:quot|#x[0-9a-f]+|#\d+);|[\\{}\[\]"]/gi;
+  let depth = 0;
+  let inString = false;
+  let escapedUntil = -1;
+  let stringStart = 0;
+  let keyEnd = 0;
+  let key = '';
+  let start = -1;
+  for (const token of attribute.matchAll(tokens)) {
+    const raw = token[0];
+    const char = raw.length === 1 ? raw : decodeAttribute(raw);
+    if (inString) {
+      if (token.index === escapedUntil) {
+        escapedUntil = -1;
+        continue;
+      }
+      if (char === '\\') escapedUntil = token.index + raw.length;
+      else if (char === '"') {
+        inString = false;
+        if (depth === 1) {
+          keyEnd = token.index + raw.length;
+          key = parseJson(decodeAttribute(attribute.slice(stringStart, keyEnd)));
+        }
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      stringStart = token.index;
+    } else if (char === '{' || char === '[') {
+      if (depth === 1 && key === 'videoCheck' && char === '{'
+        && /^\s*:\s*$/.test(decodeAttribute(attribute.slice(keyEnd, token.index)))) start = token.index;
+      depth++;
+    } else if (char === '}' || char === ']') {
+      depth--;
+      if (start >= 0 && depth === 1) {
+        const end = token.index + raw.length;
+        const value = parseJson(decodeAttribute(attribute.slice(start, end)));
+        return value ? { start, end, value } : null;
+      }
+    }
+  }
+  return null;
+}
+
 function readVideoCheckReport(html) {
   for (const match of html.matchAll(JSON_BLOB_ATTRIBUTE)) {
-    const descriptor = parseJson(decodeAttribute(match[1] ?? match[2]))?.videoCheck;
+    const descriptor = videoCheckAttributeField(match[1] ?? match[2])?.value;
     if (!descriptor || typeof descriptor.source !== 'string' || !descriptor.run_id) continue;
     const snapshots = [...html.matchAll(SNAPSHOT_SCRIPT)]
       .map((snapshot) => parseJson(snapshot[2]));
@@ -33,13 +81,15 @@ function readVideoCheckReport(html) {
 
 function rewriteVideoCheckReport(html, mapDescriptor, mapSnapshot = (payload) => payload) {
   const withDescriptor = html.replace(JSON_BLOB_ATTRIBUTE, (attribute, doubleQuoted, singleQuoted) => {
-    const blob = parseJson(decodeAttribute(doubleQuoted ?? singleQuoted));
-    if (!blob?.videoCheck) return attribute;
-    const descriptor = mapDescriptor(blob.videoCheck);
-    if (descriptor === blob.videoCheck) return attribute;
-    const encoded = scriptJson({ ...blob, videoCheck: descriptor })
-      .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/>/g, '&gt;');
-    return `data-jsonblob="${encoded}"`;
+    const raw = doubleQuoted ?? singleQuoted;
+    const field = videoCheckAttributeField(raw);
+    if (!field) return attribute;
+    const descriptor = mapDescriptor(field.value);
+    if (descriptor === field.value) return attribute;
+    const encoded = scriptJson(descriptor)
+      .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/>/g, '&gt;');
+    const offset = attribute.indexOf(raw);
+    return attribute.slice(0, offset + field.start) + encoded + attribute.slice(offset + field.end);
   });
   return withDescriptor.replace(SNAPSHOT_SCRIPT, (script, opening, json, closing) => {
     const payload = parseJson(json);

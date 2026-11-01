@@ -37,6 +37,16 @@ codex-skill-use <business-skill> -- codex-skill-report publish --file <run-dir>/
 
 Read [references/cards.md](references/cards.md) when filling a card. Keep one stable `reportKey` through the running and terminal revisions of a logical report; give separate executions and business reruns their own keys. Link the same registered execution using `executionEvidence.externalAttemptId`. Technical retries remain generations of their Step Run.
 
+Organize visible reports by business stage. One execution with several HTML outputs uses one report
+with all its registered files. When a stage spans independent executions, its owner publishes one
+stage card with `relatedReportKeys` listing their report keys; the platform folds those reports into
+the stage's expandable execution details and collects their file links. The stage aggregate uses
+`artifacts: []` and no fabricated execution identity. Each child retains its real publisher,
+External Attempt and artifact registrations. Stage totals come from the workflow ledger, not by
+adding initial runs and reruns together. Do not create separate cards for preflight, collection,
+polling, archive checks, file inventories or final evidence; keep them in stage details or Worklog.
+Reuse one final-summary key rather than publishing a second final-evidence report.
+
 Keep the exact command in `primaryExecution`, not repeated in a second execution section. Put results in `summary`, `metrics`, and business sections. Unknown counts stay absent instead of becoming zero. Extra business fields remain supported in sections, and the complete payload remains available.
 
 Running reports use `artifacts: []`. Register each known HTML at launch with repeated `codex-background-track register --artifact` options. Terminal reports inherit those registrations; explicitly add later-created analysis Markdown. Preserve every file's own stable artifact key and original filename. Report publication and file archival have separate states.

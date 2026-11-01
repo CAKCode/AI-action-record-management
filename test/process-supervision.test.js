@@ -53,6 +53,7 @@ function spawnWorkerPollHarness({
   exitAfterMs = 0,
   controlFailure = '',
   controlFailuresBeforeSuccess = null,
+  bridgeCleanupDelayMs = 0,
 }) {
   const workerPath = path.join(ROOT_DIR, 'worker.js');
   const source = [
@@ -61,6 +62,7 @@ function spawnWorkerPollHarness({
     "const originalLoad = Module._load;",
     "let claims = 0;",
     "let controlCalls = 0;",
+    "let cleanupClaims = 0;",
     "function maybeFailControl(name) {",
     `  if (name !== ${JSON.stringify(controlFailure)}) return;`,
     "  controlCalls += 1;",
@@ -91,10 +93,19 @@ function spawnWorkerPollHarness({
     "  async processExternalArchiveVerification() { return { ok: true }; },",
     "  claimSkillReportArtifactJobs() { return []; },",
     "  async processSkillReportArtifactJob() { return { ok: true }; },",
+    "  async sealPendingSessionWorkspace() {},",
     "  reconcileRunningExternalAttempts() { return []; },",
     "  performTaskRetentionCleanup() { return { skipped: true }; },",
-    "  claimBridgeCleanupJobs() { maybeFailControl('bridge-cleanup'); return []; },",
-    "  processBridgeCleanupJob() { return { ok: true }; },",
+    "  claimBridgeCleanupJobs() {",
+    "    maybeFailControl('bridge-cleanup'); cleanupClaims += 1;",
+    `    return ${bridgeCleanupDelayMs > 0} && cleanupClaims === 1 ? [{ id: 'cleanup-job' }] : [];`,
+    "  },",
+    "  processBridgeCleanupJob() {",
+    ...(bridgeCleanupDelayMs > 0 ? [
+      "    setTimeout(() => console.log('cleanup-in-progress claims=' + cleanupClaims), 1050);",
+      `    return new Promise(resolve => setTimeout(() => { console.log('cleanup-completed'); resolve({ ok: true }); }, ${bridgeCleanupDelayMs}));`,
+    ] : ["    return { ok: true };"]),
+    "  },",
     "};",
     "const orchestrator = {",
     "  syncBridgeRuntime() {}, getRuntimeStatus() { return { ready: true, degradedReasons: [] }; },",
@@ -315,6 +326,25 @@ test('worker exits for supervisor recovery after sustained auxiliary control fai
     assert.equal(result.code, 1, result.output);
     assert.equal(result.signal, null);
     assert.match(result.output, /worker:bridge-cleanup.*restarting after 5 consecutive failures/);
+  } finally {
+    if (child.exitCode == null && child.signalCode == null) child.kill('SIGKILL');
+    await waitForExit(child);
+  }
+});
+
+test('worker serializes async Bridge cleanup and waits for it during shutdown', async () => {
+  const child = spawnWorkerPollHarness({ failuresBeforeSuccess: 0, bridgeCleanupDelayMs: 1500 });
+  let output = '';
+  child.stdout.on('data', chunk => {
+    output += chunk.toString();
+    if (output.includes('cleanup-in-progress')) child.kill('SIGTERM');
+  });
+  try {
+    const result = await collectChildExit(child, 5000);
+    assert.equal(result.code, 0, result.output);
+    assert.equal(result.signal, null);
+    assert.match(result.output, /cleanup-in-progress claims=1/);
+    assert.match(result.output, /cleanup-completed/);
   } finally {
     if (child.exitCode == null && child.signalCode == null) child.kill('SIGKILL');
     await waitForExit(child);

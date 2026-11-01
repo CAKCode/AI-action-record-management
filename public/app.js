@@ -114,6 +114,9 @@ const state = {
   taskFilter: 'current',
   taskProjectFilter: '',
   taskTagFilter: '',
+  releaseCycles: [],
+  selectedReleaseCycleId: '',
+  releaseCycleTasks: [],
   expandedTaskObjectives: new Set(),
   taskContextExpanded: false,
   detailTab: 'business-summary',
@@ -217,17 +220,21 @@ const RUNTIME_REASON_KEYS = Object.freeze({
 
 const messages = {
   zh: {
+    cumulativeResults: '累计统计', includingReruns: '含重跑', finalCaseResults: '最终结果', rerunsReplaceEarlier: '重跑覆盖原结果', resultTotal: '总数', fullResultDetail: '展开完整结论', caseCountNotes: '总数包含 Skip 和 XFail；实际执行（不含 Skip）{count} 次。', resultCountsIncomplete: '部分报告尚不可统计，以下为当前已读取的结果。',
+    expandInstruction: '展开输入', collapseInstruction: '收起输入', copyReportName: '复制文件名', reportNameCopied: '文件名已复制', copyReportNameFailed: '复制失败，请展开后手动复制文件名。',
     deleteTaskArtifacts: '删除任务及产物', taskArtifactsDeleted: '任务及平台产物已删除，Runtime 由后台回收。', reclaimRuntimeOnly: '仅回收 Runtime', taskStorageLabel: 'TASK STORAGE',
     taskStorageHeading: '任务与归档产物', taskStorageNote: '包含报告、视频、音频、日志、播放缓存和 Skill 快照。/data/jenkins/videos 源文件由你手动清理。',
     storageInventoryHeadline: '任务与 Runtime 占用', storageInventoryLabel: 'STORAGE INVENTORY', storageInventorySubtitle: '查看任务运行环境、归档产物及合计占用，回收 Runtime 或删除任务及产物。', reclaimableRuntimeBytes: 'Runtime 可释放',
     archivedStorage: '归档产物', otherTaskStorage: '日志与快照等', combinedStorage: '合计占用', platformTaskStorage: '平台任务产物',
     deleteAfterStop: '停止后可删除', deleteAfterArchive: '正在归档', noTaskStorage: '没有保留的任务产物。', storageEstimatePartial: '部分文件无法统计', taskChangedRefresh: '任务已变更，请刷新后再操作。',
     confirmDeleteTaskArtifacts: '删除任务「{name}」及其报告、视频、音频、日志、播放缓存和 Runtime？/data/jenkins/videos 源文件保留。',
-    reportExecution: '执行信息', unreportedExecutions: '尚未关联报告的执行',
+    reportExecution: '执行信息', reportRelatedDetails: '阶段执行明细', unreportedExecutions: '尚未关联报告的执行',
+    actualCommand: '实际执行的命令', rerunResults: 'Rerun 结果', rerunReportsCombined: '已合并 {count} 份重跑报告，展开查看各组结果。',
     workspaceTools: '工具与显示', workbenchGuide: '工作台说明', moreActions: '更多操作', taskReports: '报告', nextInstruction: '下一步指令',
     taskListDescription: '任务名称与目标', taskListCount: '{count} 个任务', taskObjective: '任务目标',
     expandObjective: '展开', collapseObjective: '收起', showTaskContext: '任务信息', hideTaskContext: '收起信息',
-    brandSubtitle: '持久任务工作台', navOverview: '总览', navTasks: '任务 Session', navSkills: 'Skills', navAudit: '操作审计',
+    brandSubtitle: '持久任务工作台', navOverview: '总览', navTasks: '任务 Session', navReleaseCycles: '版本周期', navSkills: 'Skills', navAudit: '操作审计',
+    releaseCyclesNote: '按提测版本查看手动和定时创建的独立 Task。关闭版本周期后只停止后续创建，不影响已运行任务。', refreshReleaseCycles: '刷新', releaseCycleTasksLabel: '版本 Task', runReleaseCycle: '立即创建 Task', closeReleaseCycle: '结束版本周期', releaseCycleActive: '进行中', releaseCycleClosed: '已结束', noReleaseCycles: '还没有提测版本周期。', releaseCycleTaskCount: '{count} 个 Task', taskCountLabel: 'Task 数量', nextRun: '下次创建', lastRun: '最近创建', releaseKey: '提测版本',
     fontSize: '文字大小', fontSizeSmall: '小号文字', fontSizeStandard: '标准文字', fontSizeLarge: '大号文字',
     export: '导出', import: '导入', syncRuntime: '同步 Runtime', newTask: '新建任务', executionMode: '执行模式',
     overviewHeadline: '任务即 Session，持续工作直到确认完成', overviewDescription: '每个任务拥有独立持久 Session；每轮结果可继续处理，确认完成后进入只读历史。',
@@ -242,7 +249,7 @@ const messages = {
     businessCommands: '主要执行', businessExecution: '业务执行', executionRuns: '执行记录', repeatedRuns: '重复执行', primarySkill: '实际执行 Skill',
     businessTimeline: '业务轨迹', taskTimeline: '任务轨迹', businessResult: '业务结果', regressionCommands: 'pytest 回归命令', currentStage: '当前阶段', currentStatus: '当前状态', taskCreated: '任务已创建', structuredResult: '结构化结果', requestReceived: '收到提测报告', testExecutionStarted: '执行测试', deploymentStarted: '开始', deploymentFinished: '结束', deploymentCompleted: '部署完成', initialRegression: '首轮回归', regressionRerun: 'Rerun', followupBooked: '预约回查', initialCompleted: '首轮完成', rerunCompleted: 'Rerun 完成', failureAnalysis: 'Fail 分析', failureAnalysisCompleted: 'Fail 分析完成', failureAnalysisPending: '已检测到 analyze-failures 执行，等待结构化分析结论。', failureAnalysisUnreported: '已使用 analyze-failures，结构化分析结论尚未登记。', runInProgress: '第 {number} 次 pytest 正在执行。', finalResult: '最终结果', currentResult: '当前结果', waitingForTestResult: '等待业务测试结果', noPytestRuns: '暂无 pytest 回归记录', scheduledFor: '回查时间', startedAtShort: '开始', finishedAtShort: '结束', pytestCommand: 'PYTEST COMMAND', skillUsed: '使用 Skill', cicdDeployment: 'CI/CD 部署', gwDeployment: 'GW 部署', serviceDeployment: '服务部署', exitCodeSummary: '退出码 {code}', testRunNumber: '第 {number} 次回归',
     overviewTitle: '持久任务总览', overviewSubtitle: '一个任务对应一个独立、可恢复、可审计的 Codex Session。',
-    tasksTitle: '任务 Session', tasksSubtitle: '每轮执行后等待确认；只有明确完成的 Session 才进入只读历史。',
+    tasksTitle: '任务 Session', tasksSubtitle: '每轮执行后等待确认；只有明确完成的 Session 才进入只读历史。', releaseCyclesTitle: '版本周期', releaseCyclesSubtitle: '按提测版本查看完整 Task 系列，并控制后续 Cron 创建。',
     skillsTitle: 'Skills 管理', skillsSubtitle: '管理平台 Skill，并查看当前 Codex Runtime 可发现的内置 Skills。',
     auditTitle: '操作审计', auditSubtitle: '按任务查看创建、启动、恢复、命令、错误和完成记录。',
     sessions: 'Session 总数', current: '当前任务', working: '工作中', history: '历史记录', skills: 'Skills', operationsCount: '操作记录',
@@ -252,7 +259,7 @@ const messages = {
     taskName: '任务名称', objective: '任务目标 / 首次指令', workingDir: '工作目录', notes: '备注', taskProject: '项目分类', taskTags: '自定义标签（逗号分隔）', enabled: '启用',
     maxRetries: '中断重试次数', autoResume: '服务重启后自动恢复', createAndStart: '创建并启动', updateTask: '更新任务', createTask: '新建任务 Session', editTask: '编辑任务',
     idHint: '只允许字母、数字、短横线和下划线', pathHint: '相对路径以任务工作区根目录为基准；绝对路径必须位于允许的根目录内。',
-    taskContext: '任务上下文', sessionId: 'Session ID', status: '状态', runCount: '执行次数', recoveryAttempts: '自动恢复次数', createdAt: '创建时间', finishedAt: '完成时间', workspace: '工作区', nextCheck: '下次检查', activeBackground: '活动后台执行', activeSchedules: '活动定时检查',
+    taskContext: '任务上下文', sessionId: 'Session ID', status: '状态', runCount: '执行次数', recoveryAttempts: '自动恢复次数', createdAt: '创建时间', finishedAt: '完成时间', workspace: '工作区', workspaceMode: '工作区模式', sourceMode: '源码模式', sourceCommit: '源码 Commit', archiveState: '源码归档状态', sessionRoot: 'Session 根目录', nextCheck: '下次检查', activeBackground: '活动后台执行', activeSchedules: '活动定时检查',
     waitingStart: '创建后将立即启动独立 Session。', runningHint: '任务正在执行，日志会自动刷新。', scheduledHint: 'Codex 已释放；平台将在到点后恢复同一 Session，并创建新的 Turn 检查后台结果。', reviewHint: '检查本轮结果；可以继续发送指令，或确认完成并归档。', archivedHint: '该 Session 已完成并归档，不能再次运行。', recoverHint: '恢复会继续使用 Task 当前最新的持久 Session，不会创建新会话。', disabledHint: '任务已禁用，启用后才能启动或继续。',
     startTask: '启动任务', recoverTask: '恢复任务', taskStarted: '任务已排队', taskSaved: '任务已保存', taskDeleted: '任务已删除', taskCompleted: '任务已确认完成', taskRestored: '任务已恢复，可重新连接 Codex CLI', taskReset: '任务配置和历史已保留，后续运行将创建新的 Codex Session', stopRequested: '已请求停止任务', stopNotApplicable: '任务当前不需要停止', operationOutcomeUnknown: '请求结果暂时无法确认；系统已保留操作标识，重试不会重复执行',
     skillName: 'Skill 名称', category: '分类', description: '描述', tags: '标签（逗号分隔）', skillContent: 'SKILL.md 内容', createSkill: '新建 Skill', editSkill: '编辑 Skill', viewSkill: '查看 Skill',
@@ -267,17 +274,21 @@ const messages = {
     dataProtection: '数据保护', dataProtectionHeading: '数据完整性与恢复保护', loadingProtection: '正在检查数据保护状态...', noProtectionStatus: '尚未检查数据保护状态。', protectionChecked: '检查于 {time}', protectionRefreshFailed: '状态刷新失败：{error}', platformStorage: '平台数据', databaseBackup: '在线数据库备份', recoveryCheckpoint: '平台恢复检查点', terminalLogArchive: '终态日志托管', protectionHealthy: '正常', protectionDegraded: '异常', protectionPending: '待建立', protectionInProgress: '进行中', protectionRotationPending: '待轮转', sqliteCheck: 'SQLite 检查', stateInvariants: '状态约束', storageHeadroom: '最低可用空间', lastSuccess: '最近成功', nextRun: '下次计划', packageRetention: '有效包 / 保留数', auditContinuity: '审计连续性', auditHealthy: '已持久化', auditPending: '{count} 条待写入', invariantIssues: '{count} 项异常', storageAvailable: '{percent}% · {bytes}', rotationPendingDetail: '超出 {count} 份，下次成功发布后轮转', schedulerError: '调度错误', unreadablePackages: '不可读取包', archiveCoverage: '托管覆盖', archiveCoverageDetail: '{archived} / {total} 条终态日志', archiveLastVerified: '最近完整校验', archiveFailures: '托管异常', archiveFailureDetail: '{count} 条需修复',
   },
   en: {
+    cumulativeResults: 'Cumulative', includingReruns: 'Includes reruns', finalCaseResults: 'Final results', rerunsReplaceEarlier: 'Latest result per case', resultTotal: 'Total', fullResultDetail: 'Full conclusion', caseCountNotes: 'Totals include Skip and XFail; {count} executions excluding Skip.', resultCountsIncomplete: 'Some reports are not available for counting; these are the results read so far.',
+    expandInstruction: 'Write a message', collapseInstruction: 'Collapse input', copyReportName: 'Copy filename', reportNameCopied: 'Filename copied', copyReportNameFailed: 'Copy failed. Expand the filename to copy it manually.',
     deleteTaskArtifacts: 'Delete task & artifacts', taskArtifactsDeleted: 'Task and managed artifacts deleted. Runtime reclamation runs in the background.', reclaimRuntimeOnly: 'Reclaim Runtime only', taskStorageLabel: 'TASK STORAGE',
     taskStorageHeading: 'Tasks & archived artifacts', taskStorageNote: 'Reports, video, audio, logs, playback caches and Skill snapshots. Source files in /data/jenkins/videos remain for manual cleanup.',
     storageInventoryHeadline: 'Task & Runtime usage', storageInventoryLabel: 'STORAGE INVENTORY', storageInventorySubtitle: 'Inspect Runtime and archived artifact usage, reclaim Runtime or delete a Task and its managed files.', reclaimableRuntimeBytes: 'Reclaimable Runtime',
     archivedStorage: 'Archived artifacts', otherTaskStorage: 'Logs, snapshots, etc.', combinedStorage: 'Combined usage', platformTaskStorage: 'Platform task files',
     deleteAfterStop: 'Stop before deleting', deleteAfterArchive: 'Archival in progress', noTaskStorage: 'No retained task artifacts.', storageEstimatePartial: 'Some files could not be measured', taskChangedRefresh: 'The task has changed. Refresh before continuing.',
     confirmDeleteTaskArtifacts: 'Delete task “{name}” together with its reports, video, audio, logs, playback caches and Runtime? Source files in /data/jenkins/videos remain.',
-    reportExecution: 'Execution evidence', unreportedExecutions: 'Executions without a linked report',
+    reportExecution: 'Execution evidence', reportRelatedDetails: 'Stage execution details', unreportedExecutions: 'Executions without a linked report',
+    actualCommand: 'Executed command', rerunResults: 'Rerun results', rerunReportsCombined: 'Combined {count} rerun reports. Expand to inspect each group.',
     workspaceTools: 'Tools & display', workbenchGuide: 'About this workbench', moreActions: 'More actions', taskReports: 'Reports', nextInstruction: 'Next instruction',
     taskListDescription: 'Task name & objective', taskListCount: '{count} tasks', taskObjective: 'Objective',
     expandObjective: 'Expand', collapseObjective: 'Collapse', showTaskContext: 'Task info', hideTaskContext: 'Hide info',
-    brandSubtitle: 'Persistent Task Desk', navOverview: 'Overview', navTasks: 'Task Sessions', navSkills: 'Skills', navAudit: 'Operation Audit',
+    brandSubtitle: 'Persistent Task Desk', navOverview: 'Overview', navTasks: 'Task Sessions', navReleaseCycles: 'Release Cycles', navSkills: 'Skills', navAudit: 'Operation Audit',
+    releaseCyclesNote: 'View independent manual and scheduled Tasks by release version. Closing a cycle stops future creation without affecting running Tasks.', refreshReleaseCycles: 'Refresh', releaseCycleTasksLabel: 'RELEASE TASKS', runReleaseCycle: 'Create Task Now', closeReleaseCycle: 'Close Release Cycle', releaseCycleActive: 'Active', releaseCycleClosed: 'Closed', noReleaseCycles: 'No release cycles yet.', releaseCycleTaskCount: '{count} Tasks', taskCountLabel: 'Task count', nextRun: 'Next run', lastRun: 'Last run', releaseKey: 'Release version',
     fontSize: 'Text size', fontSizeSmall: 'Small text', fontSizeStandard: 'Standard text', fontSizeLarge: 'Large text',
     export: 'Export', import: 'Import', syncRuntime: 'Sync Runtime', newTask: 'New Task', executionMode: 'Execution Mode',
     overviewHeadline: 'A task is a session that persists until completion', overviewDescription: 'Each task owns one persistent session. Review or continue every turn, then explicitly archive the completed task.',
@@ -292,7 +303,7 @@ const messages = {
     businessCommands: 'Primary Executions', businessExecution: 'Business execution', executionRuns: 'Runs', repeatedRuns: 'Repeated', primarySkill: 'Executing Skill',
     businessTimeline: 'Business Timeline', taskTimeline: 'Task Timeline', businessResult: 'Business result', regressionCommands: 'pytest regression commands', currentStage: 'Current stage', currentStatus: 'Current status', taskCreated: 'Task created', structuredResult: 'Structured result', requestReceived: 'Test request received', testExecutionStarted: 'Test execution started', deploymentStarted: 'Started', deploymentFinished: 'Finished', deploymentCompleted: 'Deployment completed', initialRegression: 'Initial regression', regressionRerun: 'Rerun', followupBooked: 'Follow-up scheduled', initialCompleted: 'Initial run completed', rerunCompleted: 'Rerun completed', failureAnalysis: 'Failure analysis', failureAnalysisCompleted: 'Failure analysis completed', failureAnalysisPending: 'analyze-failures is active; waiting for the structured analysis result.', failureAnalysisUnreported: 'analyze-failures was used; no structured analysis result has been recorded yet.', runInProgress: 'pytest run #{number} is in progress.', finalResult: 'Final result', currentResult: 'Current result', waitingForTestResult: 'Waiting for business test result', noPytestRuns: 'No pytest regression recorded', scheduledFor: 'Check at', startedAtShort: 'Started', finishedAtShort: 'Finished', pytestCommand: 'PYTEST COMMAND', skillUsed: 'Skill', cicdDeployment: 'CI/CD deployment', gwDeployment: 'GW deployment', serviceDeployment: 'Service deployment', exitCodeSummary: 'Exit code {code}', testRunNumber: 'Regression #{number}',
     overviewTitle: 'Persistent Task Overview', overviewSubtitle: 'Each task owns one independent, recoverable, auditable Codex session.',
-    tasksTitle: 'Task Sessions', tasksSubtitle: 'Every turn waits for review; only explicitly completed sessions become read-only history.',
+    tasksTitle: 'Task Sessions', tasksSubtitle: 'Every turn waits for review; only explicitly completed sessions become read-only history.', releaseCyclesTitle: 'Release Cycles', releaseCyclesSubtitle: 'View a complete Task series by release version and control future Cron creation.',
     skillsTitle: 'Skills', skillsSubtitle: 'Manage platform skills and inspect built-in skills discoverable by the Codex runtime.',
     auditTitle: 'Operation Audit', auditSubtitle: 'Inspect creation, start, recovery, commands, errors, and completion by task.',
     sessions: 'All Sessions', current: 'Current', working: 'Running', history: 'History', skills: 'Skills', operationsCount: 'Operations',
@@ -302,7 +313,7 @@ const messages = {
     taskName: 'Task name', objective: 'Task objective / initial instruction', workingDir: 'Working directory', notes: 'Notes', taskProject: 'Project classification', taskTags: 'Custom tags (comma separated)', enabled: 'Enabled',
     maxRetries: 'Interruption retries', autoResume: 'Auto-recover after service restart', createAndStart: 'Create & Start', updateTask: 'Update Task', createTask: 'New Task Session', editTask: 'Edit Task',
     idHint: 'Letters, numbers, hyphens, and underscores only', pathHint: 'Relative paths resolve from the task workspace root; absolute paths must be under an allowed root.',
-    taskContext: 'Task Context', sessionId: 'Session ID', status: 'Status', runCount: 'Runs', recoveryAttempts: 'Auto recoveries', createdAt: 'Created', finishedAt: 'Completed', workspace: 'Workspace', nextCheck: 'Next check', activeBackground: 'Active background runs', activeSchedules: 'Active scheduled checks',
+    taskContext: 'Task Context', sessionId: 'Session ID', status: 'Status', runCount: 'Runs', recoveryAttempts: 'Auto recoveries', createdAt: 'Created', finishedAt: 'Completed', workspace: 'Workspace', workspaceMode: 'Workspace mode', sourceMode: 'Source mode', sourceCommit: 'Source commit', archiveState: 'Source archive', sessionRoot: 'Session root', nextCheck: 'Next check', activeBackground: 'Active background runs', activeSchedules: 'Active scheduled checks',
     waitingStart: 'The independent session starts immediately after creation.', runningHint: 'The task is running. Logs refresh automatically.', scheduledHint: 'Codex has been released. The platform will resume this Session and create a new Turn when the durable check is due.', reviewHint: 'Review this turn, then continue the same session or complete and archive the task.', archivedHint: 'This Session is archived. Its complete Codex CLI transcript is read only; explicitly restore it to reconnect and continue.', recoverHint: "Recovery continues the Task's latest persistent Session and does not create a new one.", disabledHint: 'Enable this task before starting or continuing it.',
     startTask: 'Start Task', recoverTask: 'Recover Task', taskStarted: 'Task queued', taskSaved: 'Task saved', taskDeleted: 'Task deleted', taskCompleted: 'Task completed and archived', taskRestored: 'Task restored. You can reconnect to Codex CLI.', taskReset: 'Task configuration and history were retained. The next run will create a new Codex Session.', stopRequested: 'Stop requested', stopNotApplicable: 'This task does not need to be stopped', operationOutcomeUnknown: 'The result cannot be confirmed yet. The operation identity was retained, so retrying will not execute it twice.',
     skillName: 'Skill name', category: 'Category', description: 'Description', tags: 'Tags (comma separated)', skillContent: 'SKILL.md content', createSkill: 'New Skill', editSkill: 'Edit Skill', viewSkill: 'View Skill',
@@ -859,6 +870,7 @@ function updateViewHeading() {
   const map = {
     overview: ['overviewTitle', 'overviewSubtitle'],
     tasks: ['tasksTitle', 'tasksSubtitle'],
+    'release-cycles': ['releaseCyclesTitle', 'releaseCyclesSubtitle'],
     skills: ['skillsTitle', 'skillsSubtitle'],
     runtime: ['runtimeInventoryTitle', 'storageInventorySubtitle'],
     audit: ['auditTitle', 'auditSubtitle'],
@@ -1064,6 +1076,11 @@ function reportValueHtml(value, format = 'text', tone = 'neutral') {
     : `<span class="report-value tone-${escapeHtml(tone)}">${display}</span>`;
 }
 
+function executionCommandDetails(command, preClass = 'business-command', key = '') {
+  const identity = key ? ` data-detail-key="command:${escapeHtml(key)}"` : '';
+  return `<details class="command-details"${identity}><summary>${escapeHtml(tr('actualCommand'))}</summary><pre class="${escapeHtml(preClass)}"><span aria-hidden="true">$</span> ${escapeHtml(command || '')}</pre></details>`;
+}
+
 function skillReportSection(section) {
   const description = section.description
     ? `<p class="report-section-description">${escapeHtml(section.description)}</p>`
@@ -1082,7 +1099,8 @@ function skillReportSection(section) {
   }
   const expanded = section.defaultExpanded === true
     && section.sensitivity !== 'sensitive'
-    && section.kind !== 'json';
+    && section.kind !== 'json'
+    && !/(?:^|[-_\s])(?:command|execution)(?:$|[-_\s])|执行命令|实际执行.*命令/i.test(`${section.id || ''} ${section.title || ''}`);
   return `<details class="report-section priority-${escapeHtml(section.priority || 'supporting')} sensitivity-${escapeHtml(section.sensitivity || 'normal')}"${expanded ? ' open' : ''}>
     <summary><span>${escapeHtml(section.title)}</span><code>${escapeHtml(section.kind || 'fields')}</code></summary>
     <div class="report-section-body">${description}${content}</div>
@@ -1139,25 +1157,52 @@ function reportArtifactLinks(
     const reports = managed.filter((artifact) => artifact.kind === group.kind && artifact.url);
     const registrations = pending.filter((artifact) => artifact.kind === group.kind);
     if (!reports.length && !registrations.length) return '';
+    const entries = [...reports.map(artifact => ({ artifact, registered: false })),
+      ...registrations.map(artifact => ({ artifact, registered: true }))];
     return `<div class="report-artifacts">
-      <span>${escapeHtml(tr(group.label))}</span>
-      ${reports.map((artifact) => {
-    const displayName = reportArtifactDisplayName(artifact, artifactDeclarations, group.label);
-    return `<a href="${escapeHtml(reportArtifactViewerUrl(artifact.url, displayName))}" target="_blank" rel="noopener"><strong>${escapeHtml(displayName)}</strong><small>${escapeHtml(formatBytes(artifact.bytes || 0))}</small><b>${escapeHtml(tr(group.action))}</b></a>`;
-  }).join('')}
-      ${registrations.map((artifact) => {
-    const running = artifact.executionStatus === 'running' || reportStatus === 'running';
-    const displayName = reportArtifactDisplayName(artifact, artifactDeclarations, group.label);
-    if (artifact.available === false) {
-      return `<div class="report-artifact-pending report-artifact-unavailable"><strong>${escapeHtml(displayName)}</strong><b>${escapeHtml(tr('artifactUnavailable'))}</b></div>`;
-    }
-    const content = `<strong>${escapeHtml(displayName)}</strong><b>${escapeHtml(tr(running ? 'artifactRegisteredRunning' : 'artifactRegisteredPending'))}</b>`;
-    return artifact.url
-      ? `<a class="report-artifact-pending" href="${escapeHtml(reportArtifactViewerUrl(artifact.url, displayName))}" target="_blank" rel="noopener">${content}</a>`
-      : `<div class="report-artifact-pending">${content}</div>`;
-  }).join('')}
-    </div>`;
+      <div class="report-artifacts-heading"><span>${escapeHtml(tr(group.label))}</span><small>${entries.length}</small></div>
+      <div class="report-artifact-list" role="list">${entries.map(({ artifact, registered }) => {
+      const displayName = reportArtifactDisplayName(artifact, artifactDeclarations, group.label);
+      const running = artifact.executionStatus === 'running' || reportStatus === 'running';
+      const unavailable = registered && artifact.available === false;
+      const stateClass = unavailable ? ' report-artifact-unavailable' : (registered ? ' report-artifact-pending' : '');
+      const label = unavailable ? 'artifactUnavailable' : (running ? 'artifactRegisteredRunning' : 'artifactRegisteredPending');
+      const detailKey = `${artifact.reportKey || ''}:${artifact.id || artifact.key || displayName}`;
+      const open = artifact.url && !unavailable
+        ? `<a class="report-artifact-open" href="${escapeHtml(reportArtifactViewerUrl(artifact.url, displayName))}" target="_blank" rel="noopener"><b>${escapeHtml(tr(group.action))}</b><span aria-hidden="true">↗</span></a>` : '';
+      return `<div class="report-artifact-row${stateClass}" role="listitem">
+        <span class="report-artifact-kind" aria-hidden="true">${group.kind === 'pytest-html' ? 'HTML' : 'MD'}</span>
+        <details class="report-artifact-name" data-detail-key="artifact-name:${escapeHtml(detailKey)}">
+          <summary title="${escapeHtml(displayName)}"><strong>${escapeHtml(displayName)}</strong></summary>
+          <code>${escapeHtml(displayName)}</code>
+        </details>
+        <small class="report-artifact-size">${registered ? escapeHtml(tr(label)) : escapeHtml(formatBytes(artifact.bytes || 0))}</small>
+        <button type="button" class="report-artifact-copy" data-action="copy-report-name" data-copy-text="${escapeHtml(displayName)}" title="${escapeHtml(tr('copyReportName'))}" aria-label="${escapeHtml(tr('copyReportName'))}"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button>
+        ${open}
+      </div>`;
+    }).join('')}</div></div>`;
   }).join('');
+}
+
+async function copyReportFilename(value) {
+  try {
+    let copied = false;
+    if (navigator.clipboard?.writeText) {
+      try { await navigator.clipboard.writeText(value); copied = true; } catch { /* Use selection copy in embedded browsers. */ }
+    }
+    if (!copied) {
+      const selection = document.createElement('textarea');
+      const active = document.activeElement;
+      selection.value = value;
+      selection.className = 'copy-buffer';
+      selection.setAttribute('readonly', '');
+      document.body.appendChild(selection);
+      try { selection.select(); copied = document.execCommand('copy'); }
+      finally { selection.remove(); active?.focus({ preventScroll: true }); }
+    }
+    if (!copied) throw new Error('Clipboard unavailable');
+    toast(tr('reportNameCopied'));
+  } catch { toast(tr('copyReportNameFailed'), 'error'); }
 }
 
 function artifactFileName(value) {
@@ -1306,7 +1351,7 @@ function businessExecutionList(reports, externalAttempts) {
         <span class="status-badge ${escapeHtml(execution.status || 'unknown')}">${escapeHtml(status.label)}</span>
       </header>
       ${skill}
-      <pre class="business-command"><span aria-hidden="true">$</span> ${escapeHtml(execution.command)}</pre>
+      ${executionCommandDetails(execution.command, 'business-command', execution.id || execution.commandPath)}
       <div class="business-execution-meta">
         ${execution.workingDirectory ? `<span>${escapeHtml(tr('runtimeWorkingDir'))} <code>${escapeHtml(execution.workingDirectory)}</code></span>` : ''}
         <span>${escapeHtml(tr('exitCode'))} <code>${execution.exitCode == null ? '-' : Number(execution.exitCode)}</code></span>
@@ -1389,7 +1434,8 @@ function reportFieldValue(report, labels) {
 }
 
 function isReportedTestResult(report) {
-  return String(report?.reportType || '').trim().toLowerCase() === 'test-result';
+  return !report?.relatedReportKeys?.length
+    && String(report?.reportType || '').trim().toLowerCase() === 'test-result';
 }
 
 function reportedTestRun(report) {
@@ -1656,6 +1702,7 @@ function deploymentCategory(value) {
 }
 
 function businessTimelineReports(reports) {
+  reports = (reports || []).filter(report => !report.relatedReportKeys?.length);
   const deploymentGroups = groupedBy(
     (reports || []).filter((report) => deploymentCategory(report)),
     (report) => report.reportKey || report.id,
@@ -1732,7 +1779,7 @@ function testRunSummary(run) {
 
 function businessRegressionTitle(runOrIndex, fallbackIndex = 0) {
   if (runOrIndex && typeof runOrIndex === 'object' && runOrIndex.stepRun) {
-    const runTitle = runOrIndex.stepRun.runKind === 'rerun'
+    const runTitle = isRerunRun(runOrIndex)
       ? `${tr('regressionRerun')} #${runOrIndex.stepRun.runNumber}`
       : tr('initialRegression');
     return runOrIndex.step?.label ? `${runOrIndex.step.label} · ${runTitle}` : runTitle;
@@ -1743,6 +1790,33 @@ function businessRegressionTitle(runOrIndex, fallbackIndex = 0) {
 
 function businessFinalSummary(runs) {
   return runs.map((run, index) => `${businessRegressionTitle(run, index)}: ${testRunSummary(run)}`).join(' · ');
+}
+
+function pytestResultSummaryHtml(summary) {
+  if (!summary?.available) return '';
+  const number = value => Number(value || 0).toLocaleString(state.lang === 'zh' ? 'zh-CN' : 'en-US');
+  const rows = [
+    ['cumulativeResults', 'includingReruns', summary.cumulative],
+    ['finalCaseResults', 'rerunsReplaceEarlier', summary.final],
+  ];
+  return `<div class="final-result-statistics">
+    ${!summary.complete ? `<p class="final-result-incomplete">${escapeHtml(tr('resultCountsIncomplete'))}</p>` : ''}
+    ${rows.map(([title, note, counts]) => `<div class="final-result-row">
+      <div class="final-result-row-title"><strong>${escapeHtml(tr(title))}</strong><span>${escapeHtml(tr(note))}</span></div>
+      <div class="final-result-number"><span>${escapeHtml(tr('resultTotal'))}</span><strong>${number(counts.total)}</strong></div>
+      <div class="final-result-number tone-success"><span>Pass</span><strong>${number(counts.passed)}</strong></div>
+      <div class="final-result-number tone-danger"><span>Fail</span><strong>${number(counts.failed)}</strong></div>
+      <div class="final-result-other">${[['Skip', 'skipped'], ['XFail', 'xfailed'], ['Error', 'error'], ['XPass', 'xpassed'], [tr('unknown'), 'unknown']]
+        .filter(([, key]) => counts[key]).map(([label, key]) => `<span>${escapeHtml(label)} <b>${number(counts[key])}</b></span>`).join('')}</div>
+    </div>`).join('')}
+    <p class="final-result-count-note">${escapeHtml(trf('caseCountNotes', { count: number(summary.executed) }))}</p>
+  </div>`;
+}
+
+function finalPytestStatus(summary) {
+  if (!summary.complete) return 'unknown';
+  if (summary.final.failed || summary.final.error) return summary.final.passed ? 'partial' : 'failed';
+  return summary.final.passed ? 'succeeded' : 'unknown';
 }
 
 function reportedScheduledFollowUp(report) {
@@ -1860,7 +1934,7 @@ function businessRegressionHtml(run, index) {
     ? `<div class="business-regression-skills"><span>${escapeHtml(tr('skillUsed'))}</span>${run.skillIds.map((skillId) => `<code>${escapeHtml(skillId)}</code>`).join('')}</div>`
     : '';
   const completion = run.finishedAt
-    ? `<div class="business-regression-result"><span>${escapeHtml(tr('finishedAtShort'))} <time datetime="${escapeHtml(run.finishedAt)}">${escapeHtml(formatTimelineTime(run.finishedAt))}</time></span><strong>${escapeHtml(testRunSummary(run))}</strong></div>`
+    ? `<div class="business-regression-result"><strong>${escapeHtml(testRunSummary(run))}</strong><span>${escapeHtml(tr('finishedAtShort'))} <time datetime="${escapeHtml(run.finishedAt)}">${escapeHtml(formatTimelineTime(run.finishedAt))}</time></span></div>`
     : '';
   return `<article class="business-regression tone-${escapeHtml(status.tone)}">
     <header class="business-regression-head">
@@ -1868,9 +1942,45 @@ function businessRegressionHtml(run, index) {
       <span class="report-status tone-${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>
     </header>
     <div class="business-regression-meta"><span>${escapeHtml(tr('startedAtShort'))}</span><time datetime="${escapeHtml(run.startedAt || '')}">${escapeHtml(formatTimelineTime(run.startedAt))}</time>${skills}</div>
-    <div class="business-regression-command"><span>${escapeHtml(tr('pytestCommand'))}</span><pre><b aria-hidden="true">$</b> ${escapeHtml(run.command)}</pre></div>
-    ${businessRunArtifactLinks(run)}
     ${completion}
+    ${businessRunArtifactLinks(run)}
+    <div class="business-regression-command">${executionCommandDetails(run.command, 'business-command', run.id)}</div>
+  </article>`;
+}
+
+function isRerunKey(value) {
+  return String(value || '').split(':').some(part => /^rerun(?:[-_. ]?\d+)?$/i.test(part));
+}
+
+function isRerunReport(report, runById = new Map()) {
+  if (String(report?.reportType || '').toLowerCase() !== 'test-result') return false;
+  const run = runById.get(report.stepRunId);
+  if (run) return run.runKind === 'rerun' || isRerunKey(run.runKey);
+  return isRerunKey(report.reportKey)
+    || /(?:^|[\s:/-])rerun(?:[-_ ]?\d+)?(?=$|[\s:/-])|重跑/i.test(report.title || '');
+}
+
+function isRerunRun(run) {
+  if (run?.stepRun) return run.stepRun.runKind === 'rerun' || isRerunKey(run.stepRun.runKey);
+  return isRerunReport(run?.report);
+}
+
+function businessRegressionListHtml(runs) {
+  const reruns = runs.filter(isRerunRun);
+  const initial = runs.map((run, index) => isRerunRun(run) ? '' : businessRegressionHtml(run, index)).join('');
+  if (!reruns.length) return initial;
+  const statusKey = globalThis.CodexReportCards?.combinedStatus?.(reruns.map(run => run.status)) || 'unknown';
+  const status = reportStatusPresentation(statusKey);
+  const artifactReports = reruns.flatMap(run => run.artifactReports?.length ? run.artifactReports : [run.report].filter(Boolean));
+  return initial + `<article class="business-regression business-rerun-group tone-${escapeHtml(status.tone)}">
+    <header class="business-regression-head"><div><h4>${escapeHtml(tr('rerunResults'))}</h4><span class="business-regression-index">${reruns.length} ${escapeHtml(tr('executionRuns'))}</span></div><span class="report-status tone-${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span></header>
+    ${businessRunArtifactLinks({ artifactReports, report: { status: statusKey } })}
+    <div class="business-rerun-list">${reruns.map(run => `<details class="business-rerun-entry" data-detail-key="rerun:${escapeHtml(run.id)}">
+      <summary><span>${escapeHtml(run.step?.label || run.report?.title || tr('regressionRerun'))}${run.stepRun?.runKey ? ` · ${escapeHtml(run.stepRun.runKey)}` : ''}</span><span class="report-status tone-${escapeHtml(reportStatusPresentation(run.status).tone)}">${escapeHtml(reportStatusPresentation(run.status).label)}</span></summary>
+      <div class="business-rerun-body"><p>${escapeHtml(testRunSummary(run))}</p>
+      <div class="business-execution-meta"><span>${escapeHtml(tr('startedAtShort'))} <time>${escapeHtml(formatTimelineTime(run.startedAt))}</time></span><span>${escapeHtml(tr('finishedAtShort'))} <time>${escapeHtml(formatTimelineTime(run.finishedAt))}</time></span>${(run.skillIds || []).map(id => `<code>${escapeHtml(id)}</code>`).join('')}</div>
+      ${executionCommandDetails(run.command, 'business-command', run.id)}${businessRunArtifactLinks(run)}
+      </div></details>`).join('')}</div>
   </article>`;
 }
 
@@ -2127,7 +2237,7 @@ function generalTaskSummaryTimeline(task, reports, externalAttempts, scheduledJo
   </section>`;
 }
 
-function businessSummaryTimeline(task, reports, externalAttempts, scheduledJobs, executions, steps = []) {
+function businessSummaryTimeline(task, reports, externalAttempts, scheduledJobs, executions, steps = [], pytestSummary = null) {
   reports = reportsWithRegisteredArtifacts(reports, externalAttempts);
   const runs = businessTestRuns(reports, externalAttempts, executions, steps);
   if (!runs.length) {
@@ -2252,7 +2362,7 @@ function businessSummaryTimeline(task, reports, externalAttempts, scheduledJobs,
       sortOrder: 100,
       title: tr(taskIsActive ? 'currentResult' : 'finalResult'),
       detail: taskIsActive ? testRunSummary(latestCompletedRun) : businessFinalSummary(runs),
-      status: latestCompletedRun.status,
+      status: !taskIsActive && pytestSummary?.available ? finalPytestStatus(pytestSummary) : latestCompletedRun.status,
       skillIds: latestCompletedRun.skillIds,
     });
   }
@@ -2262,16 +2372,19 @@ function businessSummaryTimeline(task, reports, externalAttempts, scheduledJobs,
     return timeDifference || left.sortOrder - right.sortOrder;
   });
   const stage = businessSummaryStage(task, runs, analysisReports, latestAnalysisExecution);
+  const resultStatistics = stage.title === tr('finalResult') ? pytestResultSummaryHtml(pytestSummary) : '';
+  if (resultStatistics) stage.status = finalPytestStatus(pytestSummary);
   const stageStatus = reportStatusPresentation(stage.status);
   return `<section class="business-summary">
     <header class="business-summary-head">
       <div><span class="section-label">${escapeHtml(tr('currentStage'))}</span><h3>${escapeHtml(stage.title)}</h3></div>
       <span class="report-status tone-${escapeHtml(stageStatus.tone)}">${escapeHtml(stageStatus.label)}</span>
-      <p>${escapeHtml(stage.detail)}</p>
+      ${resultStatistics || `<p>${escapeHtml(stage.detail)}</p>`}
+      ${resultStatistics ? `<details class="business-final-detail" data-detail-key="final-conclusion"><summary>${escapeHtml(tr('fullResultDetail'))}</summary><p>${escapeHtml(stage.detail)}</p></details>` : ''}
     </header>
     <section class="business-regressions">
       <div class="business-summary-section-head"><span class="section-label">${escapeHtml(tr('regressionCommands'))}</span><strong>${runs.length}</strong></div>
-      ${runs.length ? `<div class="business-regression-list">${runs.map(businessRegressionHtml).join('')}</div>` : `<div class="business-summary-empty">${escapeHtml(tr('noPytestRuns'))}</div>`}
+      ${runs.length ? `<div class="business-regression-list">${businessRegressionListHtml(runs)}</div>` : `<div class="business-summary-empty">${escapeHtml(tr('noPytestRuns'))}</div>`}
     </section>
     <section class="business-milestones">
       <div class="business-summary-section-head"><span class="section-label">${escapeHtml(tr('businessTimeline'))}</span><strong>${events.length}</strong></div>
@@ -2280,11 +2393,17 @@ function businessSummaryTimeline(task, reports, externalAttempts, scheduledJobs,
   </section>`;
 }
 
-function skillReportList(reports) {
+function skillReportList(reports, steps = []) {
   if (!reports.length) return '';
+  const runById = new Map(steps.flatMap(step => (step.runs || []).map(run => [run.id, run])));
+  const groups = globalThis.CodexReportCards?.groupReports?.(reports, {
+    rerunKeys: new Set(reports.filter(report => isRerunReport(report, runById)).map(report => report.reportKey || report.id)),
+    rerunTitle: tr('rerunResults'), rerunSummary: count => trf('rerunReportsCombined', { count }),
+  })
+    || reports.map(report => ({ report, relatedReports: [] }));
   return `<section class="business-reports">
-    <div class="business-reports-heading"><span class="section-label">${escapeHtml(tr('businessReports'))}</span><strong>${reports.length}</strong></div>
-    <div class="business-report-list">${reports.map((report) => {
+    <div class="business-reports-heading"><span class="section-label">${escapeHtml(tr('businessReports'))}</span><strong>${groups.length}</strong></div>
+    <div class="business-report-list">${groups.map(({ report, relatedReports }) => {
     const status = reportStatusPresentation(report.status);
     const card = globalThis.CodexReportCards?.definition(report.reportType)
       || { id: 'business', labels: { zh: '业务结果', en: 'Business result' } };
@@ -2296,24 +2415,50 @@ function skillReportList(reports) {
       : '';
     return `<article class="business-report report-card-${escapeHtml(card.id)} report-status-${escapeHtml(report.status)}" data-report-key="${escapeHtml(report.reportKey || report.id || '')}">
       <header class="business-report-head">
-        <div><div class="report-card-kicker"><span class="report-card-type">${escapeHtml(card.labels[state.lang])}</span><span class="report-skill">${escapeHtml(report.skillId)} <code>v${Number(report.skillVersion || 0)}</code></span></div><h3>${escapeHtml(report.title)}</h3></div>
+        <div><div class="report-card-kicker"><span class="report-card-type">${escapeHtml(card.labels[state.lang])}</span>${report.skillId ? `<span class="report-skill">${escapeHtml(report.skillId)} <code>v${Number(report.skillVersion || 0)}</code></span>` : ''}</div><h3>${escapeHtml(report.title)}</h3></div>
         <span class="report-status tone-${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>
       </header>
       <p class="business-report-summary">${escapeHtml(report.summary)}</p>
       ${metrics}
-      <div class="business-report-meta"><span>${escapeHtml(tr('reportRevision'))} #${Number(report.revision || 0)}</span>${observed}<span>${escapeHtml(tr('reportPublishedAt'))} <time>${escapeHtml(formatTime(report.publishedAt))}</time></span></div>
-      ${reportArtifactLinks(
-      report.artifacts,
-      report.registeredArtifacts,
-      report.status,
-      report.artifactDeclarations,
-    )}
+      ${reportGroupArtifactLinks(report, relatedReports)}
       ${reportExecutionDetails(report)}
       <div class="report-sections">${(report.sections || []).map(skillReportSection).join('')}</div>
-      <details class="report-raw"><summary>${escapeHtml(tr('reportRawPayload'))}</summary><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre></details>
+      ${relatedReportDetails(relatedReports, report.reportKey || report.id)}
+      ${report.presentationGroup ? '' : `<details class="report-raw"><summary>${escapeHtml(tr('reportRawPayload'))}</summary><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre></details>`}
+      <div class="business-report-meta">${report.presentationGroup ? '' : `<span>${escapeHtml(tr('reportRevision'))} #${Number(report.revision || 0)}</span>`}${observed}<span>${escapeHtml(tr('reportPublishedAt'))} <time>${escapeHtml(formatTime(report.publishedAt))}</time></span></div>
     </article>`;
   }).join('')}</div>
   </section>`;
+}
+
+function reportGroupArtifactLinks(report, relatedReports) {
+  const members = [report, ...relatedReports];
+  const tagged = field => members.flatMap(member => (member[field] || []).map(artifact => ({
+    ...artifact, reportKey: member.reportKey, executionStatus: artifact.executionStatus || member.status,
+  })));
+  const managed = tagged('artifacts');
+  const managedKeys = new Set(managed.map(reportArtifactIdentity));
+  const seenUrls = new Set();
+  const unique = artifacts => artifacts.filter(artifact => {
+    if (!artifact.url) return true;
+    if (seenUrls.has(artifact.url)) return false;
+    seenUrls.add(artifact.url);
+    return true;
+  });
+  return reportArtifactLinks(unique(managed), unique(tagged('registeredArtifacts')
+    .filter(artifact => !managedKeys.has(reportArtifactIdentity(artifact)))),
+  relatedReports.length ? '' : report.status, tagged('artifactDeclarations'));
+}
+
+function relatedReportDetails(reports, groupKey = '') {
+  if (!reports.length) return '';
+  return `<details data-detail-key="related:${escapeHtml(groupKey)}" class="report-section report-related"><summary>${escapeHtml(tr('reportRelatedDetails'))} (${reports.length})</summary>
+    <div class="report-section-body">${reports.map(report => `<details class="report-section" data-related-report-key="${escapeHtml(report.reportKey)}" data-detail-key="report:${escapeHtml(report.reportKey)}">
+      <summary><span>${escapeHtml(report.title)}</span><code>${escapeHtml(reportStatusPresentation(report.status).label)}</code></summary>
+      <div class="report-section-body"><p>${escapeHtml(report.summary)}</p><p>${escapeHtml(reportMetricSummary(report))}</p>
+      ${reportExecutionDetails(report)}${(report.sections || []).map(skillReportSection).join('')}
+      <details class="report-raw"><summary>${escapeHtml(tr('reportRawPayload'))}</summary><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre></details></div>
+    </details>`).join('')}</div></details>`;
 }
 
 function reportExecutionDetails(report) {
@@ -2326,7 +2471,7 @@ function reportExecutionDetails(report) {
     ['startedAtShort', execution.startedAt ? formatTime(execution.startedAt) : ''],
     ['finishedAtShort', execution.finishedAt ? formatTime(execution.finishedAt) : ''],
   ].filter(([, value]) => value != null && value !== '');
-  return `<details class="report-section report-execution"><summary>${escapeHtml(tr('reportExecution'))}</summary><div class="report-section-body">
+  return `<details class="report-section report-execution" data-detail-key="execution:${escapeHtml(report.reportKey || report.id || '')}"><summary>${escapeHtml(tr('reportExecution'))}</summary><div class="report-section-body">
     <pre class="business-command">${escapeHtml(execution.command)}</pre>
     <dl class="report-fields">${fields.map(([key, value]) => `<div><dt>${escapeHtml(tr(key))}</dt><dd><code>${escapeHtml(String(value))}</code></dd></div>`).join('')}</dl>
   </div></details>`;
@@ -2341,11 +2486,11 @@ function reportCoversExecution(report, attempt) {
     && execution.startedAt === attempt.startedAt && execution.command === attempt.command);
 }
 
-function businessReportPage(reports, externalAttempts) {
+function businessReportPage(reports, externalAttempts, steps = []) {
   reports = reportsWithRegisteredArtifacts(reports, externalAttempts);
   const unreported = externalAttempts.filter(attempt => !reports.some(report => reportCoversExecution(report, attempt)));
   const executions = businessExecutionList([], unreported);
-  const reportList = skillReportList(reports);
+  const reportList = skillReportList(reports, steps);
   if (!executions && !reportList) {
     return `<div class="empty-state">${escapeHtml(tr('noBusinessReports'))}</div>`;
   }
@@ -2432,7 +2577,7 @@ function executionCommandGroup(executions) {
     : '';
   return `<section class="execution-command-group">
     <div class="command-group-head"><span>${escapeHtml(tr('fullCommand'))}</span>${repeated}</div>
-    <pre class="execution-command">${escapeHtml(primary.command || '')}</pre>
+    ${executionCommandDetails(primary.command, 'execution-command', primary.id)}
     <div class="execution-run-list">${executions.map(commandExecutionRun).join('')}</div>
   </section>`;
 }
@@ -2576,7 +2721,7 @@ function externalTerminalList(attempts) {
         <span>${escapeHtml(tr('exitCode'))} <code>${exitCode == null ? '-' : exitCode}</code></span>
         <span>${escapeHtml(tr('archivePreservation'))} <code>${escapeHtml(attempt.archiveStatus || 'pending')}</code></span>
       </div>
-      ${attempt.command ? `<div class="command-audit"><span>${escapeHtml(tr('backgroundCommand'))}</span><pre>${escapeHtml(attempt.command)}</pre></div>` : ''}
+      ${attempt.command ? `<div class="command-audit">${executionCommandDetails(attempt.command, 'business-command', attempt.id)}</div>` : ''}
       <div class="attempt-output-links">${externalOutputControl(attempt)}</div>
     </article>`;
   }).join('');
@@ -3783,7 +3928,7 @@ function backgroundTrackingList(externalAttempts, scheduledJobs) {
           <span>${escapeHtml(tr('donePath'))}</span><code>${escapeHtml(attempt.donePath || '-')}</code>
           <span>${escapeHtml(tr('statePath'))}</span><code>${escapeHtml(attempt.statePath || '-')}</code>
         </div>
-        ${attempt.command ? `<div class="command-audit"><span>${escapeHtml(tr('backgroundCommand'))}</span><pre>${escapeHtml(attempt.command)}</pre></div>` : ''}
+        ${attempt.command ? `<div class="command-audit">${executionCommandDetails(attempt.command, 'business-command', attempt.id)}</div>` : ''}
         ${attempt.archivedLogSha256 ? `<div class="execution-context"><span>${escapeHtml(tr('archiveBytes'))}</span><code>${Number(attempt.archivedLogBytes || 0)}</code><span>${escapeHtml(tr('archiveSha256'))}</span><code>${escapeHtml(attempt.archivedLogSha256)}</code></div>` : ''}
         ${attempt.archiveError ? `<div class="execution-context"><span>${escapeHtml(tr('archiveError'))}</span><p>${escapeHtml(attempt.archiveError)}</p></div>` : ''}
         <a class="button secondary small tracking-log-link" target="_blank" rel="noopener" href="/api/sessions/${encodeURIComponent(state.currentTaskId)}/external-attempts/${encodeURIComponent(attempt.id)}/log">${escapeHtml(tr('viewFullLog'))}</a>
@@ -4264,6 +4409,7 @@ function renderAll() {
   renderMetrics();
   renderOverview();
   renderTasks();
+  renderReleaseCycles();
   renderSkills();
   renderProtectionStatus();
   renderBridgeInventory();
@@ -4322,6 +4468,81 @@ async function loadSkills() {
   renderSkills();
 }
 
+function releaseCycleCard(cycle) {
+  const active = cycle.status === 'active';
+  const schedule = (cycle.schedules || []).find((item) => item.enabled) || cycle.schedules?.[0];
+  return `<article class="release-cycle-card ${active ? 'active' : 'closed'}">
+    <div class="task-card-overline"><span class="task-project-badge">${escapeHtml(cycle.project || 'cloudRecord')}</span><span class="status-badge ${active ? 'running' : 'completed'}">${escapeHtml(tr(active ? 'releaseCycleActive' : 'releaseCycleClosed'))}</span></div>
+    <h3>${escapeHtml(cycle.name)}</h3>
+    <p><code>${escapeHtml(cycle.releaseKey)}</code></p>
+    <dl class="release-cycle-meta">
+      <div><dt>${escapeHtml(tr('taskCountLabel'))}</dt><dd>${trf('releaseCycleTaskCount', { count: Number(cycle.taskCount || 0) })}</dd></div>
+      <div><dt>${escapeHtml(tr('nextRun'))}</dt><dd>${escapeHtml(schedule?.enabled ? formatTime(schedule.nextRunAt) : '-')}</dd></div>
+      <div><dt>${escapeHtml(tr('lastRun'))}</dt><dd>${escapeHtml(cycle.lastTaskAt ? formatTime(cycle.lastTaskAt) : '-')}</dd></div>
+      <div><dt>${escapeHtml(tr('status'))}</dt><dd>${escapeHtml(cycle.workflow || '-')}</dd></div>
+    </dl>
+    <div class="release-cycle-actions"><button class="button secondary small" data-action="open-release-cycle" data-id="${escapeHtml(cycle.id)}">${escapeHtml(tr('open'))}</button>${active ? `<button class="button danger small" data-action="close-release-cycle" data-id="${escapeHtml(cycle.id)}">${escapeHtml(tr('closeReleaseCycle'))}</button>` : ''}</div>
+  </article>`;
+}
+
+function renderReleaseCycles() {
+  const grid = $('#releaseCycleGrid');
+  if (!grid) return;
+  grid.innerHTML = state.releaseCycles.length
+    ? state.releaseCycles.map(releaseCycleCard).join('')
+    : `<div class="empty-state span-all">${escapeHtml(tr('noReleaseCycles'))}</div>`;
+  const cycle = state.releaseCycles.find((item) => item.id === state.selectedReleaseCycleId);
+  const section = $('#releaseCycleTaskSection');
+  if (!section || !cycle) {
+    section?.classList.add('hidden');
+    return;
+  }
+  section.classList.remove('hidden');
+  $('#releaseCycleTaskTitle').textContent = `${cycle.name} · ${cycle.releaseKey}`;
+  $('#closeReleaseCycleBtn').classList.toggle('hidden', cycle.status !== 'active');
+  renderHtml('release-cycle-tasks', '#releaseCycleTaskGrid', state.releaseCycleTasks.length
+    ? state.releaseCycleTasks.map((task) => taskCard(task)).join('')
+    : `<div class="empty-state span-all">${escapeHtml(tr('noCurrentTasks'))}</div>`);
+}
+
+async function loadReleaseCycles() {
+  state.releaseCycles = await api('/api/release-cycles');
+  if (state.selectedReleaseCycleId && !state.releaseCycles.some((cycle) => cycle.id === state.selectedReleaseCycleId)) {
+    state.selectedReleaseCycleId = '';
+    state.releaseCycleTasks = [];
+  }
+  renderReleaseCycles();
+}
+
+async function openReleaseCycle(id) {
+  state.selectedReleaseCycleId = id;
+  state.releaseCycleTasks = await api(`/api/release-cycles/${encodeURIComponent(id)}/tasks?limit=500&offset=0`);
+  renderReleaseCycles();
+}
+
+async function runReleaseCycle(id) {
+  try {
+    const key = `release-cycle:${id}:manual:${Date.now()}`;
+    const task = await api(`/api/release-cycles/${encodeURIComponent(id)}/tasks`, {
+      method: 'POST', headers: { 'Idempotency-Key': key }, body: { idempotencyKey: key },
+    });
+    upsertDashboardTask(task);
+    toast(tr('taskStarted'));
+    await Promise.all([loadDashboard({ force: true }), openReleaseCycle(id), loadReleaseCycles()]);
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+async function closeReleaseCycle(id) {
+  const cycle = state.releaseCycles.find((item) => item.id === id);
+  if (!cycle || cycle.status !== 'active') return;
+  if (!window.confirm(`${tr('closeReleaseCycle')}「${cycle.name}」?`)) return;
+  try {
+    await api(`/api/release-cycles/${encodeURIComponent(id)}/close`, { method: 'POST' });
+    toast(tr('closeReleaseCycle'));
+    await loadReleaseCycles();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
 async function loadAudit() {
   if (state.auditController) state.auditController.abort();
   const controller = new AbortController();
@@ -4364,6 +4585,7 @@ function setView(view) {
     if (state.protectionController) state.protectionController.abort();
   }
   if (view === 'runtime') loadRuntimeView();
+  if (view === 'release-cycles') loadReleaseCycles().catch((error) => toast(error.message, 'error'));
   if (view === 'audit') loadAudit().catch((error) => {
     if (error.name !== 'AbortError') toast(error.message, 'error');
   });
@@ -4435,6 +4657,7 @@ function openTaskEditor(task = null) {
     <label class="field full"><span>${escapeHtml(tr('notes'))}</span><textarea name="notes" maxlength="262144">${escapeHtml(task?.notes || '')}</textarea></label>
     <label class="field"><span>${escapeHtml(tr('taskProject'))}</span><input name="project" maxlength="100" value="${escapeHtml(task?.project || 'cloudRecord')}"></label>
     <label class="field"><span>${escapeHtml(tr('taskTags'))}</span><input name="tags" maxlength="10000" value="${escapeHtml((task?.tags || []).join(', '))}"></label>
+    <label class="field"><span>${escapeHtml(tr('workspaceMode'))}</span><select name="workspaceMode"${task ? ' disabled' : ''}><option value="shared"${task?.workspaceMode !== 'session-clone' ? ' selected' : ''}>shared</option><option value="session-clone"${task?.workspaceMode === 'session-clone' ? ' selected' : ''}>session-clone</option></select>${task ? `<input type="hidden" name="workspaceMode" value="${escapeHtml(task.workspaceMode || 'shared')}">` : ''}</label>
     <label class="field"><span>${escapeHtml(tr('workingDir'))}</span><input name="workingDir" required maxlength="4096" value="${escapeHtml(task?.workingDir || '.')}"><small>${escapeHtml(tr('pathHint'))}</small></label>
     <label class="field"><span>${escapeHtml(tr('maxRetries'))}</span><input type="number" name="maxRetries" min="0" max="20" value="${Number(task?.maxRetries ?? 2)}"></label>
     <label class="check-field"><input type="checkbox" name="enabled" ${task?.enabled === false ? '' : 'checked'}><span>${escapeHtml(tr('enabled'))}</span></label>
@@ -4466,6 +4689,8 @@ async function saveTask(event) {
     notes: form.get('notes'),
     project: form.get('project') || 'cloudRecord',
     tags: [...new Set(String(form.get('tags') || '').split(',').map((tag) => tag.trim()).filter(Boolean))],
+    workspaceMode: form.get('workspaceMode') || 'shared',
+    sourceMode: form.get('workspaceMode') === 'session-clone' ? 'session-clone' : 'shared-repo',
     workingDir: form.get('workingDir') || '.',
     maxRetries: Number(form.get('maxRetries') || 0),
     enabled: form.get('enabled') === 'on',
@@ -4512,8 +4737,16 @@ function taskContext(task) {
       <div><dt>${escapeHtml(tr('status'))}</dt><dd><span class="status-badge ${escapeHtml(statusClass(task))}">${escapeHtml(statusLabel(task))}</span></dd></div>
       <div><dt>${escapeHtml(tr('sessionId'))}</dt><dd><code>${escapeHtml(task.id)}</code></dd></div>
       <div><dt>${escapeHtml(tr('taskProject'))}</dt><dd>${escapeHtml(task.project || 'cloudRecord')}</dd></div>
+      ${task.releaseKey ? `<div><dt>${escapeHtml(tr('releaseKey'))}</dt><dd><code>${escapeHtml(task.releaseKey)}</code></dd></div>` : ''}
+      ${task.scheduledFor ? `<div><dt>${escapeHtml(tr('scheduledFor'))}</dt><dd>${escapeHtml(formatTime(task.scheduledFor))}</dd></div>` : ''}
       ${task.tags?.length ? `<div><dt>${escapeHtml(tr('taskTags'))}</dt><dd>${escapeHtml(task.tags.join(', '))}</dd></div>` : ''}
       <div><dt>${escapeHtml(tr('workspace'))}</dt><dd><code>${escapeHtml(task.workingDir || '.')}</code></dd></div>
+      ${task.workspaceMode ? `<div><dt>${escapeHtml(tr('workspaceMode'))}</dt><dd><code>${escapeHtml(task.workspaceMode)}</code></dd></div>` : ''}
+      ${task.sourceMode ? `<div><dt>${escapeHtml(tr('sourceMode'))}</dt><dd><code>${escapeHtml(task.sourceMode)}</code></dd></div>` : ''}
+      ${task.sourceCommit ? `<div><dt>${escapeHtml(tr('sourceCommit'))}</dt><dd><code>${escapeHtml(task.sourceCommit)}</code></dd></div>` : ''}
+      ${task.sourceCommit ? `<div><dt>${escapeHtml(tr('sourceMode'))}</dt><dd><a target="_blank" rel="noopener" href="/source-viewer.html?task=${encodeURIComponent(task.id)}">${state.lang === 'en' ? 'Browse test source' : '查看本次测试源码'}</a></dd></div>` : ''}
+      ${task.archiveState && task.workspaceMode === 'session-clone' ? `<div><dt>${escapeHtml(tr('archiveState'))}</dt><dd><code>${escapeHtml(task.archiveState)}</code></dd></div>` : ''}
+      ${task.sessionRoot ? `<div><dt>${escapeHtml(tr('sessionRoot'))}</dt><dd><code>${escapeHtml(task.sessionRoot)}</code></dd></div>` : ''}
       ${task.notes ? `<div><dt>${escapeHtml(tr('notes'))}</dt><dd>${escapeHtml(task.notes)}</dd></div>` : ''}
       <div><dt>${escapeHtml(tr('runCount'))}</dt><dd>${Number(task.runCount || 0)}</dd></div>
       <div><dt>${escapeHtml(tr('recoveryAttempts'))}</dt><dd>${Number(task.recoveryCount || 0)} / ${Number(task.maxRetries || 0)}</dd></div>
@@ -4524,6 +4757,16 @@ function taskContext(task) {
       ${task.status === 'completed' ? `<div><dt>${escapeHtml(tr('finishedAt'))}</dt><dd>${escapeHtml(formatTime(task.archivedAt || task.lastFinishedAt))}</dd></div>` : ''}
     </dl>
     `;
+}
+
+function setComposerExpanded(expanded, focusInput = false) {
+  $('#continueTaskForm').dataset.expanded = String(expanded);
+  $('#composerBody').classList.toggle('hidden', !expanded);
+  $('#composerToggle').setAttribute('aria-expanded', String(expanded));
+  const label = expanded ? 'collapseInstruction' : 'expandInstruction';
+  $('#composerToggleHint').setAttribute('data-i18n', label);
+  $('#composerToggleHint').textContent = tr(label);
+  if (expanded && focusInput) $('#continueInput').focus();
 }
 
 function renderTaskDetail(task) {
@@ -4552,6 +4795,7 @@ function renderTaskDetail(task) {
   $$('#detailTabs [data-tab]').forEach((button) => button.classList.toggle('active', button.dataset.tab === state.detailTab));
   const composer = $('#continueTaskForm');
   composer.classList.toggle('hidden', archived || state.detailTab === 'task-terminal');
+  setComposerExpanded(composer.dataset.expanded === 'true');
   $('#continueInput').disabled = running || task.enabled === false;
   $('#continueTaskBtn').disabled = running || task.enabled === false;
   $('#continueTaskBtn').textContent = review ? tr('continueTask') : (recover ? tr('recoverTask') : tr('startTask'));
@@ -4576,10 +4820,19 @@ function detailPage(content) {
 
 function renderTaskConsoleHtml(output, html) {
   if (renderCache.get('taskConsole') === html) return false;
+  const scope = `${state.currentTaskId || ''}:${state.detailTab}`;
+  const expanded = new Map(output.dataset.detailScope === scope
+    ? [...(output.querySelectorAll?.('details[data-detail-key]') || [])].map(node => [node.dataset.detailKey, node.open])
+    : []);
   disposeCodexTerminal();
   abortAttemptOutputLoad();
   disposeAttemptTerminals();
-  return renderHtml('taskConsole', output, html);
+  const changed = renderHtml('taskConsole', output, html);
+  output.dataset.detailScope = scope;
+  for (const node of output.querySelectorAll?.('details[data-detail-key]') || []) {
+    if (expanded.has(node.dataset.detailKey)) node.open = expanded.get(node.dataset.detailKey);
+  }
+  return changed;
 }
 
 async function loadOptionalSkillReports(taskId, signal, options = {}) {
@@ -4629,12 +4882,14 @@ async function loadTaskConsole(options = {}) {
   }
   try {
     if (detailTab === 'business-summary') {
-      const [steps, externalAttempts, scheduledJobs, skillReports, executions] = await Promise.all([
+      const [steps, externalAttempts, scheduledJobs, skillReports, executions, pytestSummary] = await Promise.all([
         api(`/api/sessions/${encodeURIComponent(taskId)}/steps`, { signal: controller.signal }),
         api(`/api/sessions/${encodeURIComponent(taskId)}/external-attempts?limit=500&offset=0`, { signal: controller.signal }),
         api(`/api/sessions/${encodeURIComponent(taskId)}/scheduled-jobs?limit=500&offset=0`, { signal: controller.signal }),
         loadOptionalSkillReports(taskId, controller.signal, { history: true, limit: 500 }),
         api(`/api/sessions/${encodeURIComponent(taskId)}/executions?limit=500&offset=0`, { signal: controller.signal }),
+        api(`/api/sessions/${encodeURIComponent(taskId)}/pytest-summary`, { signal: controller.signal, acceptedStatuses: [404] })
+          .catch(error => { if (error.name === 'AbortError') throw error; return null; }),
       ]);
       if (controller.signal.aborted || state.currentTaskId !== taskId || state.detailTab !== detailTab) return;
       state.detailHasOlder = false;
@@ -4642,19 +4897,20 @@ async function loadTaskConsole(options = {}) {
       state.currentExecutions = executions;
       updateBackgroundTabAvailability(externalAttempts, scheduledJobs);
       renderTaskConsoleHtml(output, businessSummaryTimeline(
-        task, skillReports, externalAttempts, scheduledJobs, executions, steps,
+        task, skillReports, externalAttempts, scheduledJobs, executions, steps, pytestSummary,
       ));
       return;
     }
     if (detailTab === 'business-reports') {
-      const [externalAttempts, skillReports] = await Promise.all([
+      const [externalAttempts, skillReports, steps] = await Promise.all([
         api(`/api/sessions/${encodeURIComponent(taskId)}/external-attempts?limit=500&offset=0`, { signal: controller.signal }),
         loadOptionalSkillReports(taskId, controller.signal, { limit: 500 }),
+        api(`/api/sessions/${encodeURIComponent(taskId)}/steps`, { signal: controller.signal }),
       ]);
       if (controller.signal.aborted || state.currentTaskId !== taskId || state.detailTab !== detailTab) return;
       state.detailHasOlder = false;
       state.currentSkillReports = skillReports;
-      renderTaskConsoleHtml(output, businessReportPage(skillReports, externalAttempts));
+      renderTaskConsoleHtml(output, businessReportPage(skillReports, externalAttempts, steps));
       return;
     }
     if (detailTab === 'operations') {
@@ -4732,6 +4988,7 @@ async function openTaskDetail(id, initialTab = 'business-summary') {
   if (state.currentTaskId !== id) {
     renderCache.delete('taskConsole');
     state.taskContextExpanded = false;
+    setComposerExpanded(Boolean($('#continueInput').value.trim()));
   }
   state.currentTaskId = id;
   state.detailTab = initialTab;
@@ -4761,6 +5018,7 @@ async function runOrRecoverTask(event) {
   try {
     await queueTaskRun(task, input);
     $('#continueInput').value = '';
+    setComposerExpanded(false);
     toast(tr('taskStarted'));
     await loadDashboard();
     renderTaskDetail(findTask(task.id));
@@ -5155,6 +5413,8 @@ document.addEventListener('click', async (event) => {
   const action = event.target.closest('[data-action]');
   if (!action) return;
   const id = action.dataset.id;
+  if (action.dataset.action === 'toggle-composer') setComposerExpanded($('#continueTaskForm').dataset.expanded !== 'true', true);
+  if (action.dataset.action === 'copy-report-name') await copyReportFilename(action.dataset.copyText || '');
   if (action.dataset.action === 'new-task') openTaskEditor();
   if (action.dataset.action === 'open-task') await openTaskDetail(id);
   if (action.dataset.action === 'open-task-terminal') {
@@ -5163,6 +5423,10 @@ document.addEventListener('click', async (event) => {
   if (action.dataset.action === 'open-task-reports') {
     await openTaskDetail(id, 'business-reports');
   }
+  if (action.dataset.action === 'open-release-cycle') await openReleaseCycle(id);
+  if (action.dataset.action === 'run-release-cycle') await runReleaseCycle(id || state.selectedReleaseCycleId);
+  if (action.dataset.action === 'close-release-cycle') await closeReleaseCycle(id || state.selectedReleaseCycleId);
+  if (action.dataset.action === 'refresh-release-cycles') await loadReleaseCycles();
   if (action.dataset.action === 'toggle-task-context') {
     state.taskContextExpanded = !state.taskContextExpanded;
     const task = findTask(state.currentTaskId);

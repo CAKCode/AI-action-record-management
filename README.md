@@ -2,6 +2,42 @@
 
 面向 Codex 的持久任务平台。一个 Task 始终指向一个当前最新的 Session，可以连续执行多个 Turn；中断或归档恢复只继续这个最新 Session。需要清空上下文时可 Reset 并保留 Task 配置、ID 和历史，需要完全独立的任务时使用 New 创建新 Task。
 
+## 项目描述卡片
+
+| 项目 | 内容 |
+| --- | --- |
+| **项目名称** | Codex Task Sessions |
+| **项目定位** | 面向 Codex 的持久任务工作台，把自然语言请求转化为可执行、可恢复、可审计的 Task 工作流 |
+| **核心问题** | 长时间任务容易中断，后台测试难以持续观察，报告、日志和媒体缺少统一归档入口 |
+| **核心能力** | Task/Session 生命周期、后台执行、结构化报告、pytest HTML 与媒体归档、Video Check、版本周期、运行库存、备份恢复和操作审计 |
+| **工程重点** | 幂等操作、进程身份校验、任务续跑、失败重跑、证据链、SQLite WAL、SHA-256 完整性校验和安全路径边界 |
+| **技术栈** | Node.js、SQLite、WebSocket、PTY、原生 HTML/CSS/JavaScript、Node Test Runner |
+| **展示入口** | [作品介绍](docs/PROJECT_SHOWCASE.md) · [页面截图](#页面截图) · [架构设计](docs/ARCHITECTURE.md) · [API 参考](docs/API.md) |
+
+## 作品介绍
+
+Codex Task Sessions 把一次自然语言请求从排队、执行、后台测试、报告生成、失败重跑到归档串成一条可追溯的 Task 生命周期。平台同时提供 Web 控制面和 HTTP API，覆盖任务 Session、版本周期、Skills、运行库存、结构化报告、操作审计、备份和恢复检查点。
+
+它重点解决长时间任务容易中断、测试结果难留证据、报告和媒体分散在不同目录的问题：后台命令通过 PID/LOG/DONE/STATE/META 登记，Worker 在 Codex 退出后继续观察；pytest HTML、日志、视频、音频和 Video Check 结果可以在运行中预览，并在终态后进入受校验的托管归档。
+
+### 页面截图
+
+任务详情页集中展示最终统计、回归命令、业务轨迹和报告入口，支持桌面端和移动端查看。
+
+![任务摘要桌面端](docs/screenshots/task-summary-desktop.png)
+
+![任务摘要移动端](docs/screenshots/task-summary-mobile.png)
+
+报告区域展示真实 HTML 文件名、大小、状态和打开入口，并支持查看重跑结果。
+
+![任务报告列表](docs/screenshots/task-reports-desktop.png)
+
+底部指令区支持展开输入、保留草稿和继续发送下一步指令。
+
+![任务指令输入区](docs/screenshots/task-composer-desktop.png)
+
+完整的项目定位、核心能力、截图验证数据和质量检查见[作品介绍](docs/PROJECT_SHOWCASE.md)。
+
 ## 核心能力
 
 - 持久任务：排队、执行、继续、停止、恢复、重置上下文、待确认和完成归档。
@@ -11,9 +47,9 @@
 - 数据保留：Task 明确完成归档后，执行数据、审计和平台托管产物从 `archivedAt` 起保留 30 天，再由 Worker 通过受控清理流程删除。
 - 稳定执行：Web Supervisor、独立 Worker、任务租约、心跳、幂等命令和服务重启恢复。
 - 容量保护：数据、运行状态或任务工作盘空间不足时暂停领取新任务，恢复后原队列继续执行。
-- 在线备份：SQLite 一致性快照经过完整性、外键、SHA-256 和表计数复验后原子发布，支持定时执行与保留数轮转。
+- 在线备份：独立只读连接固定 SQLite 快照，后台压缩备份副本的空页，经过完整性、外键、SHA-256 和表计数复验后原子发布，默认只保留最新 1 份。
 - 平台恢复检查点：任务完全空闲时冻结写入，将已验证数据库、平台数据文件和平台管理的 Session runtime 原子打包并复验；外部 Codex Session home 不作为一致恢复源，默认只保留最新 1 份。
-- 媒体分层：项目代码使用 Git；唯一媒体对象由外部按 SHA-256 增量去重备份；项目 `task/<run-id>/videos` 完整归档后清除，历史 `videos/<run-id>` 由配置好的定时器每 30 天检查清理；源视频由操作者管理，`standard_videos` 独立备份；已托管报告不重复进入恢复检查点。
+- 媒体分层：平台备份不备份视频、音频、图片、播放清单、切片或播放缓存；源码使用 Git；项目 `task/<run-id>/videos` 完整归档后清除，历史 `videos/<run-id>` 由配置好的定时器每 30 天检查清理；源视频和 `standard_videos` 由操作者管理；已托管报告不重复进入恢复检查点。
 - 后台续跑：PID/LOG/DONE/STATE/META 登记后释放 Codex；运行期间由 Worker 轻量观察，终态后才恢复同一 Session 创建结果收集 Turn，继续推进 workflow。
 - Step/Run 语义：业务步骤保持稳定；Rerun 是同一 Step 下的新 Run，技术 Retry 只增加同一 Run 的 External Attempt generation，避免把任务中的不同步骤误显示成 Rerun。
 - 准确终态：Worker 每秒核对后台 DONE/STATE/META，停止前再同步核对一次；已经结束的 pytest 保留真实 `succeeded/failed`，不会因为取消后续回查被改成 `cancelled`。
@@ -32,7 +68,7 @@
 
 平台只支持 Codex，不提供 Agent、其他后端或模型配置。任务始终使用部署环境提供的默认 Codex Session 能力。
 
-运行中预览依赖 pytest 已写出的源文件，不表示归档完成；媒体归档不保证客户端支持所有编码。项目分类不自动选择业务流程，唯一媒体增量备份需外部实现。完整功能、组件职责和已验证范围见[功能与能力边界](docs/CAPABILITIES.md)。
+运行中预览依赖 pytest 已写出的源文件，不表示归档完成；媒体归档不保证客户端支持所有编码。项目分类不自动选择业务流程；当前平台备份策略不保护媒体文件。完整功能、组件职责和已验证范围见[功能与能力边界](docs/CAPABILITIES.md)。
 
 ## 部署依赖
 
@@ -111,6 +147,7 @@ Shell 中遗留的任务级路径继承给新服务。每个 Task 仍会在
 | 文档 | 内容 |
 | --- | --- |
 | [功能与能力边界](docs/CAPABILITIES.md) | 功能总览、报告各阶段行为、组件职责、磁盘边界和验证范围 |
+| [作品介绍](docs/PROJECT_SHOWCASE.md) | 项目定位、核心能力、页面截图和验证结果 |
 | [用户手册](docs/USER_GUIDE.md) | Task、Session、后台执行、状态和日常操作 |
 | [部署与运维](docs/OPERATIONS.md) | 运行依赖、目录权限、配置、升级、健康检查和故障处理 |
 | [架构设计](docs/ARCHITECTURE.md) | 组件职责、状态机、不变量和一致性策略 |
@@ -144,6 +181,7 @@ Shell 中遗留的任务级路径继承给新服务。每个 Task 仍会在
 | `CODEX_ROLLING_RESTART_DRAIN_MS` | `500` | 取得维护租约后停服前的排空时间，范围 `0..10000` 毫秒 |
 | `CODEX_DESK_RUNTIME_DIR` | 平台目录外的独立目录 | Session 运行状态和 Skill 快照 |
 | `CODEX_TASK_WORKSPACE_ROOTS` | 平台旁的独立任务目录 | 允许使用的工作目录根路径，Linux 使用 `:` 分隔多个目录 |
+| `CODEX_TASK_SESSIONS_DIR` | 第一个 workspace root 下的 `codex-task-sessions` | 完整提测的独立源码与原地归档父目录；与 Bridge Runtime 分开保留 |
 | `CODEX_ALLOW_ROOT_EXECUTION` | 未启用 | 仅供隔离开发验证，生产环境禁止配置 |
 | `CODEX_TASK_REAL_CODEX_BIN` | 从 `PATH` 查找 `codex` | 真实 Codex CLI 的绝对路径 |
 | `CODEX_SOURCE_HOME` | `$HOME/.codex` | 任务隔离 Codex Home 的认证/配置来源；服务启动时不会继承外部任务级 `CODEX_HOME` |

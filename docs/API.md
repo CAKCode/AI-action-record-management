@@ -61,6 +61,58 @@ BASE_URL=http://127.0.0.1:8091
 
 任务在 API 中沿用 `/api/sessions` 路径。一个 Task 保存一个当前最新 Session 指针，Session 可以包含多个 Turn；创建任务不会自动启动，需另外调用 `/run`。`POST /api/sessions` 或 `/start` 是 New，创建独立 Task；`/reset` 保留 Task 并替换上下文；Run、Restore 和 Codex CLI 只解析当前最新 Session。
 
+### 版本周期与 Cron 系列 Task
+
+版本周期是手动提测 Task 和 Cron 创建 Task 的归属对象。周期本身只保存工作流与 Task 模板；每次 Cron 触发都会调用现有 Task 创建/排队逻辑，生成一个独立 Task。关闭周期只禁用后续调度，已经创建或运行中的 Task、报告和归档产物不受影响。
+
+```http
+GET  /api/release-cycles
+POST /api/release-cycles
+GET  /api/release-cycles/:id
+POST /api/release-cycles/:id/schedules
+GET  /api/release-cycles/:id/tasks
+POST /api/release-cycles/:id/tasks
+POST /api/release-cycles/:id/close
+```
+
+创建周期时，`taskTemplate` 使用普通 Task 字段；`workspaceMode`、`sourceMode`、代码仓库和完整提测指令应由云录制工作流写入模板。Cron 到点时，Task 使用当天执行流程解析的最新代码、镜像和环境；代码、镜像和环境快照只记录在当天 Task 中，不冻结在周期对象上。
+
+```json
+{
+  "id": "cloud-recording-v281",
+  "name": "Cloud Recording v2.8.1",
+  "releaseKey": "cloud-recording-v2.8.1",
+  "project": "cloudRecord",
+  "workflow": "full-release-regression",
+  "taskTemplate": {
+    "name": "Nightly full regression",
+    "objective": "拉取最新测试代码，部署最新镜像和 GW，并完成完整云录制回归。",
+    "workspaceMode": "session-clone",
+    "sourceMode": "session-clone",
+    "autoResume": true,
+    "maxRetries": 2
+  }
+}
+```
+
+创建每天 23:00（北京时间）的计划：
+
+```json
+{
+  "id": "cloud-recording-v281-nightly",
+  "cron": "0 23 * * *",
+  "timezone": "Asia/Shanghai",
+  "misfirePolicy": "once",
+  "overlapPolicy": "queue"
+}
+```
+
+`POST /api/release-cycles/:id/tasks` 可立即创建一次该周期的独立 Task；同一请求可通过 `Idempotency-Key` 安全重试。Task 响应会附带 `releaseCycleId`、`releaseKey`、`scheduleId`、`scheduledFor`、`seriesRunId` 和 `seriesRunSequence`，也可以用 `GET /api/release-cycles/:id/tasks` 查看完整系列。
+
+`overlapPolicy=queue` 时，每天仍创建独立 Task，后续 Task 等同周期较早的活动 Task 退出后再启动；`waiting_scheduled` 仍视为活动状态。`skip` 在同周期已有活动 Task 时跳过该次触发；`parallel` 保持并行。不属于该周期的 Task 仍可正常并行。`misfirePolicy=once` 恢复后补一次，`skip` 跳过已错过完整周期的触发。
+
+调度按计划分别提交事务；单个计划失败记录 `lastError`、`failureCount`、`nextAttemptAt` 并独立退避重试，不回滚其他计划或重启 Worker。普通 Task 创建时提供的 `releaseCycleId` 与创建、排队同事务提交；版本不存在或已关闭时，不留下已创建或已排队的 Task。
+
 ### 任务字段
 
 创建和更新时使用以下字段：
@@ -71,9 +123,12 @@ BASE_URL=http://127.0.0.1:8091
 | `name` | string | 创建必填 | 任务显示名称 |
 | `objective` | string | 创建必填 | 任务目标、边界和验收条件 |
 | `workingDir` | string | 否 | 默认 `.`；相对第一个任务根目录解析，也可使用白名单内绝对路径 |
+| `workspaceMode` | string | 否 | 创建时选择 `shared`（默认）或 `session-clone`；后者由平台创建独立目录；历史 Task 不迁移 |
+| `sourceMode` | string | 否 | `shared-repo`（默认）或 `session-clone`；Release Skill 使用后者 |
 | `notes` | string | 否 | 操作备注，不作为本轮运行指令 |
 | `project` | string | 否 | 项目分类；默认 `cloudRecord`，历史任务也按此兼容值返回 |
 | `tags` | string[] 或逗号分隔字符串 | 否 | 自定义标签，最多 100 个，每项最多 100 个字符；平台会去重并保留输入顺序 |
+| `releaseCycleId` | string | 否 | 将原有手动创建的 Task 关联到一个进行中的版本周期；不传时保持原有独立 Task 行为 |
 | `maxRetries` | number | 否 | 瞬时错误重试和中断自动恢复的上限，默认 `2`，范围 `0..20` |
 | `autoResume` | boolean | 否 | Worker 中断或服务重启后是否自动恢复，默认 `true` |
 | `enabled` | boolean | 否 | 配置是否启用，默认 `true` |
@@ -97,7 +152,41 @@ BASE_URL=http://127.0.0.1:8091
 | `activeScheduledJobs` | 未完成的持久化检查数 |
 | `nextScheduledAt` | 最近一次待执行检查时间，没有时为空字符串 |
 | `version` | 配置和状态变更版本号 |
+| `sessionRoot` / `sourceRoot` | Session 模式的运行根目录和独立源码目录 |
+| `sourceMode` / `sourceCommit` / `sourceManifestHash` | 实际源码来源、冻结 commit 和 manifest SHA-256 |
+| `archiveMode` / `archiveState` | `managed-copy`/`in-place` 以及源码 Session 的归档状态 |
 | `createdAt` / `updatedAt` | 创建和最后更新时间 |
+
+### `GET/PATCH /api/sessions/:id/source`
+
+`GET` 返回源码与归档状态。Release Skill 在独立 Session clone 完成后调用 `PATCH` 登记冻结源码。`sourceRoot` 必须是
+该 Task 的 `source/premium_robot`，平台只保存 commit、manifest SHA 和归档状态，不接收源码
+内容；源码文件留在 Task Session 目录并在终态冻结后原地归档。commit 和 hash 会与真实的
+`source-manifest.json`、Git HEAD 核对。同 Task 续接不能更换冻结 commit。
+
+```json
+{
+  "sourceMode": "session-clone",
+  "sourceCommit": "<full-git-sha>",
+  "sourceManifestHash": "<sha256>",
+  "archiveState": "pending"
+}
+```
+
+Worker 在最后的 Turn、后台执行、调度和报告登记收尾后生成 `archive-manifest.json`，保存
+逐文件字节数、SHA-256、相对路径及文件模式，去掉 source/ 和 task/ 的写权限。`archiveState`
+由 `active -> pending -> archived` 变化，异常为 `failed`；客户端不能直接声明校验成功。
+继续 Task 时重新开放源码及输出父目录，新 Run 使用新的路径；旧 Run 的输出保持只读。
+`archived` 在这里表示文件已接管，不表示用户已经完成 Task；30 天保留仍从 `archivedAt` 起算。
+
+- `GET /api/sessions/:id/source/files`：源码清单（不列 Git 内部文件）。
+- `GET /api/sessions/:id/source/file?path=<relative-path>`：按清单核验并读取源码文件。
+- `/source-viewer.html?task=<id>`：筛选和查看本次测试源码。
+
+新模式的 HTML/Markdown artifact 和资源响应增加 `storageMode=in-place`。URL 与已有报告一致，
+原文件留在 Session 内；HTML、HLS/DASH 清单及 Video Check 的显示链接在响应时改写。媒体和
+日志原件不再复制到 `skill-report-artifacts`；转换信息作为数据库元数据保存。共享模式仍返回
+`storageMode=managed-copy`，保留旧的复制归档、校验、媒体清理和查看行为。
 
 主要状态：
 
@@ -521,19 +610,26 @@ curl -fsS "$BASE_URL/api/sessions/verify-release/external-attempts?limit=100"
 
 按后台执行明确登记的 artifact key 返回私有、只读的文件快照；客户端不能提交文件系统路径。运行中的 HTML 使用与托管报告相同的 CSP sandbox，并以 `private, no-store` 返回。每次请求只读取打开瞬间已有的字节，pytest 后续追加内容不会进入当前响应；刷新页面可获取更新。平台尽力内嵌本地 CSS 和脚本，并将受支持的日志、媒体和图片引用改写为该登记项的资源 URL；不向原业务 HTML 写回内容。可选依赖仍在写入时可能保留原内容，预览不保证所有相对依赖已就绪。
 
+登记 HTML 和正式 HTML artifact 都按 `Accept-Encoding` 协商 gzip，并返回 `Vary: Accept-Encoding`。
+Content-Length 表示当前传输编码后的字节数，HEAD 与同编码 GET 一致；原始文件 SHA-256
+仍针对归档字节验证。媒体子资源、日志资源和 Range 响应不参与该 HTML 压缩。
+
 | 条件 | 响应 |
 | --- | --- |
-| 已登记、HTML 有文档结构、External 为 `running` | `200`；保留可见的 pytest-html 刷新按钮 |
+| 已登记、HTML 有文档结构、尚无托管版本 | `200`；保留可见的 pytest-html 刷新按钮 |
 | artifact key 未登记或文件尚未生成 | `404` |
 | HTML 为空、只有标题占位或缺少文档结构 | `409` |
-| External 已终态，但 HTML 仍含活动刷新按钮 | `409`，报告未完成终态写入 |
+| External 已终态，但 HTML 仍含活动刷新按钮 | `200` 预览；归档继续等待 HTML 完成 |
+| 该 HTML 和依赖已原子发布 | `307` 到正式 artifact URL，保留查询参数 |
 | 源 HTML 超过 64 MiB | `413` |
 
-判断使用 External Attempt 的当前状态，不使用 Skill Report 的旧 `running` 状态。源文件正在重写导致快照读取不完整时可能返回 `409`，应在写入后刷新。运行中快照没有正式归档副本的持久性和摘要保证。
+预览不因后台进程进入终态而关闭，归档排队、处理中及重试时均可继续打开源 HTML。
+每份文件发布后即可切换，无需等待整批归档完成。源文件正在重写导致快照读取不完整时会短暂重试，
+持续变化或内容仍不完整时返回 `409`，应在写入后刷新。运行中快照没有正式归档副本的持久性和摘要保证。
 
 `GET|HEAD /api/sessions/:id/external-attempts/:attemptId/artifacts/:artifactKey/resources/:resourcePath`
 
-只返回上述 HTML 使用的本地相对资源，以源 HTML 目录解析，并受 META 的执行目录边界约束；例如 `../videos` 可通过编码后的相对路径访问。服务会校验 Task、Attempt、artifact key、相对路径、真实路径和普通文件类型，拒绝符号链接、目录逃逸和超过 64 MiB 的资源；媒体资源支持单段 `Range`。文件尚未生成、key 未登记或资源不存在时返回 `404`。终态托管完成后，结构化报告会改用带完整性校验的正式 artifact URL。
+只返回上述 HTML 使用的本地相对资源，以源 HTML 目录解析，并受 META 的执行目录边界约束；例如 `../videos` 可通过编码后的相对路径访问。服务会校验 Task、Attempt、artifact key、相对路径、真实路径和普通文件类型，拒绝符号链接、目录逃逸和超过 64 MiB 的资源；媒体资源支持单段 `Range`。文件尚未生成、key 未登记或资源不存在时返回 `404`。该 HTML 托管完成后，原资源 URL 以 `307` 跳转到匹配的正式资源，并签发新资源凭据，保持已打开页面的日志和视频可用。跳转后仍执行正式资源的完整性校验，支持 HEAD 和 Range，不依赖原项目副本。
 
 终态托管由 Worker 每次限量领取一条记录完成。复制使用源文件前后指纹校验、私有临时文件、`fsync` 和同目录不覆盖式原子发布；字节数与 SHA-256 在同一状态事务中入库。发布后进程中断时，下一 Worker 会复验并补记已存在副本。源文件缺失、变化或类型不安全不会静默忽略，会写入工作日志和审计，并通过 `archiveNextRetryAt` 退避重试。
 
@@ -663,7 +759,26 @@ curl -fsS -X PUT "$BASE_URL/api/sessions/verify-release/executions/execution-exa
 
 平台对新增关联追加 `linked`，对移除关联追加 `unlinked`，来源均为 `operator`。旧记录不会覆盖或删除；发生变化时同时生成 `command.skills.corrected` 工作日志和全局审计事件。缺少原因、传入非数组、使用快照外 Skill 或命令不属于该任务时分别返回 `400` 或 `404`。
 
+### 查询 pytest 累计与最终统计
+
+`GET /api/sessions/:id/pytest-summary`
+
+从当前逻辑报告引用的已归档 pytest HTML 读取用例结果，返回 `cumulative`（包含重跑）、
+`final`（同一测试目标下重跑覆盖原结果）、`executed`（累计总数减去 Skip）、`reportCount`、
+`available` 和 `complete`。每组计数包含 `total/passed/failed/error/skipped/xfailed/xpassed/unknown`。
+`total` 包含 Skip、XFail 等结果；报告修订和复用同一产物不会重复计数，不同测试目标保持独立。
+
+解析在临时后台线程内串行执行，只向页面返回计数；缓存依据产物摘要、文件状态和执行归属失效，
+最多保留 8 组小型统计结果。报告缺失、仍在执行、无法通过完整性检查或重跑未匹配到原用例时，
+`complete=false`；`pendingReports`、`unmatchedRerunCases` 和 `failures` 说明未完成部分，
+不把缺失证据视为零失败。响应不包含测试源码、报告正文或文件系统路径。
+
 ### 查询 Skill 结构化报告
+
+Schema v2 可选 `relatedReportKeys` 关联同一 Task 内的执行报告。前端将这些报告的文件入口
+和可展开明细合并到阶段卡，API 仍分别返回原报告及其执行/归档归属。跨执行的阶段汇总
+使用 `artifacts: []`、不伪造单个 `executionEvidence`；一张阶段卡可引用多个实际 Run，
+并保持每个 Run 的 `reportKey`、Skill、Step Run 和 HTML URL。未提供关联的历史报告维持原显示。
 
 `GET /api/sessions/:id/skill-reports?limit=100&offset=0&history=0`
 

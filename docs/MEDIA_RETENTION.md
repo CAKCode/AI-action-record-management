@@ -83,15 +83,13 @@ project-local generated-media roots for the fallback command.
 
 ## Long-term media backup
 
-Media that must survive the 30-day source cleanup belongs in an external
-content-addressed store. Before the source directory is eligible for cleanup,
-the backup process should hash each regular media file with SHA-256, publish
-one object per digest, and record a manifest mapping the run, relative path,
-size, and digest to that object. Re-running the backup is incremental and
-idempotent because the digest is the object key. This repository does not
-implement that external object store; `media-retention-cleanup.js` only
-enforces the temporary-source lifecycle. Keep `standard_videos` on its own
-backup and retention policy.
+The current platform policy does not back up media. Database backups contain
+only SQLite data; recovery checkpoints omit videos, audio, images, playlists,
+segments, playback caches and media directories. Media archiving still supports
+report playback and follows the existing retention rules. Operators continue
+to manage source videos and `standard_videos`; the platform does not start an
+external incremental media backup. `media-retention-cleanup.js` only enforces
+the temporary-source lifecycle.
 
 ## Dry run and timer
 

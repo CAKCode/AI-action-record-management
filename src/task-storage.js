@@ -1,13 +1,14 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-function measureTaskStorage(sessionRoot, snapshotRoot) {
+function measureTaskStorage(sessionRoot, snapshotRoot, workspaceRoot = '') {
   const usage = { platformBytes: 0, archiveBytes: 0, snapshotBytes: 0, files: 0, unreadableEntries: 0 };
   const seen = new Set();
   const pending = [
     { target: sessionRoot, bucket: 'platformBytes' },
     { target: snapshotRoot, bucket: 'snapshotBytes' },
   ];
+  if (workspaceRoot) pending.push({ target: workspaceRoot, bucket: 'archiveBytes' });
   while (pending.length) {
     const { target, bucket } = pending.pop();
     let stat;

@@ -39,6 +39,9 @@ function validateTaskBody(body, options = {}) {
   const creating = options.creating !== false;
   const requireId = options.requireId ?? creating;
   assertPlainObject('Task body', body);
+  if (body.releaseCycleId != null && typeof body.releaseCycleId !== 'string') {
+    throw validationError('releaseCycleId must be a string');
+  }
   if (requireId && (typeof body.id !== 'string' || !body.id.trim())) {
     throw validationError('id must be a non-empty string');
   }
@@ -57,6 +60,18 @@ function validateTaskBody(body, options = {}) {
     if (body[field] != null && typeof body[field] !== 'boolean') {
       throw validationError(`${field} must be a boolean`);
     }
+  }
+  for (const field of ['workspaceMode', 'sourceMode', 'sourceCommit', 'sourceManifestHash']) {
+    if (body[field] != null && typeof body[field] !== 'string') {
+      throw validationError(`${field} must be a string`);
+    }
+    assertStringLength(field, body[field], field === 'sourceCommit' || field === 'sourceManifestHash' ? 256 : 100);
+  }
+  if (body.workspaceMode != null && !['shared', 'session-clone'].includes(String(body.workspaceMode))) {
+    throw validationError('workspaceMode must be shared or session-clone');
+  }
+  if (body.sourceMode != null && !['shared-repo', 'session-clone'].includes(String(body.sourceMode))) {
+    throw validationError('sourceMode must be shared-repo or session-clone');
   }
   if (body.tags != null && !Array.isArray(body.tags) && typeof body.tags !== 'string') {
     throw validationError('tags must be an array or comma-separated string');

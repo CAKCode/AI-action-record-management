@@ -277,6 +277,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
 
   const context = vm.createContext({
     AbortController,
+    CodexReportCards: require('../public/report-cards'),
     Blob,
     btoa: (value) => Buffer.from(String(value), 'utf8').toString('base64'),
     crypto: {
@@ -956,7 +957,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(STYLES_SOURCE, /html\[data-font-size="small"\]\s*\{[^}]*--ui-root-font-size:\s*16px[^}]*\}[\s\S]*html\[data-font-size="standard"\]\s*\{[^}]*18px[^}]*\}[\s\S]*html\[data-font-size="large"\]\s*\{[^}]*20px/s);
   assert.match(STYLES_SOURCE, /@media \(max-width:\s*860px\)[\s\S]*\.app-shell\s*\{[^}]*max-width:\s*100vw;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
   assert.match(STYLES_SOURCE, /@media \(max-width:\s*860px\)[\s\S]*\.nav\s*\{[^}]*min-width:\s*0;[^}]*max-width:\s*100%;[^}]*overflow-x:\s*auto/s);
-  assert.match(STYLES_SOURCE, /\.task-console\s*\{[^}]*--detail-font-title:\s*1rem;[^}]*--detail-font-body:\s*\.9375rem;[^}]*--detail-font-section-title:\s*\.875rem;[^}]*--detail-font-command:\s*\.8125rem;[^}]*--detail-font-meta:\s*\.75rem;/s);
+  assert.match(STYLES_SOURCE, /\.task-console\s*\{[^}]*--detail-font-title:\s*1.0625rem;[^}]*--detail-font-body:\s*\.8125rem;[^}]*--detail-font-section-title:\s*\.875rem;[^}]*--detail-font-command:\s*\.8125rem;[^}]*--detail-font-meta:\s*\.6875rem;/s);
   assert.match(STYLES_SOURCE, /#taskDetailModal:not\(\[data-detail-tab="task-terminal"\]\) #taskConsoleOutput :where\(span, code, time, small, dt, summary, th, td\)\s*\{[^}]*font-size:\s*var\(--detail-font-meta\)/s);
   assert.match(STYLES_SOURCE, /\.business-summary-head h3\s*\{[^}]*font-size:\s*var\(--detail-font-title\)/s);
   assert.match(STYLES_SOURCE, /\.business-summary-head p\s*\{[^}]*font:\s*var\(--detail-font-body\)\/1\.5/s);
@@ -1361,6 +1362,45 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(skillReportHtml, /failure-analysis\.md/);
   assert.match(skillReportHtml, /2 KiB/);
   assert.match(skillReportHtml, /<details class="report-raw"><summary>/);
+  const rerunDetails = ['gw51', 'gw53'].map(target => ({
+    ...skillReports[0], reportKey: `rerun:${target}`, title: `${target} rerun`,
+    executionEvidence: { externalAttemptId: `external-${target}` },
+    primaryExecution: { ...skillReports[0].primaryExecution,
+      command: `pytest ${target}.py`, commandPath: `/task/${target}.cmd` },
+    registeredArtifacts: [],
+    artifacts: [{ key: 'normal', kind: 'pytest-html', fileName: `${target}-rerun.html`, url: `/reports/${target}.html` }],
+  }));
+  const rerunStage = {
+    ...skillReports[0], reportKey: 'release:rerun', title: 'Rerun 结果',
+    primaryExecution: null, artifacts: [], registeredArtifacts: [],
+    relatedReportKeys: rerunDetails.map(report => report.reportKey),
+  };
+  const groupedReports = [rerunStage, ...rerunDetails];
+  const groupedHtml = vm.runInContext(`businessReportPage(${JSON.stringify(groupedReports)},
+    [{id:'external-gw51'}, {id:'external-gw53'}])`, context);
+  assert.equal((groupedHtml.match(/class="business-report report-card-/g) || []).length, 1);
+  assert.match(groupedHtml, /report-related"><summary>阶段执行明细 \(2\)/);
+  assert.match(groupedHtml, /artifact=%2Freports%2Fgw51\.html/);
+  assert.match(groupedHtml, /artifact=%2Freports%2Fgw53\.html/);
+  assert.match(groupedHtml, /data-related-report-key="rerun:gw51"/);
+  assert.match(groupedHtml, /data-related-report-key="rerun:gw53"/);
+  assert.doesNotMatch(groupedHtml, /class="unreported-executions"/);
+  assert.equal(vm.runInContext(`businessTestRuns(${JSON.stringify(groupedReports)}, [], []).length`, context), 2);
+  const legacyRerunHtml = vm.runInContext(`businessReportPage(${JSON.stringify(rerunDetails)}, [])`, context);
+  assert.equal((legacyRerunHtml.match(/class="business-report report-card-/g) || []).length, 1);
+  assert.match(legacyRerunHtml, /Rerun 结果/);
+  assert.match(legacyRerunHtml, /gw51-rerun\.html/);
+  assert.match(legacyRerunHtml, /gw53-rerun\.html/);
+  assert.match(legacyRerunHtml, /data-related-report-key="rerun:gw51"/);
+  assert.doesNotMatch(legacyRerunHtml, /report-skill">undefined|reportRevision[^<]*#0/);
+  const summaryReferencingRerun = {
+    reportKey: 'release:summary', reportType: 'workflow-progress', title: 'Final summary',
+    status: 'partial', relatedReportKeys: [rerunStage.reportKey], metrics: [], sections: [],
+  };
+  const separateRerunStageHtml = vm.runInContext(`businessReportPage(
+    ${JSON.stringify([summaryReferencingRerun, ...groupedReports])}, [])`, context);
+  assert.equal((separateRerunStageHtml.match(/class="business-report report-card-/g) || []).length, 2);
+  assert.match(separateRerunStageHtml, /data-report-key="release:rerun"/);
   const genericArtifactNames = vm.runInContext(`reportArtifactLinks(
     [{
       key: 'normal', kind: 'pytest-html', fileName: 'result.html', bytes: 1024,
@@ -1455,6 +1495,14 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(businessExecutionHtml, /python3 -m pytest -v test_cloud\.py/);
   assert.match(businessExecutionHtml, /cloud-recording-test/);
   assert.match(businessExecutionHtml, /\$<\/span>/);
+  assert.match(businessExecutionHtml, /<details class="command-details"[^>]*><summary>实际执行的命令<\/summary>/);
+  assert.doesNotMatch(businessExecutionHtml, /<details class="command-details"[^>]*\bopen/);
+  const commandSection = vm.runInContext(`skillReportSection({
+    id:'actual-command', title:'实际执行的命令', kind:'fields', priority:'primary', defaultExpanded:true,
+    fields:[{label:'Command', value:'pytest original.py --option=full'}]
+  })`, context);
+  assert.doesNotMatch(commandSection, /<details[^>]*\bopen/);
+  assert.match(commandSection, /pytest original\.py --option=full/);
   const registeredFromAttemptHtml = vm.runInContext(
     `businessReportPage([{
       ...${JSON.stringify(skillReports[0])}, registeredArtifacts: [], artifacts: [],
@@ -1718,6 +1766,27 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.doesNotMatch(vm.runInContext(
     `businessRegressionTitle(${JSON.stringify(explicitRuns[2])}, 2)`, context,
   ), /Rerun/);
+  const additionalReruns = ['GW53', 'Snapshot'].map((label, index) => ({
+    ...JSON.parse(JSON.stringify(explicitRuns[1])), id: `rerun-${label}`,
+    step: { label }, stepRun: { id: `rerun-${label}`, runKey: 'rerun-1', runKind: 'initial', runNumber: 1 },
+    command: `pytest ${label.toLowerCase()}.py --full-command`,
+    artifactReports: [{ reportKey: `rerun:${label}`, artifacts: [{ key: 'html', kind: 'pytest-html',
+      fileName: `${label}.html`, url: `/rerun-${index}.html` }] }],
+  }));
+  const combinedRerunList = vm.runInContext(`businessRegressionListHtml(
+    ${JSON.stringify([...explicitRuns, ...additionalReruns])})`, context);
+  assert.equal((combinedRerunList.match(/business-rerun-group/g) || []).length, 1);
+  assert.equal((combinedRerunList.match(/class="business-rerun-entry"/g) || []).length, 3);
+  assert.equal((combinedRerunList.match(/class="business-regression tone-/g) || []).length, 2);
+  assert.match(combinedRerunList, /pytest gw53\.py --full-command/);
+  assert.match(combinedRerunList, /pytest snapshot\.py --full-command/);
+  assert.match(combinedRerunList, /artifact=%2Frerun-0\.html/);
+  assert.match(combinedRerunList, /artifact=%2Frerun-1\.html/);
+  assert.doesNotMatch(combinedRerunList, /<details class="command-details"[^>]*\bopen/);
+  assert.equal(vm.runInContext(`isRerunReport({reportType:'test-result',
+    reportKey:'feature:test_rerun_behavior', title:'test_rerun_behavior'})`, context), false);
+  assert.equal(vm.runInContext(`isRerunRun({stepRun:{runKind:'initial', runKey:'initial'},
+    report:{reportType:'test-result', reportKey:'feature:initial', title:'Test rerun behavior'}})`, context), false);
 
   const sharedRunId = 'run-shared-initial';
   const sharedRun = [{
@@ -1898,6 +1967,24 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(historicalFollowUpHtml, /15:51:23/);
   assert.match(historicalFollowUpHtml, /16:02:41/);
 
+  const finalCounts = {
+    available: true, complete: true, executed: 6859,
+    cumulative: { total: 7517, passed: 6750, failed: 105, skipped: 658, xfailed: 4 },
+    final: { total: 7437, passed: 6750, failed: 25, skipped: 658, xfailed: 4 },
+  };
+  const countedSummary = vm.runInContext(`businessSummaryTimeline(
+    {id:'historical-follow-up-task',name:'Historical follow-up task',status:'waiting_review'},
+    ${JSON.stringify(historicalFollowUpReports)},[],[],[],[],${JSON.stringify(finalCounts)})`, context);
+  assert.match(countedSummary, /累计统计/);
+  assert.match(countedSummary, /7,517/);
+  assert.match(countedSummary, /7,437/);
+  assert.match(countedSummary, /6,750/);
+  assert.match(countedSummary, />105<\/strong>/);
+  assert.match(countedSummary, />25<\/strong>/);
+  assert.match(countedSummary, /business-final-detail/);
+  assert.match(countedSummary.split('</header>')[0], /部分完成/);
+  assert.equal(vm.runInContext(`finalPytestStatus(${JSON.stringify({ ...finalCounts, complete: false })})`, context), 'unknown');
+
   const collapsedFollowUpsHtml = vm.runInContext(`businessTimelineHtml(${JSON.stringify([
     { kind: 'scheduled-follow-up', at: '2026-08-04T16:00:00.000Z', targetAt: '2026-08-04T16:05:00.000Z', title: '预约回查', detail: 'first', tone: 'info' },
     { kind: 'scheduled-follow-up', at: '2026-08-04T16:00:01.000Z', targetAt: '2026-08-04T16:06:00.000Z', title: '预约回查', detail: 'second', tone: 'info' },
@@ -1970,7 +2057,9 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     ${JSON.stringify([analysisExecution, analysisReportPublisher])}
   )`, context);
   assert.match(stagePriorityHtml, /<h3>Rerun #1<\/h3>/);
-  assert.equal((stagePriorityHtml.match(/class="business-regression-command"/g) || []).length, 2);
+  assert.equal((stagePriorityHtml.match(/class="business-rerun-entry"/g) || []).length, 1);
+  assert.equal((stagePriorityHtml.match(/class="command-details"/g) || []).length, 2);
+  assert.doesNotMatch(stagePriorityHtml, /<details class="command-details"[^>]*\bopen/);
   assert.equal((stagePriorityHtml.match(/Fail 分析/g) || []).length, 1);
 
   const staleRunningReport = {
@@ -2075,6 +2164,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   }); state.currentTaskId = 'report-console-task'; state.detailTab = 'business-reports';`, context);
   responseOverrides.set('GET /api/sessions/report-console-task/external-attempts', { payload: [] });
   responseOverrides.set('GET /api/sessions/report-console-task/skill-reports', { payload: skillReports });
+  responseOverrides.set('GET /api/sessions/report-console-task/steps', { payload: [] });
   await vm.runInContext('loadTaskConsole({ showLoading: false })', context);
   const businessReportPageHtml = element('#taskConsoleOutput').innerHTML;
   assert.ok(requests.some((url) => url.startsWith('/api/sessions/report-console-task/skill-reports?')));

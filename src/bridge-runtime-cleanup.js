@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { RUNTIME_DIR } = require('./paths');
 const { lstatIfExists, readManagedFile } = require('./managed-storage');
+const { inspectProcess } = require('./process-identity');
 
 const BRIDGE_BOT_ID = process.env.BRIDGE_BOT_ID || 'codex-task-sessions';
 const BRIDGE_RUNTIME_ROOT = path.resolve(
@@ -278,8 +279,155 @@ function resolveBridgeSessionRuntime(sessionKey, options = {}) {
   };
 }
 
-function cleanupBridgeSessionResources(job, options = {}) {
-  const plan = inspectBridgeSessionCleanup(job, options);
+function readProcessText(procRoot, pid, filename) {
+  try {
+    return fs.readFileSync(path.join(procRoot, String(pid), filename), 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'EACCES' || error.code === 'ESRCH') return '';
+    throw error;
+  }
+}
+
+function sessionDaemonProcesses(sessionId, codexHome, options = {}) {
+  const procRoot = path.resolve(options.procRoot || '/proc');
+  let entries;
+  try {
+    entries = fs.readdirSync(procRoot, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'EACCES') return [];
+    throw error;
+  }
+  const expectedSessionId = String(sessionId || '').trim();
+  if (!expectedSessionId || !String(codexHome || '').trim()) return [];
+  const expectedCodexHome = path.resolve(codexHome);
+  const matches = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+    const pid = Number(entry.name);
+    const identity = options.includeIdentity ? (options.inspectProcess || inspectProcess)(pid) : null;
+    if (options.includeIdentity && (!identity || identity.state === 'Z')) continue;
+    const argv = readProcessText(procRoot, pid, 'cmdline').split('\0').filter(Boolean);
+    const executable = argv[0];
+    if (!executable || !path.resolve(executable).startsWith(`${expectedCodexHome}${path.sep}`)) continue;
+    const appServerIndex = argv.indexOf('app-server');
+    const managedDaemon = appServerIndex > 0 && argv.includes('--managed-daemon');
+    const pidUpdateLoop = appServerIndex > 0
+      && argv[appServerIndex + 1] === 'daemon' && argv[appServerIndex + 2] === 'pid-update-loop';
+    const codeModeHost = path.basename(executable) === 'codex-code-mode-host';
+    if (!managedDaemon && !pidUpdateLoop && !codeModeHost) continue;
+    const environment = readProcessText(procRoot, pid, 'environ').split('\0');
+    const values = Object.fromEntries(environment
+      .filter((value) => value.includes('='))
+      .map((value) => {
+        const separator = value.indexOf('=');
+        return [value.slice(0, separator), value.slice(separator + 1)];
+      }));
+    if (values.WECOM_BRIDGE_SESSION_ID !== expectedSessionId) continue;
+    if (!values.CODEX_HOME || path.resolve(values.CODEX_HOME) !== expectedCodexHome) continue;
+    matches.push({ pid, commandLine: argv.join(' '), ...(options.includeIdentity ? { identity } : {}) });
+  }
+  return matches;
+}
+
+function resolveBridgeSessionProcessRuntime(sessionKey, options) {
+  const runtime = resolveBridgeSessionRuntime(sessionKey, options);
+  if (runtime) return runtime;
+  if (!options.sourceDir) {
+    throw cleanupError('Bridge Session record is missing and its source directory is unavailable',
+      'BRIDGE_SESSION_RUNTIME_UNRESOLVED');
+  }
+  return inspectBridgeSessionCleanup({ sessionKey, sourceDir: options.sourceDir }, options).targets;
+}
+
+function releaseBridgeSessionProcess(sessionKey, options = {}) {
+  const runtime = resolveBridgeSessionProcessRuntime(sessionKey, options);
+  const inspect = options.inspectProcess || inspectProcess;
+  const matches = sessionDaemonProcesses(runtime.sessionId, runtime.codexHome, { ...options, includeIdentity: true });
+  const released = [];
+  const errors = [];
+  const killProcess = options.killProcess || process.kill;
+  for (const match of matches) {
+    const current = inspect(match.pid);
+    if (!current || current.state === 'Z' || current.startTicks !== match.identity.startTicks) continue;
+    try {
+      killProcess(match.pid, 'SIGTERM');
+      released.push(match.pid);
+    } catch (error) {
+      if (error.code !== 'ESRCH') errors.push({ pid: match.pid, error: error.message });
+    }
+  }
+  return { sessionId: runtime.sessionId, released, errors };
+}
+
+async function releaseBridgeSessionProcessAndWait(sessionKey, options = {}) {
+  const runtime = resolveBridgeSessionProcessRuntime(sessionKey, options);
+  return releaseSessionRuntimeProcessesAndWait(runtime, options);
+}
+
+async function releaseSessionRuntimeProcessesAndWait(runtime, options) {
+  const inspect = options.inspectProcess || inspectProcess;
+  const kill = options.killProcess || process.kill;
+  const delay = options.delay || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const alive = identity => {
+    const current = inspect(identity.pid);
+    return current && current.state !== 'Z' && current.startTicks === identity.startTicks;
+  };
+  const identities = new Map();
+  const errors = [];
+  const discover = () => {
+    let added = false;
+    for (const match of sessionDaemonProcesses(runtime.sessionId, runtime.codexHome, { ...options, includeIdentity: true })) {
+      const key = `${match.pid}:${match.identity.startTicks}`;
+      if (!identities.has(key)) {
+        identities.set(key, match.identity);
+        added = true;
+      }
+    }
+    return added;
+  };
+  const signal = (identity, name) => {
+    if (!alive(identity)) return;
+    try { kill(identity.pid, name); } catch (error) {
+      if (error.code !== 'ESRCH') errors.push({ pid: identity.pid, error: error.message });
+    }
+  };
+  const stopAndWait = async (name, milliseconds) => {
+    const deadline = Date.now() + milliseconds;
+    const signalled = new Set();
+    while (true) {
+      // Detached helpers can appear while their daemon is shutting down.
+      discover();
+      for (const [key, identity] of identities) {
+        if (!signalled.has(key)) {
+          signal(identity, name);
+          signalled.add(key);
+        }
+      }
+      if (![...identities.values()].some(alive) && !discover()) return;
+      if (Date.now() >= deadline) return;
+      await delay(50);
+    }
+  };
+  await stopAndWait('SIGTERM', options.graceMs ?? 2000);
+  if ([...identities.values()].some(alive)) await stopAndWait('SIGKILL', options.killWaitMs ?? 1000);
+  const released = [];
+  for (const identity of identities.values()) {
+    if (alive(identity)) errors.push({ pid: identity.pid, error: 'Codex runtime process is still running' });
+    else released.push(identity.pid);
+  }
+  return { sessionId: runtime.sessionId, released, errors };
+}
+
+async function cleanupBridgeSessionResources(job, options = {}) {
+  let plan = inspectBridgeSessionCleanup(job, options);
+  if (typeof options.onResolved === 'function') options.onResolved(plan.targets.sessionId);
+  const processes = await releaseSessionRuntimeProcessesAndWait(plan.targets, options);
+  if (processes.errors.length) {
+    throw cleanupError(`Bridge Session processes could not be released: ${processes.errors.map(item => `${item.pid}: ${item.error}`).join('; ')}`,
+      'BRIDGE_PROCESSES_STILL_RUNNING');
+  }
+  // Recheck paths and cleanup ownership after waiting, before removing history.
+  plan = inspectBridgeSessionCleanup(job, options);
   if (typeof options.onResolved === 'function') options.onResolved(plan.targets.sessionId);
   const removed = [];
   for (const [name, target] of [
@@ -296,7 +444,7 @@ function cleanupBridgeSessionResources(job, options = {}) {
   ]) {
     if (unlinkRegularFile(target)) removed.push(name);
   }
-  return { sessionId: plan.targets.sessionId, recordFound: plan.recordFound, removed };
+  return { sessionId: plan.targets.sessionId, recordFound: plan.recordFound, released: processes.released, removed };
 }
 
 function entrySizeNoFollow(target) {
@@ -454,6 +602,9 @@ module.exports = {
   sessionTargets,
   inspectBridgeSessionCleanup,
   resolveBridgeSessionRuntime,
+  sessionDaemonProcesses,
+  releaseBridgeSessionProcess,
+  releaseBridgeSessionProcessAndWait,
   cleanupBridgeSessionResources,
   listBridgeSessionRecords,
   secureBridgeRuntimeStorage,

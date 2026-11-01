@@ -21,9 +21,25 @@ const {
   importSkillArchive,
   deleteSkill,
   listSessions,
+  listReleaseCycles,
+  getReleaseCycle,
+  createReleaseCycle,
+  createTaskSeriesSchedule,
+  closeReleaseCycle,
+  createReleaseCycleTask,
+  listReleaseCycleTasks,
+  listIdleTaskRuntimes,
+  getTaskRuntimeRelease,
+  claimIdleTaskRuntime,
+  finishIdleTaskRuntimeRelease,
+  retainOwnedTaskSessionHistory,
   sessionStats,
   getSession,
   saveSession,
+  updateTaskSourceMetadata,
+  listTaskSourceFiles,
+  openTaskSourceFile,
+  sealPendingSessionWorkspace,
   deleteSession,
   createAndQueueSession,
   queueSessionRun,
@@ -47,6 +63,7 @@ const {
   setCommandExecutionSkills,
   getSessionSkillUsage,
   listSkillReports,
+  listTaskPytestReports,
   openSkillReportArtifactFile,
   openSkillReportArtifactResourceFile,
   skillReportArtifactPlayerFormatHints,
@@ -104,14 +121,18 @@ const { createStorageAuditRecorder } = require('./src/storage-audit');
 const { createStorageAuditOutbox } = require('./src/storage-audit-outbox');
 const { storageFailureAuditPayload } = require('./src/storage-failure');
 const {
-  readVideoCheckReport,
   rewriteVideoCheckReport,
   mapVideoCheckDetails,
   readVideoCheckSummaryScript,
   videoCheckSummaryScript,
 } = require('./src/pytest-video-check');
+const { progressivePytestReportHtml } = require('./src/pytest-report-performance');
+const { readTaskPytestSummary } = require('./src/pytest-result-summary');
+const { gzipHtmlArtifact } = require('./src/report-http-encoding');
 const { pipeResponseStream } = require('./src/response-stream');
 const { createCodexTerminalManager } = require('./src/codex-terminal');
+const { createIdleTaskRuntimeManager } = require('./src/idle-task-runtime');
+const { prepareTaskSessionResume } = require('./src/task-session-history');
 const { createInteractiveCliTranscriptStore } = require('./src/interactive-cli-transcript');
 const { resolveBridgeSessionRuntime } = require('./src/bridge-runtime-cleanup');
 const { createReleaseInfo } = require('./src/release-info');
@@ -939,6 +960,7 @@ async function withSignedArtifactResourceUrls(opened, resourceScope, options = {
   }
   if (opened.mediaType === 'text/html; charset=utf-8') {
     transformedContent = inlineKnownPytestPlayerScripts(transformedContent);
+    transformedContent = progressivePytestReportHtml(transformedContent);
     transformedContent = optimizeLegacyPytestVideoViewedObserver(transformedContent);
     transformedContent = isolateLegacyPytestLogFrames(transformedContent);
   }
@@ -978,14 +1000,13 @@ async function withSignedArtifactResourceUrls(opened, resourceScope, options = {
       });
     };
     if (opened.mediaType === 'text/html; charset=utf-8') {
-      const check = readVideoCheckReport(transformedContent);
-      if (check) {
-        transformedContent = rewriteVideoCheckReport(transformedContent, (descriptor) => (
-          { ...descriptor, source: signCheckSource(descriptor.source) }
-        ), (payload) => payload?.run_id === check.descriptor.run_id
-          ? signCheckDetails(payload, check.descriptor.source)
-          : payload);
-      }
+      let check;
+      transformedContent = rewriteVideoCheckReport(transformedContent, (descriptor) => {
+        if (typeof descriptor.source !== 'string' || !descriptor.run_id) return descriptor;
+        check = descriptor;
+        return { ...descriptor, source: signCheckSource(descriptor.source) };
+      }, payload => check && payload?.run_id === check.run_id
+        ? signCheckDetails(payload, check.source) : payload);
     } else if (opened.mediaType === 'text/javascript; charset=utf-8') {
       const summary = readVideoCheckSummaryScript(transformedContent);
       if (summary) {
@@ -1015,6 +1036,7 @@ async function withSignedArtifactResourceUrls(opened, resourceScope, options = {
 async function streamSkillReportArtifactHandle(res, opened, options = {}) {
   let handle = opened.fileHandle;
   try {
+    opened = await gzipHtmlArtifact(opened, options.acceptEncoding);
     if (res.destroyed || res.writableEnded) return;
     const range = options.range || null;
     writeSkillReportArtifactHeaders(res, opened, { range, mediaResource: options.mediaResource });
@@ -1053,6 +1075,8 @@ function writeSkillReportArtifactHeaders(res, opened, options = {}) {
     'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff',
   };
+  if (opened.contentEncoding) headers['Content-Encoding'] = opened.contentEncoding;
+  if (!options.mediaResource && opened.mediaType === 'text/html; charset=utf-8') headers.Vary = 'Accept-Encoding';
   if (options.mediaResource) {
     // Sandboxed reports have an opaque origin, so SAMEORIGIN blocks their managed resources.
     res.removeHeader('X-Frame-Options');
@@ -1069,6 +1093,7 @@ function writeSkillReportArtifactHeaders(res, opened, options = {}) {
 
 async function headSkillReportArtifactHandle(res, opened, options = {}) {
   try {
+    opened = await gzipHtmlArtifact(opened, options.acceptEncoding);
     if (res.destroyed || res.writableEnded) return;
     writeSkillReportArtifactHeaders(res, opened, options);
     res.end();
@@ -1640,11 +1665,30 @@ const codexTerminalManager = createCodexTerminalManager({
   getTask: getSession,
   activeStatuses: ACTIVE_STATUSES,
   transcripts: interactiveCliTranscripts,
+  prepareRuntime: prepareTaskSessionResume,
   appendWorklog: appendSessionWorklog,
   onError(error) {
     console.error(`[codex-terminal] ${error.stack || error.message}`);
   },
 });
+
+const idleTaskRuntimeManager = createIdleTaskRuntimeManager({
+  list: listIdleTaskRuntimes,
+  claim: claimIdleTaskRuntime,
+  finish: finishIdleTaskRuntimeRelease,
+  getRelease: getTaskRuntimeRelease,
+  retain: retainOwnedTaskSessionHistory,
+  isInteractive: taskId => codexTerminalManager.isRunning(taskId),
+  onError(error) { console.error(`[idle-task-runtime] ${error.stack || error.message}`); },
+});
+let idleTaskRuntimeTimer = null;
+
+function sweepIdleTaskRuntimes() {
+  if (shuttingDown) return;
+  idleTaskRuntimeManager.sweep().catch(error => {
+    console.error(`[idle-task-runtime] ${error.stack || error.message}`);
+  });
+}
 
 function assertInteractiveTerminalIdle(taskId, operation) {
   if (!codexTerminalManager.isRunning(taskId)) return;
@@ -2234,6 +2278,63 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    if (pathname === '/api/release-cycles' && req.method === 'GET') {
+      json(res, listReleaseCycles({
+        project: url.searchParams.get('project') || '',
+        status: url.searchParams.get('status') || '',
+      }));
+      return;
+    }
+    if (pathname === '/api/release-cycles' && req.method === 'POST') {
+      const body = await readBody(req);
+      json(res, createReleaseCycle(body, requestContext), 201);
+      return;
+    }
+    {
+      const params = routeParams(/^\/api\/release-cycles\/([^/]+)$/, pathname);
+      if (params && req.method === 'GET') {
+        const cycle = getReleaseCycle(params[0]);
+        json(res, cycle || { error: 'Not found' }, cycle ? 200 : 404);
+        return;
+      }
+    }
+    {
+      const params = routeParams(/^\/api\/release-cycles\/([^/]+)\/schedules$/, pathname);
+      if (params && req.method === 'POST') {
+        const body = await readBody(req);
+        json(res, createTaskSeriesSchedule(params[0], body, requestContext), 201);
+        return;
+      }
+    }
+    {
+      const params = routeParams(/^\/api\/release-cycles\/([^/]+)\/tasks$/, pathname);
+      if (params && req.method === 'GET') {
+        json(res, listReleaseCycleTasks(params[0], {
+          limit: Number(url.searchParams.get('limit') || 100),
+          offset: Number(url.searchParams.get('offset') || 0),
+          statuses: String(url.searchParams.get('status') || '').split(',').map((item) => item.trim()).filter(Boolean),
+        }));
+        return;
+      }
+      if (params && req.method === 'POST') {
+        const body = await readBody(req);
+        const { idempotencyKey, ...taskBody } = body || {};
+        const key = req.headers['idempotency-key'] || idempotencyKey || '';
+        json(res, createReleaseCycleTask(params[0], taskBody, {
+          ...requestContext,
+          idempotencyKey: key,
+        }).session, 202);
+        return;
+      }
+    }
+    {
+      const params = routeParams(/^\/api\/release-cycles\/([^/]+)\/close$/, pathname);
+      if (params && req.method === 'POST') {
+        json(res, closeReleaseCycle(params[0], requestContext));
+        return;
+      }
+    }
+
     if (pathname === '/api/sessions' && req.method === 'GET') {
       const statusFilter = url.searchParams.get('status') || '';
       const statuses = [...new Set(statusFilter.split(',').map((item) => item.trim()).filter(Boolean))];
@@ -2244,6 +2345,8 @@ const server = http.createServer(async (req, res) => {
         limit: Number(url.searchParams.get('limit') || 100),
         offset: Number(url.searchParams.get('offset') || 0),
         statuses,
+        releaseCycleId: url.searchParams.get('releaseCycleId') || '',
+        releaseKey: url.searchParams.get('releaseKey') || '',
       }));
       return;
     }
@@ -2264,7 +2367,7 @@ const server = http.createServer(async (req, res) => {
       const taskId = canonicalTaskId(taskBody.id);
       const existing = getSession(taskId);
       if (existing) assertInteractiveTerminalIdle(taskId, 'running');
-      if (!existing) resolveWorkingDir(taskBody.workingDir || '.');
+      if (!existing && taskBody.workspaceMode !== 'session-clone') resolveWorkingDir(taskBody.workingDir || '.');
       const runtime = getRuntimeStatus();
       const maintenanceOnly = Boolean(maintenance)
         && runtime.degradedReasons.length === 1
@@ -2299,8 +2402,9 @@ const server = http.createServer(async (req, res) => {
         json(res, { error: `Session ${body.id} already exists` }, 409);
         return;
       }
-      resolveWorkingDir(body.workingDir || '.');
-      json(res, saveSession(taskId, { ...body, status: 'idle' }, { ...requestContext, createOnly: true }), 201);
+      if (body.workspaceMode !== 'session-clone') resolveWorkingDir(body.workingDir || '.');
+      const session = saveSession(taskId, { ...body, status: 'idle' }, { ...requestContext, createOnly: true });
+      json(res, session, 201);
       return;
     }
     {
@@ -2331,6 +2435,34 @@ const server = http.createServer(async (req, res) => {
           json(res, { ok: deleted }, deleted ? 200 : 404);
           return;
         }
+      }
+    }
+    {
+      const params = routeParams(/^\/api\/sessions\/([^/]+)\/source$/, pathname);
+      if (params && req.method === 'GET') {
+        const session = getSession(canonicalTaskId(params[0]));
+        json(res, session || { error: 'Not found' }, session ? 200 : 404);
+        return;
+      }
+      if (params && req.method === 'PATCH') {
+        const body = await readBody(req);
+        json(res, updateTaskSourceMetadata(canonicalTaskId(params[0]), body, requestContext));
+        return;
+      }
+    }
+    {
+      const params = routeParams(/^\/api\/sessions\/([^/]+)\/source\/(files|file)$/, pathname);
+      if (params && req.method === 'GET') {
+        const id = canonicalTaskId(params[0]);
+        if (params[1] === 'files') {
+          const source = listTaskSourceFiles(id);
+          json(res, source || { error: 'Not found' }, source ? 200 : 404);
+        } else {
+          const file = await openTaskSourceFile(id, url.searchParams.get('path') || '');
+          if (!file) json(res, { error: 'Source file not found' }, 404);
+          else await streamSkillReportArtifactHandle(res, file);
+        }
+        return;
       }
     }
     {
@@ -2395,6 +2527,7 @@ const server = http.createServer(async (req, res) => {
           codexTerminalManager.assertTranscriptHealthy(id);
           interactiveCliTranscripts.sealUnfinished(id);
           await interactiveCliTranscripts.verify(id);
+          if (session.workspaceMode === 'session-clone') await sealPendingSessionWorkspace(id);
         }
         json(res, completeSession(
           id,
@@ -2517,6 +2650,12 @@ const server = http.createServer(async (req, res) => {
             json(res, { error: 'Registered artifact resource is not available' }, 404);
             return;
           }
+          if (resource.redirectUrl) {
+            res.writeHead(307, { Location: signedReportResourceUrl(resource.redirectUrl, resource.formatHint),
+              'Cache-Control': 'private, no-store' });
+            res.end();
+            return;
+          }
           resource = await withSignedArtifactResourceUrls(resource, artifactResourceScope(pathname));
           if (req.method === 'HEAD') await headSkillReportArtifactHandle(res, resource, { mediaResource: true });
           else await streamSkillReportArtifactHandle(res, resource, { mediaResource: true });
@@ -2546,11 +2685,17 @@ const server = http.createServer(async (req, res) => {
             json(res, { error: 'Registered artifact is not available' }, 404);
             return;
           }
+          if (artifact.redirectUrl) {
+            res.writeHead(307, { Location: artifact.redirectUrl + url.search, 'Cache-Control': 'private, no-store' });
+            res.end();
+            return;
+          }
           artifact = await withSignedArtifactResourceUrls(artifact, `${pathname}/resources`, {
             documentTitle: true,
           });
-          if (req.method === 'HEAD') await headSkillReportArtifactHandle(res, artifact);
-          else await streamSkillReportArtifactHandle(res, artifact);
+          const responseOptions = { acceptEncoding: req.headers['accept-encoding'] };
+          if (req.method === 'HEAD') await headSkillReportArtifactHandle(res, artifact, responseOptions);
+          else await streamSkillReportArtifactHandle(res, artifact, responseOptions);
           return;
         } finally {
           req.off('aborted', abortRead);
@@ -2809,7 +2954,7 @@ const server = http.createServer(async (req, res) => {
               ? skillReportArtifactPlayerFormatHints(taskId, params[1], params[2])
               : null,
           });
-          await headSkillReportArtifactHandle(res, artifact);
+          await headSkillReportArtifactHandle(res, artifact, { acceptEncoding: req.headers['accept-encoding'] });
           return;
         }
         const releaseLogStream = acquireLogStreamSlot();
@@ -2841,7 +2986,7 @@ const server = http.createServer(async (req, res) => {
               ? skillReportArtifactPlayerFormatHints(taskId, params[1], params[2])
               : null,
           });
-          await streamSkillReportArtifactHandle(res, artifact);
+          await streamSkillReportArtifactHandle(res, artifact, { acceptEncoding: req.headers['accept-encoding'] });
           return;
         } finally {
           req.off('aborted', abortRead);
@@ -2851,6 +2996,12 @@ const server = http.createServer(async (req, res) => {
       }
     }
     {
+      const resultParams = routeParams(/^\/api\/sessions\/([^/]+)\/pytest-summary$/, pathname);
+      if (resultParams && req.method === 'GET') {
+        const reports = listTaskPytestReports(requireSessionId(resultParams[0]));
+        json(res, await readTaskPytestSummary(reports));
+        return;
+      }
       const params = routeParams(/^\/api\/sessions\/([^/]+)\/skill-reports$/, pathname);
       if (params && req.method === 'GET') {
         json(res, listSkillReports(requireSessionId(params[0]), {
@@ -2975,12 +3126,12 @@ server.on('upgrade', (req, socket, head) => {
         return [name, value ? Number(value) : undefined];
       }));
       codexTerminalWebSocketServer.handleUpgrade(req, socket, head, (ws) => {
-        try {
-          codexTerminalManager.attach(taskId, ws, dimensions);
-        } catch (error) {
+        idleTaskRuntimeManager.beforeConnect(taskId).then(() => {
+          if (ws.readyState === WebSocket.OPEN) return codexTerminalManager.attachWhenReady(taskId, ws, dimensions);
+        }).catch(error => {
           sendAttemptOutputControl(ws, { type: 'error', message: error.message || 'Interactive terminal failed' });
           ws.close(Number(error.statusCode) === 503 ? 1013 : 1008, 'Interactive terminal unavailable');
-        }
+        });
       });
       return;
     }
@@ -3065,6 +3216,9 @@ server.listen(PORT, HOST, () => {
     webSupervisorWatchTimer.unref();
   }
   startWorker();
+  idleTaskRuntimeTimer = setInterval(sweepIdleTaskRuntimes, 30000);
+  idleTaskRuntimeTimer.unref();
+  sweepIdleTaskRuntimes();
   if (!getPlatformMaintenance()) storageAudit.retryAll();
   storageAuditRetryTimer = setInterval(() => {
     if (getPlatformMaintenance()) return;
@@ -3146,6 +3300,8 @@ async function shutdown() {
   if (shutdown.started) return;
   shutdown.started = true;
   shuttingDown = true;
+  if (idleTaskRuntimeTimer) clearInterval(idleTaskRuntimeTimer);
+  idleTaskRuntimeTimer = null;
   if (webSupervisorWatchTimer) clearInterval(webSupervisorWatchTimer);
   webSupervisorWatchTimer = null;
   if (storageAuditRetryTimer) clearInterval(storageAuditRetryTimer);
@@ -3168,6 +3324,7 @@ async function shutdown() {
   } catch (error) {
     console.error(`[codex-ops] worker shutdown failed: ${error.message}`);
   }
+  await idleTaskRuntimeManager.shutdown();
   try {
     await waitForDatabaseBackup();
   } catch (error) {

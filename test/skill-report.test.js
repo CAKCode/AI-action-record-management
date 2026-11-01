@@ -114,11 +114,12 @@ function reportFixture(overrides = {}) {
   };
 }
 
-function createRunningTask(taskId, workerId) {
+function createRunningTask(taskId, workerId, overrides = {}) {
   store.saveSession(taskId, {
     name: taskId,
     objective: 'Publish structured Skill reports.',
     workingDir: projectDir,
+    ...overrides,
   });
   const snapshot = store.ensureTaskSkillSnapshot(taskId);
   store.queueSessionRun(taskId, 'Publish a report.', `${taskId}:run`);
@@ -347,7 +348,7 @@ test('completed Task deletion removes archived media, viewed state and pending r
   const cleanupWorker = 'full-delete-runtime-worker';
   const job = store.claimBridgeCleanupJobs(cleanupWorker, 100).find(item => item.taskId === taskId);
   assert.ok(job);
-  const result = store.processBridgeCleanupJob(job, cleanupWorker);
+  const result = await store.processBridgeCleanupJob(job, cleanupWorker);
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(fs.existsSync(targets.workspaceRoot), false);
   assert.equal(fs.existsSync(targets.codexHome), false);
@@ -883,6 +884,21 @@ test('a later report revision reuses unchanged HTML when failure analysis is add
   `).all(revised.id), [{ artifact_key: 'failure-analysis' }]);
 });
 
+test('phase report references round-trip without rebinding child execution evidence', () => {
+  ensureReportSkill();
+  const id = 'phase-report-references-task';
+  const runtime = createRunningTask(id, 'phase-report-references-worker');
+  const phase = store.publishSkillReport(id, reportFixture({
+    reportKey: 'release:rerun', relatedReportKeys: ['rerun:gw51', 'rerun:gw53'],
+  }), { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+  assert.deepEqual(phase.relatedReportKeys, ['rerun:gw51', 'rerun:gw53']);
+  assert.deepEqual(store.listSkillReports(id).find(report => report.id === phase.id).relatedReportKeys,
+    ['rerun:gw51', 'rerun:gw53']);
+  assert.equal(phase.executionEvidence, null);
+  assert.equal(phase.stepRunId, '');
+  assert.deepEqual(phase.artifacts, []);
+});
+
 test('a publishing CLI owner prevents the Worker from archiving the same report concurrently', async () => {
   ensureReportSkill();
   const taskId = 'pytest-html-owned-artifact-job-task';
@@ -917,6 +933,50 @@ test('a publishing CLI owner prevents the Worker from archiving the same report 
   const processed = await store.processSkillReportArtifactJob(published.id, owner);
   assert.equal(processed.ok, true);
   assert.equal(processed.report.artifacts.length, 1);
+});
+
+test('a verified Session correction retires an older artifact retry while preserving its error and history', async () => {
+  ensureReportSkill();
+  const taskId = 'artifact-corrected-revision-task';
+  const runtime = createRunningTask(taskId, 'artifact-corrected-revision-worker', { workspaceMode: 'session-clone' });
+  const sessionRoot = store.getSession(taskId).sessionRoot;
+  const runRoot = path.join(sessionRoot, 'task', 'initial');
+  fs.mkdirSync(runRoot, { recursive: true });
+  const htmlPath = path.join(runRoot, 'corrected-revision.html');
+  const markdownPath = path.join(runRoot, 'corrected-revision-analysis.md');
+  fs.writeFileSync(htmlPath, '<!doctype html><title>Correction</title>');
+  const htmlArtifact = { key: 'normal', kind: 'pytest-html', path: htmlPath };
+  const external = registerArtifactExecution(taskId, runtime, sessionRoot,
+    'pytest tests --html task/initial/corrected-revision.html', { artifacts: [htmlArtifact] });
+  const input = reportFixture({
+    reportKey: 'corrected-revision',
+    executionEvidence: { externalAttemptId: external.id },
+    artifacts: [htmlArtifact, { key: 'analysis', kind: 'failure-analysis-markdown', path: markdownPath }],
+    primaryExecution: { ...reportFixture().primaryExecution, workingDirectory: sessionRoot },
+  });
+  const context = { turnId: runtime.turn.id, attemptId: runtime.attemptId, artifactJobOwner: 'correction-owner' };
+  const original = store.publishSkillReport(taskId, input, context);
+  assert.equal((await store.processSkillReportArtifactJob(original.id, context.artifactJobOwner)).ok, false);
+  const db = getDatabase();
+  const originalJob = db.prepare('SELECT * FROM skill_report_artifact_jobs WHERE report_id=?').get(original.id);
+  assert.equal(originalJob.status, 'retry');
+
+  fs.writeFileSync(markdownPath, '# Corrected evidence\n');
+  const corrected = store.publishSkillReport(taskId, { ...input, summary: 'Corrected evidence is available.' }, context);
+  store.claimSkillReportArtifactJobs('correction-check', 1);
+  assert.equal(db.prepare('SELECT status FROM skill_report_artifact_jobs WHERE report_id=?').get(original.id).status, 'retry');
+  assert.equal((await store.processSkillReportArtifactJob(corrected.id, context.artifactJobOwner)).ok, true);
+  store.claimSkillReportArtifactJobs('correction-check', 1);
+  const retired = db.prepare('SELECT * FROM skill_report_artifact_jobs WHERE report_id=?').get(original.id);
+  assert.equal(retired.status, 'failed');
+  assert.equal(retired.last_error, originalJob.last_error);
+  assert.equal(retired.next_attempt_at, '');
+  assert.ok(retired.completed_at);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM skill_reports WHERE task_id=?').get(taskId).n, 2);
+  assert.ok(db.prepare('SELECT 1 FROM skill_report_artifacts WHERE report_id=?').get(original.id));
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM worklog_events WHERE task_id=? AND kind='skill.report.artifact.superseded'").get(taskId).n, 1);
+  store.claimSkillReportArtifactJobs('correction-check', 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM worklog_events WHERE task_id=? AND kind='skill.report.artifact.superseded'").get(taskId).n, 1);
 });
 
 test('project media cleanup failures keep the artifact job retryable', async () => {
@@ -2136,6 +2196,47 @@ test('Video Check backfill can target one artifact without creating other declar
   assert.equal(fs.readFileSync(otherPath, 'utf8'), '<!doctype html><html><body>unrelated report</body></html>');
 });
 
+test('case source stays external and survives preview and managed archival', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-case-source-task';
+  const runtime = createRunningTask(taskId, 'pytest-case-source-worker');
+  const directory = path.join(projectDir, 'case-source');
+  const sourceDirectory = path.join(directory, 'report.case-sources');
+  fs.mkdirSync(sourceDirectory, { recursive: true });
+  const script = 'window.__pytestHtmlCaseSourceLoaded({id:"source1",source:"CASE_SOURCE_NOT_INLINE"});';
+  fs.writeFileSync(path.join(sourceDirectory, 'source1.js'), script);
+  const htmlPath = path.join(directory, 'report.html');
+  const link = '<a data-case-source="report.case-sources/source1.js" data-case-source-id="source1">video</a>';
+  const blob = JSON.stringify({ tests: { case1: [{ resultsTableRow: [link] }] } })
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  fs.writeFileSync(htmlPath, `<!doctype html><html><body>${link}<div data-jsonblob="${blob}"></div></body></html>`);
+  const artifacts = [{ key: 'html', kind: 'pytest-html', path: htmlPath }];
+  const { report, external } = publishArtifactReport(taskId, runtime, reportFixture({
+    reportKey: 'pytest:case-source', status: 'succeeded',
+    primaryExecution: { ...reportFixture().primaryExecution, workingDirectory: projectDir,
+      command: `pytest tests --html ${htmlPath}` },
+  }), artifacts, { artifacts });
+  const preview = await store.openExternalAttemptArtifactFile(taskId, external.id, 'html');
+  assert.match(preview.content.toString(), /data-case-source=.*external-attempts/);
+  const live = await store.openExternalAttemptArtifactResourceFile(taskId, external.id, 'html', 'report.case-sources/source1.js');
+  try { assert.equal(await live.fileHandle.readFile('utf8'), script); }
+  finally { await live.fileHandle.close(); }
+  const archived = await store.archiveSkillReportArtifacts(taskId, report.id);
+  const artifact = archived.artifacts[0];
+  const opened = await store.openSkillReportArtifactFile(taskId, report.id, artifact.id);
+  let archivedHtml;
+  try { archivedHtml = opened.content?.toString() || await opened.fileHandle.readFile('utf8'); }
+  finally { await opened.fileHandle?.close(); }
+  assert.doesNotMatch(archivedHtml, /CASE_SOURCE_NOT_INLINE/);
+  assert.doesNotMatch(archivedHtml, /report\.case-sources\/source1\.js/);
+  const resources = getDatabase().prepare('SELECT * FROM skill_report_artifact_resources WHERE artifact_id=?').all(artifact.id);
+  assert.equal(resources.length, 1);
+  fs.unlinkSync(path.join(sourceDirectory, 'source1.js'));
+  const source = await store.openSkillReportArtifactResourceFile(taskId, report.id, artifact.id, resources[0].id);
+  try { assert.equal(await source.fileHandle.readFile('utf8'), script); }
+  finally { await source.fileHandle.close(); }
+});
+
 test('Video Check preview keeps polling current results and loading per-case details', async () => {
   ensureReportSkill();
   const taskId = 'pytest-video-check-preview-task';
@@ -2994,6 +3095,53 @@ test('terminal evidence does not permit an HTML report that still shows pytest r
     /pytest is still running/,
   );
   assert.deepEqual(store.listSkillReports('pytest-html-terminal-reload-task')[0].artifacts, []);
+});
+
+test('registered URLs survive archive publication and source cleanup during an in-flight open', async (t) => {
+  ensureReportSkill();
+  for (const target of ['html', 'video']) {
+    const taskId = `archive-handoff-race-${target}`;
+    const runtime = createRunningTask(taskId, `${taskId}-worker`);
+    const directory = path.join(projectDir, taskId);
+    fs.mkdirSync(directory, { recursive: true });
+    const htmlPath = path.join(directory, 'report.html');
+    const videoPath = path.join(directory, 'clip.mp4');
+    fs.writeFileSync(htmlPath, '<!doctype html><html><body><video src="clip.mp4"></video></body></html>');
+    fs.writeFileSync(videoPath, 'archived video');
+    const artifacts = [{ key: 'html', kind: 'pytest-html', path: htmlPath }];
+    const { report, external } = publishArtifactReport(taskId, runtime, reportFixture({
+      reportKey: 'test:archive-handoff',
+      primaryExecution: { ...reportFixture().primaryExecution,
+        workingDirectory: directory, command: `pytest tests --html ${htmlPath}` },
+    }), artifacts, { artifacts });
+    const targetPath = target === 'html' ? htmlPath : videoPath;
+    const originalOpen = fs.promises.open.bind(fs.promises);
+    let archived;
+    const interceptedOpen = t.mock.method(fs.promises, 'open', async (...args) => {
+      if (args[0] === targetPath) {
+        interceptedOpen.mock.restore();
+        archived = await store.archiveSkillReportArtifacts(taskId, report.id);
+        fs.unlinkSync(targetPath);
+      }
+      return originalOpen(...args);
+    });
+    try {
+      const response = target === 'html'
+        ? await store.openExternalAttemptArtifactFile(taskId, external.id, 'html')
+        : await store.openExternalAttemptArtifactResourceFile(taskId, external.id, 'html', 'clip.mp4');
+      assert.ok(archived, 'archive completed after the source read began');
+      let expected = archived.artifacts[0].url;
+      if (target === 'video') {
+        const resource = getDatabase().prepare('SELECT id FROM skill_report_artifact_resources WHERE artifact_id=?')
+          .get(archived.artifacts[0].id);
+        expected += '/resources/' + resource.id;
+      }
+      assert.equal(response.redirectUrl, expected);
+      assert.equal(fs.existsSync(targetPath), false);
+    } finally {
+      interceptedOpen.mock.restore();
+    }
+  }
 });
 
 test('empty or title-only pytest HTML is not published as an openable report', async () => {

@@ -162,6 +162,14 @@ function schema(db) {
       lease_owner TEXT,
       lease_expires_at TEXT,
       cancel_requested INTEGER NOT NULL DEFAULT 0,
+      workspace_mode TEXT NOT NULL DEFAULT 'shared',
+      session_root TEXT NOT NULL DEFAULT '',
+      source_root TEXT NOT NULL DEFAULT '',
+      source_mode TEXT NOT NULL DEFAULT '',
+      source_commit TEXT NOT NULL DEFAULT '',
+      source_manifest_hash TEXT NOT NULL DEFAULT '',
+      archive_mode TEXT NOT NULL DEFAULT 'managed-copy',
+      archive_state TEXT NOT NULL DEFAULT 'none',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -336,6 +344,62 @@ function schema(db) {
       ON scheduled_jobs(status, due_at);
     CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_task
       ON scheduled_jobs(task_id, status, due_at);
+
+    CREATE TABLE IF NOT EXISTS release_cycles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      project TEXT NOT NULL DEFAULT 'cloudRecord',
+      release_key TEXT NOT NULL UNIQUE,
+      workflow TEXT NOT NULL DEFAULT 'full-release-regression',
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK(status IN ('active', 'closed', 'archived')),
+      config_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      closed_at TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_release_cycles_project_status
+      ON release_cycles(project, status, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS task_series_schedules (
+      id TEXT PRIMARY KEY,
+      release_cycle_id TEXT NOT NULL REFERENCES release_cycles(id) ON DELETE CASCADE,
+      cron_expr TEXT NOT NULL,
+      timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      next_run_at TEXT NOT NULL,
+      last_run_at TEXT NOT NULL DEFAULT '',
+      misfire_policy TEXT NOT NULL DEFAULT 'once'
+        CHECK(misfire_policy IN ('once', 'skip')),
+      overlap_policy TEXT NOT NULL DEFAULT 'queue'
+        CHECK(overlap_policy IN ('queue', 'skip', 'parallel')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_series_schedules_due
+      ON task_series_schedules(enabled, next_run_at);
+    CREATE INDEX IF NOT EXISTS idx_task_series_schedules_cycle
+      ON task_series_schedules(release_cycle_id, enabled, next_run_at);
+
+    CREATE TABLE IF NOT EXISTS task_series_runs (
+      id TEXT PRIMARY KEY,
+      release_cycle_id TEXT NOT NULL REFERENCES release_cycles(id) ON DELETE CASCADE,
+      schedule_id TEXT REFERENCES task_series_schedules(id) ON DELETE SET NULL,
+      task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+      scheduled_for TEXT NOT NULL,
+      trigger_type TEXT NOT NULL CHECK(trigger_type IN ('manual', 'cron')),
+      run_sequence INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'created',
+      created_at TEXT NOT NULL,
+      UNIQUE(schedule_id, scheduled_for)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_series_runs_cycle_date
+      ON task_series_runs(release_cycle_id, scheduled_for DESC, run_sequence DESC);
+    CREATE INDEX IF NOT EXISTS idx_task_series_runs_task
+      ON task_series_runs(task_id);
 
     CREATE TABLE IF NOT EXISTS command_executions (
       id TEXT PRIMARY KEY,
@@ -667,6 +731,21 @@ function schema(db) {
   migrateSkillReportHashUniqueness(db);
   migrateSessionOperationReceiptOperations(db);
 
+  const seriesScheduleColumns = new Set(db.pragma('table_info(task_series_schedules)').map(column => column.name));
+  for (const [column, definition] of [
+    ['last_error', "TEXT NOT NULL DEFAULT ''"],
+    ['failure_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['next_attempt_at', "TEXT NOT NULL DEFAULT ''"],
+  ]) {
+    if (!seriesScheduleColumns.has(column)) {
+      db.exec(`ALTER TABLE task_series_schedules ADD COLUMN ${column} ${definition}`);
+    }
+  }
+  const seriesRunColumns = new Set(db.pragma('table_info(task_series_runs)').map(column => column.name));
+  if (!seriesRunColumns.has('overlap_policy')) {
+    db.exec("ALTER TABLE task_series_runs ADD COLUMN overlap_policy TEXT NOT NULL DEFAULT 'parallel'");
+  }
+
   db.exec(`
     INSERT OR IGNORE INTO skill_version_files
       (skill_id, version, file_path, content, mode, content_hash)
@@ -710,6 +789,21 @@ function schema(db) {
         migrateDirectory.run(String(row.working_directory || ''), reportedDirectory, row.id);
       }
     }).immediate();
+  }
+
+  const taskWorkspaceColumns = new Set(db.pragma('table_info(tasks)').map((column) => column.name));
+  const taskMigrations = [
+    ['workspace_mode', "ALTER TABLE tasks ADD COLUMN workspace_mode TEXT NOT NULL DEFAULT 'shared'"],
+    ['session_root', "ALTER TABLE tasks ADD COLUMN session_root TEXT NOT NULL DEFAULT ''"],
+    ['source_root', "ALTER TABLE tasks ADD COLUMN source_root TEXT NOT NULL DEFAULT ''"],
+    ['source_mode', "ALTER TABLE tasks ADD COLUMN source_mode TEXT NOT NULL DEFAULT ''"],
+    ['source_commit', "ALTER TABLE tasks ADD COLUMN source_commit TEXT NOT NULL DEFAULT ''"],
+    ['source_manifest_hash', "ALTER TABLE tasks ADD COLUMN source_manifest_hash TEXT NOT NULL DEFAULT ''"],
+    ['archive_mode', "ALTER TABLE tasks ADD COLUMN archive_mode TEXT NOT NULL DEFAULT 'managed-copy'"],
+    ['archive_state', "ALTER TABLE tasks ADD COLUMN archive_state TEXT NOT NULL DEFAULT 'none'"],
+  ];
+  for (const [column, statement] of taskMigrations) {
+    if (!taskWorkspaceColumns.has(column)) db.exec(statement);
   }
   const taskColumns = new Set(db.pragma('table_info(tasks)').map((column) => column.name));
   if (!taskColumns.has('recovery_count')) {
@@ -774,6 +868,11 @@ function schema(db) {
   );
   if (!skillReportArtifactColumns.has('source_sha256')) {
     db.exec("ALTER TABLE skill_report_artifacts ADD COLUMN source_sha256 TEXT NOT NULL DEFAULT ''");
+  }
+  for (const table of ['skill_report_artifacts', 'skill_report_artifact_resources']) {
+    const columns = new Set(db.pragma(`table_info(${table})`).map(column => column.name));
+    if (!columns.has('storage_mode')) db.exec(`ALTER TABLE ${table} ADD COLUMN storage_mode TEXT NOT NULL DEFAULT 'managed-copy'`);
+    if (!columns.has('view_json')) db.exec(`ALTER TABLE ${table} ADD COLUMN view_json TEXT NOT NULL DEFAULT '{}'`);
   }
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_external_attempts_step_run

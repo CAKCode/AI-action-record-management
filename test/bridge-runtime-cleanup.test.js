@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-bridge-cleanup-'));
 const dataDir = path.join(tempDir, 'data');
@@ -42,8 +43,53 @@ const {
   sessionTargets,
   listBridgeSessionRecords,
   resolveBridgeSessionRuntime,
+  releaseBridgeSessionProcess,
+  releaseBridgeSessionProcessAndWait,
+  sessionDaemonProcesses,
+  cleanupBridgeSessionResources,
   secureBridgeRuntimeStorage,
 } = require('../src/bridge-runtime-cleanup');
+const { inspectProcess } = require('../src/process-identity');
+
+function writeProcessFixture(procRoot, pid, argv, environment) {
+  const directory = path.join(procRoot, String(pid));
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'cmdline'), `${argv.join('\0')}\0`);
+  fs.writeFileSync(path.join(directory, 'environ'), Object.entries(environment)
+    .map(([key, value]) => `${key}=${value}\0`).join(''));
+}
+
+async function spawnRuntimeComponent(t, artifacts, role, { stubborn = false } = {}) {
+  const executable = path.join(artifacts.targets.codexHome,
+    role === 'code-mode' ? 'codex-code-mode-host' : 'codex');
+  if (!fs.existsSync(executable)) fs.symlinkSync(process.execPath, executable);
+  const args = role === 'daemon' ? ['app-server', '--managed-daemon']
+    : role === 'pid-loop' ? ['app-server', 'daemon', 'pid-update-loop'] : [];
+  const child = spawn(executable, ['-e',
+    `${stubborn ? 'process.on("SIGTERM",()=>{});' : ''}setInterval(()=>{},1000);process.stdout.write("ready");`,
+    ...args], {
+    detached: true,
+    env: { ...process.env, CODEX_HOME: artifacts.targets.codexHome, WECOM_BRIDGE_SESSION_ID: artifacts.sessionId },
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  t.after(async () => {
+    if (child.exitCode != null || child.signalCode != null) return;
+    const exited = new Promise(resolve => child.once('exit', resolve));
+    child.kill('SIGKILL');
+    await exited;
+  });
+  await new Promise((resolve, reject) => {
+    child.stdout.once('data', resolve);
+    child.once('error', reject);
+    child.once('exit', code => reject(new Error(`Runtime fixture exited before ready: ${code}`)));
+  });
+  return child;
+}
+
+function processRunning(pid) {
+  const identity = inspectProcess(pid);
+  return identity != null && identity.state !== 'Z';
+}
 
 function setTaskRuntime(taskId, sessionKey, status = 'waiting_review') {
   const db = getDatabase();
@@ -150,6 +196,241 @@ test('resolves the validated Bridge runtime needed by interactive Codex CLI', ()
   });
 });
 
+test('releases only the matching managed Codex daemon and preserves Session files', () => {
+  const sessionKey = 'single:runtime-release-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const artifacts = createBridgeArtifacts(sessionKey);
+  const procRoot = path.join(tempDir, 'proc-runtime-release');
+  const procDir = path.join(procRoot, '12345');
+  fs.mkdirSync(procDir, { recursive: true });
+  fs.writeFileSync(path.join(procDir, 'cmdline'), Buffer.from(
+    `${artifacts.targets.codexHome}/packages/app-server-daemon/releases/test/bin/codex\0app-server\0--listen\0unix://\0--managed-daemon\0`,
+  ));
+  fs.writeFileSync(path.join(procDir, 'environ'), Buffer.from(
+    `WECOM_BRIDGE_SESSION_ID=${artifacts.sessionId}\0CODEX_HOME=${artifacts.targets.codexHome}\0`,
+  ));
+  const kills = [];
+  assert.deepEqual(sessionDaemonProcesses(artifacts.sessionId, artifacts.targets.codexHome, { procRoot }), [
+    { pid: 12345, commandLine: `${artifacts.targets.codexHome}/packages/app-server-daemon/releases/test/bin/codex app-server --listen unix:// --managed-daemon` },
+  ]);
+  const released = releaseBridgeSessionProcess(sessionKey, {
+    procRoot,
+    inspectProcess: pid => ({ pid, startTicks: '123', state: 'S' }),
+    killProcess(pid, signal) { kills.push({ pid, signal }); },
+  });
+  assert.deepEqual(released.released, [12345]);
+  assert.deepEqual(kills, [{ pid: 12345, signal: 'SIGTERM' }]);
+  assert.equal(fs.existsSync(artifacts.targets.recordFile), true);
+  assert.equal(fs.existsSync(artifacts.targets.codexHome), true);
+  assert.equal(resolveBridgeSessionRuntime(sessionKey).threadId, artifacts.record.threadId);
+});
+
+test('idle daemon release confirms exit and preserves the resumable thread and files', async () => {
+  const sessionKey = 'single:runtime-idle-release';
+  const artifacts = createBridgeArtifacts(sessionKey);
+  const binary = path.join(artifacts.targets.codexHome, 'codex');
+  fs.symlinkSync(process.execPath, binary);
+  const child = spawn(binary, ['-e',
+    'process.on("SIGTERM",()=>{});setInterval(()=>{},1000);process.stdout.write("ready");',
+    'app-server', '--managed-daemon'], {
+    env: { ...process.env, CODEX_HOME: artifacts.targets.codexHome, WECOM_BRIDGE_SESSION_ID: artifacts.sessionId },
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  try {
+    await new Promise((resolve, reject) => { child.stdout.once('data', resolve); child.once('error', reject); });
+    const result = await releaseBridgeSessionProcessAndWait(sessionKey, { graceMs: 50 });
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(result.released, [child.pid]);
+    assert.equal(sessionDaemonProcesses(artifacts.sessionId, artifacts.targets.codexHome).length, 0);
+    assert.equal(resolveBridgeSessionRuntime(sessionKey).threadId, artifacts.record.threadId);
+    assertArtifactsExist(artifacts);
+  } finally {
+    if (child.exitCode == null && child.signalCode == null) child.kill('SIGKILL');
+  }
+});
+
+test('discovers daemon, PID maintenance and code hosts only for the exact Session', () => {
+  const artifacts = createBridgeArtifacts('single:runtime-component-discovery');
+  const procRoot = path.join(tempDir, 'proc-component-discovery');
+  const home = artifacts.targets.codexHome;
+  const codex = path.join(home, 'packages', 'release with spaces', 'bin', 'codex');
+  const environment = { CODEX_HOME: home, WECOM_BRIDGE_SESSION_ID: artifacts.sessionId };
+  const fixtures = [
+    [201, [codex, 'app-server', '--managed-daemon'], environment],
+    [202, [codex, 'app-server', 'daemon', 'pid-update-loop'], environment],
+    [203, [path.join(path.dirname(codex), 'codex-code-mode-host')], environment],
+    [204, [codex, 'app-server', 'daemon', 'pid-update-loop'], { ...environment, WECOM_BRIDGE_SESSION_ID: 'another-session' }],
+    [205, [codex, 'app-server', '--managed-daemon'], { ...environment, CODEX_HOME: `${home}-other` }],
+    [206, ['/usr/bin/python3', 'pytest'], environment],
+    [207, [codex, 'exec', 'some command containing app-server --managed-daemon'], environment],
+    [208, [codex, 'resume', 'thread-id'], environment],
+    [209, [`${home}-other/codex`, 'app-server', '--managed-daemon'], environment],
+    [210, [codex, 'app-server', '--managed-daemon'], { WECOM_BRIDGE_SESSION_ID: artifacts.sessionId }],
+  ];
+  for (const [pid, argv, env] of fixtures) writeProcessFixture(procRoot, pid, argv, env);
+  assert.deepEqual(sessionDaemonProcesses(artifacts.sessionId, home, { procRoot }).map(match => match.pid), [201, 202, 203]);
+  assert.deepEqual(sessionDaemonProcesses('', home, { procRoot }), []);
+  assert.deepEqual(sessionDaemonProcesses(artifacts.sessionId, '', { procRoot }), []);
+});
+
+test('idle release stops all detached Codex components and retains reconnect and background work', async t => {
+  const artifacts = createBridgeArtifacts('single:runtime-all-components');
+  const other = createBridgeArtifacts('single:runtime-unrelated-components');
+  const children = [];
+  for (const role of ['daemon', 'pid-loop', 'code-mode']) {
+    children.push(await spawnRuntimeComponent(t, artifacts, role, { stubborn: true }));
+  }
+  const unrelated = await spawnRuntimeComponent(t, other, 'pid-loop');
+  const background = await spawnRuntimeComponent(t, artifacts, 'background');
+  const result = await releaseBridgeSessionProcessAndWait('single:runtime-all-components', { graceMs: 30 });
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.released.sort((a, b) => a - b), children.map(child => child.pid).sort((a, b) => a - b));
+  for (const child of children) assert.equal(processRunning(child.pid), false);
+  assert.equal(processRunning(unrelated.pid), true);
+  assert.equal(processRunning(background.pid), true);
+  assertArtifactsExist(artifacts);
+  assert.equal(resolveBridgeSessionRuntime('single:runtime-all-components').threadId, artifacts.record.threadId);
+});
+
+test('task deletion waits for every Codex component to exit before removing runtime files', async t => {
+  const sessionKey = 'single:runtime-delete-components';
+  createTask('runtime-delete-components', sessionKey);
+  const artifacts = createBridgeArtifacts(sessionKey);
+  const children = [];
+  for (const role of ['daemon', 'pid-loop', 'code-mode']) children.push(await spawnRuntimeComponent(t, artifacts, role));
+  store.deleteSession('runtime-delete-components');
+  const job = claimOne('runtime-delete-worker');
+  const result = await store.processBridgeCleanupJob(job, 'runtime-delete-worker');
+  assert.equal(result.ok, true, JSON.stringify(result));
+  for (const child of children) assert.equal(processRunning(child.pid), false, `Leaked process ${child.pid}`);
+  assertArtifactsRemoved(artifacts);
+});
+
+test('failed process release keeps the Session files for retry', async () => {
+  const sessionKey = 'single:runtime-cleanup-retry';
+  const artifacts = createBridgeArtifacts(sessionKey);
+  const procRoot = path.join(tempDir, 'proc-cleanup-retry');
+  writeProcessFixture(procRoot, 301, [path.join(artifacts.targets.codexHome, 'codex'), 'app-server', 'daemon', 'pid-update-loop'], {
+    CODEX_HOME: artifacts.targets.codexHome, WECOM_BRIDGE_SESSION_ID: artifacts.sessionId,
+  });
+  await assert.rejects(cleanupBridgeSessionResources({ sessionKey, sourceDir: projectDir }, {
+    procRoot, graceMs: 0, killWaitMs: 0,
+    inspectProcess: pid => ({ pid, startTicks: '123', state: 'S' }),
+    killProcess() { throw Object.assign(new Error('permission denied'), { code: 'EPERM' }); },
+  }), /still running|permission denied/);
+  assertArtifactsExist(artifacts);
+});
+
+test('release finds a helper created as the daemon exits', async () => {
+  const sessionKey = 'single:runtime-late-helper';
+  const artifacts = createBridgeArtifacts(sessionKey);
+  const procRoot = path.join(tempDir, 'proc-late-helper');
+  const environment = { CODEX_HOME: artifacts.targets.codexHome, WECOM_BRIDGE_SESSION_ID: artifacts.sessionId };
+  writeProcessFixture(procRoot, 401, [path.join(artifacts.targets.codexHome, 'codex'), 'app-server', '--managed-daemon'], environment);
+  const living = new Set([401]);
+  const kills = [];
+  const result = await releaseBridgeSessionProcessAndWait(sessionKey, {
+    procRoot, graceMs: 0, killWaitMs: 0,
+    inspectProcess: pid => living.has(pid) ? { pid, startTicks: String(pid), state: 'S' } : null,
+    killProcess(pid, signal) {
+      kills.push({ pid, signal });
+      living.delete(pid);
+      fs.rmSync(path.join(procRoot, String(pid)), { recursive: true });
+      if (pid === 401) {
+        writeProcessFixture(procRoot, 402, [path.join(artifacts.targets.codexHome, 'codex-code-mode-host')], environment);
+        living.add(402);
+      }
+    },
+  });
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.released, [401, 402]);
+  assert.deepEqual(kills, [{ pid: 401, signal: 'SIGTERM' }, { pid: 402, signal: 'SIGKILL' }]);
+});
+
+test('release does not signal a PID reused after process discovery', async () => {
+  const sessionKey = 'single:runtime-pid-reuse';
+  const artifacts = createBridgeArtifacts(sessionKey);
+  const procRoot = path.join(tempDir, 'proc-pid-reuse');
+  writeProcessFixture(procRoot, 501, [path.join(artifacts.targets.codexHome, 'codex'), 'app-server', 'daemon', 'pid-update-loop'], {
+    CODEX_HOME: artifacts.targets.codexHome, WECOM_BRIDGE_SESSION_ID: artifacts.sessionId,
+  });
+  let inspections = 0;
+  const result = await releaseBridgeSessionProcessAndWait(sessionKey, {
+    procRoot,
+    inspectProcess(pid) {
+      inspections++;
+      if (inspections > 1) fs.rmSync(path.join(procRoot, String(pid)), { recursive: true, force: true });
+      return { pid, state: 'S', startTicks: inspections === 1 ? 'before' : 'after' };
+    },
+    killProcess() { assert.fail('A different process reused the discovered PID'); },
+  });
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.released, [501]);
+});
+
+test('cleanup releases orphan helpers even when the Session record and Codex home are missing', async t => {
+  const sessionKey = 'single:runtime-missing-record';
+  const artifacts = createBridgeArtifacts(sessionKey);
+  const child = await spawnRuntimeComponent(t, artifacts, 'pid-loop');
+  fs.unlinkSync(artifacts.targets.recordFile);
+  fs.rmSync(artifacts.targets.codexHome, { recursive: true });
+  const result = await cleanupBridgeSessionResources({ sessionKey, sourceDir: projectDir });
+  assert.equal(result.recordFound, false);
+  assert.deepEqual(result.released, [child.pid]);
+  assert.equal(processRunning(child.pid), false);
+  assertArtifactsRemoved(artifacts);
+});
+
+test('idle release recovers missing Session records without removing history or background work', async t => {
+  const sessionKey = 'single:idle-release-missing-record';
+  const artifacts = createBridgeArtifacts(sessionKey);
+  const other = createBridgeArtifacts('single:idle-release-other-session');
+  const components = [];
+  for (const role of ['daemon', 'pid-loop', 'code-mode']) components.push(await spawnRuntimeComponent(t, artifacts, role));
+  const unrelated = await spawnRuntimeComponent(t, other, 'pid-loop');
+  const background = await spawnRuntimeComponent(t, artifacts, 'background');
+  fs.unlinkSync(artifacts.targets.recordFile);
+  const result = await releaseBridgeSessionProcessAndWait(sessionKey, { sourceDir: projectDir });
+  assert.equal(result.sessionId, artifacts.sessionId);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(new Set(result.released), new Set(components.map(child => child.pid)));
+  for (const child of components) assert.equal(processRunning(child.pid), false);
+  assert.equal(processRunning(unrelated.pid), true);
+  assert.equal(processRunning(background.pid), true);
+  for (const directory of [artifacts.targets.codexHome, artifacts.targets.workspaceRoot, artifacts.targets.chatfileDir]) {
+    assert.equal(fs.readFileSync(path.join(directory, 'evidence.txt'), 'utf8'), sessionKey);
+  }
+  assert.equal(fs.existsSync(artifacts.targets.recordFile), false);
+});
+
+test('idle release reports missing identity rather than treating it as a successful empty release', async () => {
+  await assert.rejects(releaseBridgeSessionProcessAndWait('single:idle-release-unknown', {
+    killProcess() { assert.fail('An unresolved Session must not signal any process'); },
+  }), /source directory.*unavailable/i);
+});
+
+test('cleanup rechecks Session references after asynchronous process release', async t => {
+  const taskId = 'runtime-referenced-during-release';
+  const sessionKey = `single:${taskId}`;
+  createTask(taskId, sessionKey);
+  const artifacts = createBridgeArtifacts(sessionKey);
+  await spawnRuntimeComponent(t, artifacts, 'pid-loop', { stubborn: true });
+  store.deleteSession(taskId);
+  const job = claimOne('runtime-reference-worker');
+  const pending = store.processBridgeCleanupJob(job, 'runtime-reference-worker');
+  createTask(taskId, sessionKey);
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.match(result.error, /still referenced/);
+  assertArtifactsExist(artifacts);
+  assert.equal(getDatabase().prepare('SELECT status FROM bridge_cleanup_jobs WHERE id=?').get(job.id).status, 'retry');
+  setTaskRuntime(taskId, '');
+  store.deleteSession(taskId);
+  makeRetryDue(job.id);
+  const retry = claimOne('runtime-reference-retry');
+  assert.equal((await store.processBridgeCleanupJob(retry, 'runtime-reference-retry')).ok, true);
+  assertArtifactsRemoved(artifacts);
+});
+
 test('reset refuses an active Task without changing its current Session', () => {
   const taskId = 'cleanup-reset-active';
   store.saveSession(taskId, {
@@ -169,7 +450,8 @@ test('reset refuses an active Task without changing its current Session', () => 
   store.deleteSession(taskId);
 });
 
-test('deleting a task durably releases only its own Bridge Session resources', () => {
+test('deleting a task durably releases only its own Bridge Session resources', async () => {
+  const completedBefore = store.bridgeCleanupStatus().completed;
   const sessionKey = 'single:cleanup-delete-11111111-1111-4111-8111-111111111111';
   const otherKey = 'single:cleanup-other-22222222-2222-4222-8222-222222222222';
   createTask('cleanup-delete', sessionKey);
@@ -180,19 +462,19 @@ test('deleting a task durably releases only its own Bridge Session resources', (
   assert.equal(store.getSession('cleanup-delete'), null);
   const job = claimOne('cleanup-worker-delete');
   assert.equal(job.reason, 'deleted');
-  assert.equal(store.processBridgeCleanupJob(job, 'cleanup-worker-delete').ok, true);
+  assert.equal((await store.processBridgeCleanupJob(job, 'cleanup-worker-delete')).ok, true);
   assertArtifactsRemoved(artifacts);
   assertArtifactsExist(other);
 
   const status = store.bridgeCleanupStatus();
   assert.equal(status.queued, 0);
-  assert.equal(status.completed, 1);
+  assert.equal(status.completed, completedBefore + 1);
   const audit = store.listAudit({ sessionId: 'cleanup-delete', limit: 20 });
   assert.ok(audit.some((event) => event.kind === 'bridge.session.cleanup.queued'));
   assert.ok(audit.some((event) => event.kind === 'bridge.session.cleanup.completed'));
 });
 
-test('completion retains Runtime and restoration resumes the archived task idempotently', () => {
+test('completion retains Runtime and restoration resumes the archived task idempotently', async () => {
   const sessionKey = 'single:cleanup-complete-33333333-3333-4333-8333-333333333333';
   createTask('cleanup-complete', sessionKey);
   const artifacts = createBridgeArtifacts(sessionKey);
@@ -229,11 +511,11 @@ test('completion retains Runtime and restoration resumes the archived task idemp
   store.deleteSession('cleanup-complete');
   const job = claimOne('cleanup-worker-complete');
   assert.equal(job.reason, 'deleted');
-  assert.equal(store.processBridgeCleanupJob(job, 'cleanup-worker-complete').ok, true);
+  assert.equal((await store.processBridgeCleanupJob(job, 'cleanup-worker-complete')).ok, true);
   assertArtifactsRemoved(artifacts);
 });
 
-test('reset retains the Task and history, reclaims the old Runtime, and restore follows the latest Session', () => {
+test('reset retains the Task and history, reclaims the old Runtime, and restore follows the latest Session', async () => {
   const taskId = 'cleanup-reset';
   const oldSessionKey = 'single:cleanup-reset-55555555-5555-4555-8555-555555555555';
   const latestSessionKey = 'single:cleanup-reset-66666666-6666-4666-8666-666666666666';
@@ -271,7 +553,7 @@ test('reset retains the Task and history, reclaims the old Runtime, and restore 
   const oldCleanup = claimOne('cleanup-worker-reset-old');
   assert.equal(oldCleanup.reason, 'deleted');
   assert.equal(oldCleanup.sessionKey, oldSessionKey);
-  assert.equal(store.processBridgeCleanupJob(oldCleanup, 'cleanup-worker-reset-old').ok, true);
+  assert.equal((await store.processBridgeCleanupJob(oldCleanup, 'cleanup-worker-reset-old')).ok, true);
   assertArtifactsRemoved(oldArtifacts);
 
   setTaskRuntime(taskId, latestSessionKey, 'waiting_review');
@@ -290,11 +572,11 @@ test('reset retains the Task and history, reclaims the old Runtime, and restore 
   store.deleteSession(taskId);
   const latestCleanup = claimOne('cleanup-worker-reset-latest');
   assert.equal(latestCleanup.sessionKey, latestSessionKey);
-  assert.equal(store.processBridgeCleanupJob(latestCleanup, 'cleanup-worker-reset-latest').ok, true);
+  assert.equal((await store.processBridgeCleanupJob(latestCleanup, 'cleanup-worker-reset-latest')).ok, true);
   assertArtifactsRemoved(latestArtifacts);
 });
 
-test('a replacement generation cannot make an old cleanup delete its live Session key', () => {
+test('a replacement generation cannot make an old cleanup delete its live Session key', async () => {
   const sessionKey = 'single:cleanup-reuse-44444444-4444-4444-8444-444444444444';
   createTask('cleanup-reuse', sessionKey);
   const artifacts = createBridgeArtifacts(sessionKey);
@@ -305,7 +587,7 @@ test('a replacement generation cannot make an old cleanup delete its live Sessio
   setTaskRuntime('cleanup-reuse', sessionKey, 'waiting_review');
 
   const firstClaim = claimOne('cleanup-worker-reuse-1');
-  const blocked = store.processBridgeCleanupJob(firstClaim, 'cleanup-worker-reuse-1');
+  const blocked = await store.processBridgeCleanupJob(firstClaim, 'cleanup-worker-reuse-1');
   assert.equal(blocked.ok, false);
   assert.match(blocked.error, /still referenced/);
   assertArtifactsExist(artifacts);
@@ -314,12 +596,12 @@ test('a replacement generation cannot make an old cleanup delete its live Sessio
   getDatabase().prepare("UPDATE tasks SET persistent_session_key='' WHERE id='cleanup-reuse'").run();
   makeRetryDue(firstClaim.id);
   const recovered = claimOne('cleanup-worker-reuse-2');
-  assert.equal(store.processBridgeCleanupJob(recovered, 'cleanup-worker-reuse-2').ok, true);
+  assert.equal((await store.processBridgeCleanupJob(recovered, 'cleanup-worker-reuse-2')).ok, true);
   assertArtifactsRemoved(artifacts);
   store.deleteSession('cleanup-reuse');
 });
 
-test('expired cleanup ownership is reclaimed after a Worker interruption', () => {
+test('expired cleanup ownership is reclaimed after a Worker interruption', async () => {
   const sessionKey = 'single:cleanup-lease-55555555-5555-4555-8555-555555555555';
   createTask('cleanup-lease', sessionKey);
   const artifacts = createBridgeArtifacts(sessionKey);
@@ -336,12 +618,12 @@ test('expired cleanup ownership is reclaimed after a Worker interruption', () =>
 
   const recovered = claimOne('cleanup-worker-recovered');
   assert.equal(recovered.attemptCount, 2);
-  assert.equal(store.processBridgeCleanupJob(recovered, 'cleanup-worker-recovered').ok, true);
+  assert.equal((await store.processBridgeCleanupJob(recovered, 'cleanup-worker-recovered')).ok, true);
   assert.equal(store.getPlatformActivityCounts().bridgeCleanups, 0);
   assertArtifactsRemoved(artifacts);
 });
 
-test('malformed, duplicate, and path-escaping records fail closed without partial deletion', () => {
+test('malformed, duplicate, and path-escaping records fail closed without partial deletion', async () => {
   const scenarios = [
     {
       id: 'cleanup-malformed',
@@ -377,14 +659,14 @@ test('malformed, duplicate, and path-escaping records fail closed without partia
     scenario.mutate(artifacts);
     store.deleteSession(scenario.id);
     const job = claimOne(`worker-${scenario.id}`);
-    const result = store.processBridgeCleanupJob(job, `worker-${scenario.id}`);
+    const result = await store.processBridgeCleanupJob(job, `worker-${scenario.id}`);
     assert.equal(result.ok, false);
     assert.match(result.error, scenario.error);
     assertArtifactsExist(artifacts);
   }
 });
 
-test('a symbolic-link target is rejected without touching its destination', () => {
+test('a symbolic-link target is rejected without touching its destination', async () => {
   const sessionKey = 'single:cleanup-link-99999999-9999-4999-8999-999999999999';
   createTask('cleanup-link', sessionKey);
   const artifacts = createBridgeArtifacts(sessionKey);
@@ -396,7 +678,7 @@ test('a symbolic-link target is rejected without touching its destination', () =
 
   store.deleteSession('cleanup-link');
   const job = claimOne('cleanup-worker-link');
-  const result = store.processBridgeCleanupJob(job, 'cleanup-worker-link');
+  const result = await store.processBridgeCleanupJob(job, 'cleanup-worker-link');
   assert.equal(result.ok, false);
   assert.match(result.error, /symbolic link/);
   assert.equal(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'keep');
@@ -404,7 +686,7 @@ test('a symbolic-link target is rejected without touching its destination', () =
   assert.equal(fs.existsSync(artifacts.targets.recordFile), true);
 });
 
-test('Bridge Session inventory classifies resources and manual reclaim is exact, durable, and idempotent', () => {
+test('Bridge Session inventory classifies resources and manual reclaim is exact, durable, and idempotent', async () => {
   const ownedKey = 'single:inventory-owned-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   const completedKey = 'single:inventory-completed-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
   const orphanKey = 'single:inventory-orphan-cccccccc-cccc-4ccc-8ccc-cccccccccccc';
@@ -484,14 +766,14 @@ test('Bridge Session inventory classifies resources and manual reclaim is exact,
   assert.match(orphanJob.taskId, /^bridge-orphan-/);
   const orphanClaim = claimOne('inventory-worker-orphan');
   assert.equal(orphanClaim.id, orphanJob.id);
-  assert.equal(store.processBridgeCleanupJob(orphanClaim, 'inventory-worker-orphan').ok, true);
+  assert.equal((await store.processBridgeCleanupJob(orphanClaim, 'inventory-worker-orphan')).ok, true);
   assertArtifactsRemoved(orphan);
 
   const completedJob = store.requestBridgeSessionReclaim(completed.sessionId, completed.sessionId);
   const completedClaim = claimOne('inventory-worker-completed');
   assert.equal(completedClaim.id, completedJob.id);
   assert.equal(completedClaim.reason, 'completed');
-  assert.equal(store.processBridgeCleanupJob(completedClaim, 'inventory-worker-completed').ok, true);
+  assert.equal((await store.processBridgeCleanupJob(completedClaim, 'inventory-worker-completed')).ok, true);
   assertArtifactsRemoved(completed);
   assert.equal(store.getSession('inventory-completed').status, 'completed');
   assert.deepEqual(store.listSessionWorklogs('inventory-completed').map((event) => ({
@@ -502,18 +784,18 @@ test('Bridge Session inventory classifies resources and manual reclaim is exact,
 
   assert.equal(store.deleteSession('inventory-owned'), true);
   const ownedClaim = claimOne('inventory-worker-owned');
-  assert.equal(store.processBridgeCleanupJob(ownedClaim, 'inventory-worker-owned').ok, true);
+  assert.equal((await store.processBridgeCleanupJob(ownedClaim, 'inventory-worker-owned')).ok, true);
   assertArtifactsRemoved(owned);
 
   fs.writeFileSync(unsafe.targets.recordFile, JSON.stringify(unsafe.record));
   const repairedJob = store.requestBridgeSessionReclaim(unsafe.sessionId, unsafe.sessionId);
   const repairedClaim = claimOne('inventory-worker-repaired');
   assert.equal(repairedClaim.id, repairedJob.id);
-  assert.equal(store.processBridgeCleanupJob(repairedClaim, 'inventory-worker-repaired').ok, true);
+  assert.equal((await store.processBridgeCleanupJob(repairedClaim, 'inventory-worker-repaired')).ok, true);
   assertArtifactsRemoved(unsafe);
 });
 
-test('an existing Bridge cleanup is reported instead of queued twice', () => {
+test('an existing Bridge cleanup is reported instead of queued twice', async () => {
   const sessionKey = 'single:inventory-queued-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
   createTask('inventory-queued', sessionKey);
   const artifacts = createBridgeArtifacts(sessionKey);
@@ -528,7 +810,7 @@ test('an existing Bridge cleanup is reported instead of queued twice', () => {
   assert.equal(getDatabase().prepare('SELECT COUNT(*) AS count FROM bridge_cleanup_jobs WHERE session_key=?')
     .get(sessionKey).count, 1);
   const claimed = claimOne('inventory-worker-queued');
-  assert.equal(store.processBridgeCleanupJob(claimed, 'inventory-worker-queued').ok, true);
+  assert.equal((await store.processBridgeCleanupJob(claimed, 'inventory-worker-queued')).ok, true);
   assertArtifactsRemoved(artifacts);
 });
 

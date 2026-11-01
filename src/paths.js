@@ -31,6 +31,9 @@ const TASK_WORKSPACE_ROOTS = String(process.env.CODEX_TASK_WORKSPACE_ROOTS || DE
   .map((entry) => entry.trim())
   .filter(Boolean)
   .map((entry) => path.resolve(entry));
+const TASK_SESSION_ROOT = process.env.CODEX_TASK_SESSIONS_DIR
+  ? path.resolve(process.env.CODEX_TASK_SESSIONS_DIR)
+  : path.join(TASK_WORKSPACE_ROOTS[0] || DEFAULT_TASK_WORKSPACE_ROOT, 'codex-task-sessions');
 
 function comparablePath(value) {
   try {
@@ -75,5 +78,6 @@ module.exports = {
   WORKSPACE_CODEX_SKILLS_DIR,
   SKILL_SNAPSHOTS_DIR,
   DEFAULT_TASK_WORKSPACE_ROOT,
+  TASK_SESSION_ROOT,
   TASK_WORKSPACE_ROOTS,
 };

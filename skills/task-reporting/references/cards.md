@@ -15,6 +15,7 @@ All five cards use the existing Schema v2. The platform presents the type, busin
 | `primaryExecution` | Actual label, full command, working directory, command snapshot and known start/end/exit code |
 | `executionEvidence` | Registered External Attempt identity, when this report is linked to an execution |
 | `artifacts` | Explicit array; `[]` during running, terminal additions for later-created files |
+| `relatedReportKeys` | Optional report keys for execution details folded into this stage card; display grouping only |
 | `sections` | Business facts using `fields`, `list`, `table` or `json` |
 
 The helper's default `unknown` status and draft summary are scaffolding, not results. Replace them with observed state before registration. Preparing a template outside a managed Task is supported; publication continues to use the platform's existing managed runtime contract.
@@ -45,3 +46,17 @@ codex-skill-report template --type business-result --skill-id my-business-skill 
 Use `--title`, `--summary`, `--command`, `--working-dir`, and `--external-attempt` to populate known fields during generation. `--output` writes the skeleton to the chosen file; otherwise JSON is written to stdout. Preserve command arguments in the private runtime report, and keep credentials and runtime files out of repository commits.
 
 For a custom legacy type, pass its existing `--type` value: the platform retains it and uses the business-result card. For an execution with several independent reports, keep distinct report keys; for multiple files in one report, list every artifact instead of choosing only one. Do not total business reruns as though they were independent new test populations.
+
+## Stage aggregates
+
+Use `--related-reports run:group-a,run:group-b` with `template` to prepare a stage card.
+Publish it through the workflow Skill, with its own stable `reportKey`, stage totals and sections.
+Its `artifacts` stays empty and its `executionEvidence` stays absent: file links and execution
+details come from the referenced reports without copying files or changing their ownership.
+Add expected child keys to the initial stage revision and reuse the stage key at completion.
+Unresolved references do not hide other reports, and ungrouped legacy cards keep their layout.
+
+A final summary may fold in analysis details, but references to earlier *stage cards* belong in
+its business sections, not `relatedReportKeys`; otherwise those stages would also fold into the
+summary. Keep phase and final conclusions concise, with complete commands and diagnostics in
+the expandable execution details.

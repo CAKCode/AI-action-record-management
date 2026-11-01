@@ -180,6 +180,83 @@ test('public checkpoint records use a fixed whitelist and never expose package c
   assert.equal(serialized.includes('hostPath'), false);
 });
 
+test('new checkpoints exclude loose media, playlists, segments and media directories', async () => {
+  const mediaRoot = path.join(dataDir, 'sessions', 'media-exclusion');
+  const runtimeRoot = path.join(runtimeDir, 'media-exclusion');
+  const fixtures = [
+    'loose.mp4', 'audio.mp3', 'poster.PNG', 'playlist.m3u8', 'manifest.mpd', 'segment.m4s',
+    'videos/extensionless-segment', 'standard_videos/reference', '.playback-cache/cached-object',
+  ];
+  fs.mkdirSync(mediaRoot, { recursive: true });
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  for (const base of [mediaRoot, runtimeRoot]) {
+    for (const relative of fixtures) {
+      const file = path.join(base, relative);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'retained original media');
+    }
+    const transport = Buffer.alloc(188 * 3);
+    for (const offset of [0, 188, 376]) transport[offset] = 0x47;
+    fs.writeFileSync(path.join(base, 'segment.ts'), transport);
+    fs.writeFileSync(path.join(base, 'source.ts'), 'export const value = 1;');
+    fs.writeFileSync(path.join(base, 'metadata.json'), '{"media":"references remain"}');
+  }
+  const checkpoint = await createRecoveryCheckpoint();
+  const entries = [];
+  await tar.list({ file: path.join(RECOVERY_CHECKPOINT_DIR, checkpoint.id, 'payload.tar.gz'),
+    onReadEntry: entry => entries.push(entry.path) });
+  for (const prefix of ['data/sessions/media-exclusion', 'runtime/media-exclusion']) {
+    for (const relative of [...fixtures, 'segment.ts']) assert.equal(entries.includes(`${prefix}/${relative}`), false, relative);
+    assert.equal(entries.includes(`${prefix}/source.ts`), true);
+    assert.equal(entries.includes(`${prefix}/metadata.json`), true);
+  }
+  assert.ok(checkpoint.source.excluded.mediaFiles > 0);
+  assert.equal((await verifyRecoveryCheckpoint(checkpoint.id)).ok, true);
+  for (const base of [mediaRoot, runtimeRoot]) {
+    assert.equal(fs.readFileSync(path.join(base, 'loose.mp4'), 'utf8'), 'retained original media');
+    fs.rmSync(base, { recursive: true });
+  }
+});
+
+test('checkpoint skips named pipes ending in .ts without blocking file inspection', { skip: process.platform !== 'linux' }, () => {
+  const fixture = path.join(tempDir, 'fifo-checkpoint-child');
+  for (const name of ['data', 'runtime', 'workspaces', 'source-home', 'workspace-skills']) {
+    fs.mkdirSync(path.join(fixture, name), { recursive: true });
+  }
+  const pipe = path.join(fixture, 'runtime', 'input.ts');
+  const created = spawnSync('mkfifo', [pipe], { encoding: 'utf8' });
+  assert.equal(created.status, 0, created.stderr);
+  const script = [
+    "const fs = require('fs');",
+    "const path = require('path');",
+    "const tar = require('tar');",
+    "const {createRecoveryCheckpoint, verifyRecoveryCheckpoint} = require('./src/recovery-checkpoint');",
+    "const {closeDatabase} = require('./src/database');",
+    "(async () => {",
+    "  const result = await createRecoveryCheckpoint();",
+    "  const verified = await verifyRecoveryCheckpoint(result.id);",
+    "  const entries = [];",
+    "  await tar.list({file:path.join(process.env.CODEX_DESK_BACKUP_DIR,'recovery-checkpoints',result.id,'payload.tar.gz'),onReadEntry:entry=>entries.push(entry.path)});",
+    "  closeDatabase();",
+    "  console.log(JSON.stringify({verified:verified.ok,specialFiles:result.source.excluded.specialFiles,pipeArchived:entries.includes('runtime/input.ts'),sourceExists:fs.lstatSync(path.join(process.env.CODEX_DESK_RUNTIME_DIR,'input.ts')).isFIFO()}));",
+    "})().catch(error => { console.error(error.message); closeDatabase(); process.exitCode=1; });",
+  ].join('\n');
+  const result = spawnSync(process.execPath, ['-e', script], {
+    cwd: ROOT_DIR, encoding: 'utf8', timeout: 5000,
+    env: { ...process.env,
+      CODEX_DESK_DATA_DIR: path.join(fixture, 'data'),
+      CODEX_DESK_RUNTIME_DIR: path.join(fixture, 'runtime'),
+      CODEX_DESK_BACKUP_DIR: path.join(fixture, 'data', 'backups'),
+      CODEX_TASK_WORKSPACE_ROOTS: path.join(fixture, 'workspaces'),
+      SOURCE_CODEX_HOME: path.join(fixture, 'source-home'),
+      WORKSPACE_CODEX_SKILLS_DIR: path.join(fixture, 'workspace-skills'),
+      CODEX_DB_BACKUP_INTERVAL_HOURS: '0', CODEX_RECOVERY_CHECKPOINT_INTERVAL_HOURS: '0',
+    },
+  });
+  assert.equal(result.status, 0, result.error?.message || result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { verified: true, specialFiles: 1, pipeArchived: false, sourceExists: true });
+});
+
 test('v1 checkpoints remain verifiable when later optional counters are absent', async () => {
   const checkpoint = await createRecoveryCheckpoint({ retention: 30 });
   const manifestPath = path.join(RECOVERY_CHECKPOINT_DIR, checkpoint.id, 'manifest.json');
@@ -191,6 +268,7 @@ test('v1 checkpoints remain verifiable when later optional counters are absent',
   delete manifest.database.tableCounts.skill_report_artifact_jobs;
   delete manifest.source.excluded.legacyMigration;
   delete manifest.source.excluded.bridgeCodexSessions;
+  delete manifest.source.excluded.mediaFiles;
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   fs.chmodSync(manifestPath, 0o600);
 

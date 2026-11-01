@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 const Database = require('better-sqlite3');
 const { BACKUP_DIR } = require('./paths');
 const { getDatabase } = require('./database');
@@ -425,6 +426,34 @@ function rotateDatabaseBackups(backupDirectory, retention) {
   return removed;
 }
 
+async function compactDatabaseBackup(filePath, options, assertMayContinue, remainingMs) {
+  const copy = new Database(filePath, { fileMustExist: true });
+  let freePages;
+  try {
+    copy.pragma('journal_mode = DELETE');
+    freePages = copy.pragma('freelist_count', { simple: true });
+  } finally { copy.close(); }
+  if (!freePages) return;
+  assertMayContinue();
+  const compactedFile = `${filePath}.compact`;
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      path.join(__dirname, '..', 'bin', 'compact-database-backup.js'), filePath, compactedFile,
+    ], { stdio: 'ignore', signal: options.signal, timeout: Math.max(1, remainingMs) });
+    let failure;
+    child.on('error', error => { failure = error; });
+    child.on('close', (code, signal) => {
+      try {
+        assertMayContinue();
+        if (failure) throw failure;
+        if (code !== 0) throw new Error(`Database backup compaction failed (${signal || code})`);
+        resolve();
+      } catch (error) { reject(error); }
+    });
+  });
+  fs.renameSync(compactedFile, filePath);
+}
+
 async function performDatabaseBackup(options = {}) {
   const backupDirectory = options.backupDirectory || BACKUP_DIR;
   const retention = options.retention ?? BACKUP_RETENTION;
@@ -441,9 +470,11 @@ async function performDatabaseBackup(options = {}) {
     }
     removeStaleTemporaryPackages(backupDirectory);
     const source = getDatabase();
-    const estimatedBytes = Number(source.pragma('page_count', { simple: true }))
-      * Number(source.pragma('page_size', { simple: true }));
-    assertBackupCapacity(backupDirectory, Math.ceil(estimatedBytes * 1.1) + 1024 * 1024);
+    const pageSize = Number(source.pragma('page_size', { simple: true }));
+    const estimatedBytes = Number(source.pragma('page_count', { simple: true })) * pageSize;
+    const compactedBytes = estimatedBytes - Number(source.pragma('freelist_count', { simple: true })) * pageSize;
+    // The original snapshot and its compacted replacement coexist until rename.
+    assertBackupCapacity(backupDirectory, Math.ceil((estimatedBytes + compactedBytes) * 1.1) + 1024 * 1024);
 
     const startedAtMs = Date.now();
     const maxDurationMs = options.maxDurationMs ?? BACKUP_MAX_DURATION_MS;
@@ -474,14 +505,26 @@ async function performDatabaseBackup(options = {}) {
           throw error;
         }
       };
-      await source.backup(temporaryDatabase, {
-        progress(progress) {
-          assertBackupMayContinue();
-          options.onProgress?.(progress);
-          assertBackupMayContinue();
-          return 256;
-        },
-      });
+      // A dedicated read transaction pins the WAL snapshot. Using the writable
+      // application connection lets other writers repeatedly restart the copy.
+      const snapshot = new Database(source.name, { readonly: true, fileMustExist: true });
+      try {
+        snapshot.exec('BEGIN');
+        snapshot.prepare('SELECT rootpage FROM sqlite_schema LIMIT 1').get();
+        await snapshot.backup(temporaryDatabase, {
+          progress(progress) {
+            assertBackupMayContinue();
+            options.onProgress?.(progress);
+            assertBackupMayContinue();
+            return 1024;
+          },
+        });
+      } finally { snapshot.close(); }
+      assertBackupMayContinue();
+      options.faultInjector?.('before_compaction');
+      await compactDatabaseBackup(temporaryDatabase, options, assertBackupMayContinue,
+        maxDurationMs - (Date.now() - startedAtMs));
+      assertBackupMayContinue();
       fs.chmodSync(temporaryDatabase, 0o600);
       syncPath(temporaryDatabase);
       options.faultInjector?.('after_backup');
@@ -491,6 +534,7 @@ async function performDatabaseBackup(options = {}) {
       const databaseStat = fs.lstatSync(temporaryDatabase);
       if (!databaseStat.isFile() || databaseStat.isSymbolicLink()) throw new Error('Invalid generated database backup');
       const sha256 = await hashFile(temporaryDatabase);
+      assertBackupMayContinue();
       options.faultInjector?.('after_verification');
 
       const completedAtMs = Date.now();

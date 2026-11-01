@@ -14,7 +14,7 @@ const MAX_COLS = 400;
 const MIN_ROWS = 5;
 const MAX_ROWS = 200;
 const DEFAULT_TERMINATION_TIMEOUT_MS = 5000;
-const DEFAULT_DISCONNECT_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_DISCONNECT_TIMEOUT_MS = 60 * 1000;
 
 function terminalError(message, statusCode = 409) {
   return Object.assign(new Error(message), { statusCode, expected: true });
@@ -151,6 +151,7 @@ function createCodexTerminalManager(options) {
     const runtime = (options.resolveRuntime || resolveBridgeSessionRuntime)(task.persistentSessionKey);
     if (!runtime) throw terminalError('The task Bridge Session runtime is not available');
     if (!runtime.threadId) throw terminalError('The task does not have a resumable Codex thread yet');
+    options.prepareRuntime?.(task.id, runtime);
     for (const [target, label] of [[runtime.cwdDir, 'workspace'], [runtime.codexHome, 'Codex home']]) {
       let stat;
       try { stat = fs.statSync(target); } catch {}
@@ -189,6 +190,7 @@ function createCodexTerminalManager(options) {
     const environment = {
       ...process.env,
       CODEX_HOME: runtime.codexHome,
+      WECOM_BRIDGE_SESSION_ID: runtime.sessionId,
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
       TMPDIR: runtime.chatfileDir,
@@ -238,6 +240,7 @@ function createCodexTerminalManager(options) {
       transcript,
       transcriptError: null,
       disconnectTimer: null,
+      forceKillTimer: null,
       exitPromise,
       resolveExit,
     };
@@ -254,6 +257,8 @@ function createCodexTerminalManager(options) {
     });
     processHandle.onExit(({ exitCode, signal }) => {
       clearDisconnectTimer(entry);
+      if (entry.forceKillTimer) cancelTimer(entry.forceKillTimer);
+      entry.forceKillTimer = null;
       entry.exited = true;
       entry.process = null;
       try {
@@ -325,6 +330,13 @@ function createCodexTerminalManager(options) {
     try {
       entry.process.kill('SIGTERM');
       entry.terminationRequested = true;
+      clearDisconnectTimer(entry);
+      entry.forceKillTimer = scheduleTimer(() => {
+        entry.forceKillTimer = null;
+        if (entry.exited || !entry.process) return;
+        try { entry.process.kill('SIGKILL'); } catch (error) { options.onError?.(error); }
+      }, 2000);
+      entry.forceKillTimer.unref?.();
     } catch (error) {
       options.onError?.(Object.assign(
         new Error(`Failed to terminate interactive Codex CLI for ${entry.taskId}`),
@@ -401,6 +413,22 @@ function createCodexTerminalManager(options) {
     });
   }
 
+  async function attachWhenReady(taskId, socket, dimensions = {}) {
+    const entry = terminals.get(taskId);
+    if (entry?.terminationRequested && !entry.exited) {
+      let timer;
+      try {
+        await Promise.race([
+          entry.exitPromise,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(terminalError('Previous CLI process is still exiting; reconnect again', 503)), terminationTimeoutMs);
+          }),
+        ]);
+      } finally { clearTimeout(timer); }
+    }
+    if (socket.readyState === WebSocket.OPEN) attach(taskId, socket, dimensions);
+  }
+
   function terminate(taskId, reason = 'operator') {
     return terminateEntry(terminals.get(taskId), reason);
   }
@@ -444,12 +472,12 @@ function createCodexTerminalManager(options) {
     for (const entry of terminals.values()) {
       clearDisconnectTimer(entry);
       for (const client of entry.clients) client.terminate();
-      try { entry.process?.kill('SIGTERM'); } catch {}
+      terminateEntry(entry, 'server_shutdown');
     }
     terminals.clear();
   }
 
-  return { attach, isRunning, terminate, terminateAndWait, assertTranscriptHealthy, shutdown };
+  return { attach, attachWhenReady, isRunning, terminate, terminateAndWait, assertTranscriptHealthy, shutdown };
 }
 
 module.exports = {

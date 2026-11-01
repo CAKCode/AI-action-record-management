@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const Database = require('better-sqlite3');
 const { inspectProcess } = require('../src/process-identity');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -25,7 +26,7 @@ process.env.CODEX_DB_BACKUP_INTERVAL_HOURS = '0';
 process.env.CODEX_DB_BACKUP_RETENTION = '14';
 
 const store = require('../src/store');
-const { closeDatabase } = require('../src/database');
+const { getDatabase, closeDatabase } = require('../src/database');
 const {
   createDatabaseBackup,
   listDatabaseBackups,
@@ -40,6 +41,9 @@ test.after(() => {
 });
 
 test('online backup publishes one private, self-verifying SQLite package', async () => {
+  const media = path.join(dataDir, 'videos', 'recording.mp4');
+  fs.mkdirSync(path.dirname(media), { recursive: true });
+  fs.writeFileSync(media, 'media is retained outside the backup');
   store.saveSession('backup-source', {
     name: 'Backup Source',
     objective: 'Prove online WAL backup consistency.',
@@ -55,6 +59,7 @@ test('online backup publishes one private, self-verifying SQLite package', async
 
   const packageDir = path.join(backupDir, backup.id);
   assert.deepEqual(fs.readdirSync(packageDir).sort(), ['database.db', 'manifest.json']);
+  assert.equal(fs.readFileSync(media, 'utf8'), 'media is retained outside the backup');
   assert.equal(fs.statSync(packageDir).mode & 0o777, 0o700);
   assert.equal(fs.statSync(path.join(packageDir, 'database.db')).mode & 0o777, 0o600);
   assert.equal(fs.statSync(path.join(packageDir, 'manifest.json')).mode & 0o777, 0o600);
@@ -76,6 +81,54 @@ test('online backup publishes one private, self-verifying SQLite package', async
   assert.deepEqual(fs.readdirSync(packageDir).sort(), ['database.db', 'manifest.json']);
   assert.equal(databaseBackupStatus().backupCount, 1);
   assert.equal(databaseBackupStatus().enabled, false);
+});
+
+test('online backup finishes from a fixed snapshot while another connection keeps writing', async () => {
+  const primary = getDatabase();
+  primary.exec('CREATE TABLE backup_churn (id INTEGER PRIMARY KEY, payload BLOB)');
+  primary.prepare('INSERT INTO backup_churn VALUES (1, zeroblob(2097152))').run();
+  primary.prepare("INSERT INTO metadata(key,value) VALUES ('backup-marker','before')").run();
+  const writer = new Database(primary.name);
+  let progressCalls = 0;
+  try {
+    const backup = await createDatabaseBackup({
+      onProgress() {
+        progressCalls++;
+        if (progressCalls > 100) throw new Error('Backup keeps restarting after concurrent writes');
+        writer.prepare("UPDATE metadata SET value=? WHERE key='backup-marker'").run(`after-${progressCalls}`);
+      },
+    });
+    assert.ok(progressCalls > 0);
+    const restored = new Database(path.join(backupDir, backup.id, 'database.db'), { readonly: true });
+    try {
+      assert.equal(restored.prepare("SELECT value FROM metadata WHERE key='backup-marker'").get().value, 'before');
+      assert.equal(restored.prepare('SELECT length(payload) AS bytes FROM backup_churn').get().bytes, 2097152);
+    } finally { restored.close(); }
+    assert.equal(primary.inTransaction, false);
+    assert.equal((await verifyDatabaseBackup(backup.id)).ok, true);
+  } finally {
+    writer.close();
+    primary.exec("DROP TABLE backup_churn; DELETE FROM metadata WHERE key='backup-marker'");
+  }
+});
+
+test('backup reclaims unused pages in its copy and leaves the live database unchanged', async () => {
+  const primary = getDatabase();
+  primary.exec('CREATE TABLE backup_free_pages (payload BLOB)');
+  primary.prepare('INSERT INTO backup_free_pages VALUES (zeroblob(8388608))').run();
+  primary.exec('DROP TABLE backup_free_pages');
+  const livePageCount = primary.pragma('page_count', { simple: true });
+  const freePages = primary.pragma('freelist_count', { simple: true });
+  assert.ok(freePages > 0);
+  const backup = await createDatabaseBackup();
+  const restored = new Database(path.join(backupDir, backup.id, 'database.db'), { readonly: true });
+  try {
+    assert.equal(restored.pragma('freelist_count', { simple: true }), 0);
+    assert.ok(restored.pragma('page_count', { simple: true }) < livePageCount);
+  } finally { restored.close(); }
+  assert.equal(primary.pragma('page_count', { simple: true }), livePageCount);
+  assert.equal(primary.pragma('freelist_count', { simple: true }), freePages);
+  assert.equal((await verifyDatabaseBackup(backup.id)).ok, true);
 });
 
 test('v1 backups remain verifiable when later optional table counters are absent', async () => {
@@ -154,6 +207,19 @@ test('an in-flight backup can be cancelled without publishing partial state', as
   assert.deepEqual(listDatabaseBackups().map((entry) => entry.id), before);
   assert.equal(fs.existsSync(path.join(backupDir, '.backup.lock')), false);
   assert.equal(fs.readdirSync(backupDir).some((name) => name.startsWith('.creating-')), false);
+});
+
+test('cancellation before compaction removes the unpublished copy and retains the last backup', async () => {
+  const before = listDatabaseBackups().map(backup => backup.id);
+  const pending = createDatabaseBackup({
+    faultInjector(stage) {
+      if (stage === 'before_compaction') assert.equal(cancelDatabaseBackup(), true);
+    },
+  });
+  await assert.rejects(pending, error => error.code === 'DATABASE_BACKUP_CANCELLED');
+  assert.deepEqual(listDatabaseBackups().map(backup => backup.id), before);
+  assert.equal(fs.readdirSync(backupDir).some(name => name.startsWith('.creating-')), false);
+  assert.equal(fs.existsSync(path.join(backupDir, '.backup.lock')), false);
 });
 
 test('cross-process lock rejects a live owner and reclaims interrupted backup state', async () => {

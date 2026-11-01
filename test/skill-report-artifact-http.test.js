@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const Database = require('better-sqlite3');
 
@@ -254,7 +255,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     "db.prepare(`INSERT INTO external_attempts(id, task_id, chain_key, generation, label, status, log_path, meta_path, artifact_declarations_json, started_at, created_at, updated_at) VALUES (?, ?, ?, 1, ?, 'running', ?, ?, ?, ?, ?, ?)` )",
     "  .run(externalAttemptId, taskId, 'artifact-http', 'Running report', path.join(registeredTaskDir, 'run.log'), metaPath, JSON.stringify([{ key: 'normal', kind: 'pytest-html', path: registeredPath }, { key: 'missing', kind: 'pytest-html', path: missingPath }, { key: 'empty', kind: 'pytest-html', path: emptyPath }]), now, now, now);",
     "db.prepare(`INSERT INTO skill_reports(id, task_id, turn_id, attempt_id, report_key, revision, report_hash, schema_version, skill_id, skill_version, skill_content_hash, report_type, status, title, summary, payload_json, published_at) VALUES (?, ?, NULL, NULL, ?, 1, ?, 1, ?, 1, ?, ?, ?, ?, ?, ?, ?)`)",
-    "  .run(reportId, taskId, 'head', hash, 'report-skill', hash, 'test-result', 'succeeded', 'Artifact head', 'Artifact HTTP contract.', '{}', now);",
+    "  .run(reportId, taskId, 'head', hash, 'report-skill', hash, 'test-result', 'succeeded', 'Artifact head', 'Artifact HTTP contract.', JSON.stringify({ executionEvidence: { externalAttemptId }, artifacts: [{ key: 'normal', kind: 'pytest-html', path: registeredPath }] }), now);",
     "db.prepare(`INSERT INTO skill_report_artifacts(id, task_id, report_id, artifact_key, label, kind, file_name, media_type, managed_path, bytes, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)",
     "  .run(artifactId, taskId, reportId, 'pytest-html', 'Pytest HTML report', 'pytest-html', 'artifact.html', 'text/html; charset=utf-8', artifactPath, Buffer.byteLength(html), hash, now);",
     "db.prepare(`INSERT INTO skill_report_artifacts(id, task_id, report_id, artifact_key, label, kind, file_name, media_type, managed_path, bytes, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)",
@@ -315,7 +316,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
   const authorization = `Basic ${Buffer.from('artifact-user:artifact-password').toString('base64')}`;
   const authenticatedFetch = (url, options = {}) => fetch(url, {
     ...options,
-    headers: { authorization, ...options.headers },
+    headers: { authorization, 'Accept-Encoding': 'identity', ...options.headers },
   });
   try {
     await waitFor(artifactUrl, { headers: { authorization } });
@@ -358,6 +359,18 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     assert.equal(get.headers.get('content-length'), head.headers.get('content-length'));
     assert.equal(get.headers.get('content-security-policy'), contentSecurityPolicy);
     const servedHtml = await get.text();
+    const compressed = await authenticatedFetch(artifactUrl, { headers: { 'Accept-Encoding': 'gzip' } });
+    assert.equal(compressed.status, 200);
+    assert.equal(compressed.headers.get('content-encoding'), 'gzip');
+    assert.equal(compressed.headers.get('vary'), 'Accept-Encoding');
+    assert.equal(await compressed.text(), servedHtml);
+    assert.ok(Number(compressed.headers.get('content-length')) < Buffer.byteLength(servedHtml));
+    const compressedHead = await authenticatedFetch(artifactUrl, { method: 'HEAD', headers: { 'Accept-Encoding': 'gzip' } });
+    assert.equal(compressedHead.headers.get('content-length'), compressed.headers.get('content-length'));
+    assert.equal(compressedHead.headers.get('content-encoding'), 'gzip');
+    assert.equal(await compressedHead.text(), '');
+    const declined = await authenticatedFetch(artifactUrl, { headers: { 'Accept-Encoding': 'gzip;q=0, *;q=1' } });
+    assert.equal(declined.headers.get('content-encoding'), null);
     assert.notEqual(servedHtml, html);
     assert.match(servedHtml, /<title>artifact\.html<\/title>/);
     assert.match(servedHtml, /pytest-html-video-viewed-state/);
@@ -500,6 +513,9 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     const registeredGet = await authenticatedFetch(registeredUrl);
     assert.equal(registeredGet.status, 200);
     const registeredPreview = await registeredGet.text();
+    const compressedPreview = await authenticatedFetch(registeredUrl, { headers: { 'Accept-Encoding': 'gzip' } });
+    assert.equal(compressedPreview.headers.get('content-encoding'), 'gzip');
+    assert.equal(await compressedPreview.text(), registeredPreview);
     assert.match(registeredPreview, /<title>running\.html<\/title>/);
     assert.match(registeredPreview, /summary__reload__button/);
     assert.doesNotMatch(registeredPreview, /<base\b/);
@@ -520,6 +536,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     assert.match(signedRegisteredVideoUrl.pathname, /resources\/\.\.%2Fvideos%2Fsample\.mp4$/);
     const registeredVideoResponse = await fetch(signedRegisteredVideoUrl);
     assert.equal(registeredVideoResponse.status, 200);
+    assert.equal(registeredVideoResponse.headers.get('content-encoding'), null);
     assert.equal(await registeredVideoResponse.text(), registeredVideo.toString('utf8'));
     const signedRegisteredPlaylistPath = /href="([^\"]*resources\/[^\"]*%2Fvideos[^\"]*sample\.m3u8[^\"]*)"/.exec(registeredPreview)?.[1];
     assert.ok(signedRegisteredPlaylistPath);
@@ -643,10 +660,70 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     try {
       database.prepare('UPDATE external_attempts SET status=? WHERE id=?')
         .run('failed', externalAttemptId);
+      const terminalPreview = await authenticatedFetch(registeredUrl);
+      assert.equal(terminalPreview.status, 200);
+      assert.match(await terminalPreview.text(), /summary__reload__button/);
+
+      const now = new Date().toISOString();
+      database.prepare(`INSERT INTO skill_report_artifact_jobs(report_id,task_id,status,created_at,updated_at)
+        VALUES (?,?,'processing',?,?)`).run(reportId, taskId, now, now);
+      const archivingPreview = await authenticatedFetch(registeredUrl);
+      assert.equal(archivingPreview.status, 200);
+      assert.match(await archivingPreview.text(), /Running artifact/);
+
+      // Publishing this file switches its existing links before other files finish.
+      const resourceDir = path.join(dataDir, 'sessions', taskId, 'skill-report-artifacts', reportId, `${artifactId}.resources`);
+      const publishedResources = [
+        { id: 'report-resource-registered-video', key: 'videos/sample.mp4', type: 'video/mp4', content: registeredVideo },
+        { id: 'report-resource-registered-log', key: 'task/logs/sample.txt', type: 'text/plain; charset=utf-8', content: Buffer.from(registeredLog) },
+      ];
+      for (const resource of publishedResources) {
+        resource.filePath = path.join(resourceDir, `${resource.id}${path.extname(resource.key)}`);
+        fs.writeFileSync(resource.filePath, resource.content);
+      }
+      database.transaction(() => {
+        // A completed archive can precede background status reconciliation.
+        database.prepare("UPDATE external_attempts SET status='running' WHERE id=?").run(externalAttemptId);
+        database.prepare('UPDATE skill_report_artifacts SET artifact_key=?, view_json=? WHERE id=?')
+          .run('normal', JSON.stringify({ containmentRoot: workspaceDir }), artifactId);
+        for (const resource of publishedResources) {
+          database.prepare(`INSERT INTO skill_report_artifact_resources
+            (id,task_id,report_id,artifact_id,resource_key,file_name,media_type,managed_path,bytes,sha256,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(resource.id, taskId, reportId, artifactId,
+            resource.key, path.basename(resource.key), resource.type, resource.filePath,
+            resource.content.length, crypto.createHash('sha256').update(resource.content).digest('hex'), now);
+        }
+      })();
+      const transition = await authenticatedFetch(`${registeredUrl}?sort=result`, { redirect: 'manual' });
+      assert.equal(transition.status, 307);
+      assert.equal(transition.headers.get('location'), new URL(artifactUrl).pathname + '?sort=result');
+      assert.equal(transition.headers.get('cache-control'), 'private, no-store');
+      const archivedHtml = await authenticatedFetch(registeredUrl);
+      assert.equal(archivedHtml.status, 200);
+      assert.match(await archivedHtml.text(), /<title>running\.html<\/title>/);
+
+      fs.rmSync(path.join(workspaceDir, 'task', 'running.html'));
+      fs.rmSync(path.join(workspaceDir, 'task', 'run.meta'));
+      fs.rmSync(path.join(workspaceDir, 'task', 'logs', 'sample.txt'));
+      fs.rmSync(path.join(workspaceDir, 'videos', 'sample.mp4'));
+      const archivedHead = await authenticatedFetch(registeredUrl, { method: 'HEAD' });
+      assert.equal(archivedHead.status, 200);
+      assert.equal(archivedHead.url, artifactUrl);
+      const archivedLog = await fetch(signedRegisteredLogUrl);
+      assert.equal(archivedLog.status, 200);
+      assert.equal(await archivedLog.text(), registeredLog);
+      const archivedVideo = await fetch(signedRegisteredVideoUrl, { headers: { Range: 'bytes=0-3' } });
+      assert.equal(archivedVideo.status, 206);
+      assert.equal(await archivedVideo.text(), registeredVideo.subarray(0, 4).toString());
+
+      database.prepare("UPDATE skill_report_artifact_jobs SET status='completed' WHERE report_id=?").run(reportId);
+      assert.equal((await authenticatedFetch(registeredUrl)).status, 200);
+      // A bad archive must still fail integrity validation through the old URL.
+      fs.appendFileSync(path.join(dataDir, 'sessions', taskId, 'skill-report-artifacts', reportId, `${artifactId}.html`), 'changed');
+      assert.equal((await authenticatedFetch(registeredUrl)).status, 409);
     } finally {
       database.close();
     }
-    assert.equal((await authenticatedFetch(registeredUrl)).status, 409);
   } finally {
     await stop(child);
     fs.rmSync(root, { recursive: true, force: true });

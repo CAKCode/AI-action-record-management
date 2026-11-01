@@ -50,7 +50,30 @@ const EXCLUDED_COUNT_KEYS = [
   'runtimeLocks',
   'runtimeTemp',
   'stagedTemporary',
+  'mediaFiles',
 ];
+const MEDIA_EXTENSIONS = new Set([
+  '.mp4', '.m4v', '.mov', '.mkv', '.avi', '.webm', '.flv', '.h264', '.h265', '.hevc', '.yuv',
+  '.mp3', '.aac', '.m4a', '.wav', '.ogg', '.opus', '.flac', '.pcm',
+  '.m3u8', '.m3u', '.mpd', '.m4s', '.vtt',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.avif', '.ico',
+]);
+const MEDIA_DIRECTORIES = new Set(['videos', 'standard_videos', '.playback-cache', 'media-objects']);
+
+function isTransportStream(filePath) {
+  let descriptor;
+  try {
+    if (!fs.lstatSync(filePath).isFile()) return false;
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    if (!fs.fstatSync(descriptor).isFile()) return false;
+    const header = Buffer.alloc(188 * 3);
+    const bytes = fs.readSync(descriptor, header, 0, header.length, 0);
+    return bytes === header.length && header[0] === 0x47 && header[188] === 0x47 && header[376] === 0x47;
+  } catch (error) {
+    if (error.code === 'ELOOP') return false;
+    throw error;
+  } finally { if (descriptor != null) fs.closeSync(descriptor); }
+}
 const REQUIRED_LEGACY_EXCLUDED_COUNT_KEYS = [
   'symlinks',
   'specialFiles',
@@ -261,6 +284,11 @@ function excludedSourcePath(role, relativePath) {
   if (normalized.split('/').some((part) => /^\..+\.(?:materializing|stale|deleting)-/.test(part))) {
     return 'staged_temporary';
   }
+  if (normalized.split('/').some(part => MEDIA_DIRECTORIES.has(part.toLowerCase()))
+    || MEDIA_EXTENSIONS.has(path.extname(normalized).toLowerCase())) return 'media_file';
+  // .ts can also be TypeScript; retain source code and inspect MPEG-TS sync bytes.
+  if (path.extname(normalized).toLowerCase() === '.ts'
+    && isTransportStream(path.join(role === 'data' ? DATA_DIR : RUNTIME_DIR, relativePath))) return 'media_file';
   return '';
 }
 
@@ -296,6 +324,7 @@ function collectInventory() {
     runtimeLocks: 0,
     runtimeTemp: 0,
     stagedTemporary: 0,
+    mediaFiles: 0,
   };
   const roots = [
     { role: 'data', directory: DATA_DIR },
@@ -313,6 +342,7 @@ function collectInventory() {
         runtime_lock: 'runtimeLocks',
         runtime_temp: 'runtimeTemp',
         staged_temporary: 'stagedTemporary',
+        media_file: 'mediaFiles',
       }[exclusion];
       excluded[key] += 1;
       return false;

@@ -32,8 +32,15 @@ systemd / Host Launcher
 | Web UI | 任务、结果确认、日志、审计、Skill 和中英文切换 |
 | HTTP API | 参数校验、状态约束、幂等命令、目录白名单和访问控制 |
 | SQLite | 任务、Turn、Attempt、外部执行、定时检查、命令执行、租约、Skill、日志和审计事务 |
+
+版本周期使用 `release_cycles`、`task_series_schedules` 和 `task_series_runs` 三张表。Cron 调度器只负责幂等地调用现有 Task 创建/排队路径；每个周期运行拥有独立 Task，关闭周期只禁用未来计划，不修改历史 Task 或其产物。
 | Worker | 命令和到期检查领取、租约心跳、Session 执行、重试、停止和恢复 |
 | 文件存储 | 原始日志、持久运行状态、不可变 Skill 快照、原子数据库备份包和平台恢复检查点 |
+
+完整云录制提测使用 Task-owned Session source：平台为 `workspaceMode=session-clone` 任务创建
+独立目录，Release Skill 将测试代码 clone 到 `source/premium_robot`，测试输出写入
+`task/<run-id>`。终态后平台冻结并原地接管该 Session 目录的归档状态，不复制第二份代码或
+媒体；普通业务测试仍使用 `/home/jenkins/premium_robot` 的 shared 模式。
 
 Web 控制面不依赖执行适配器启动。执行能力不可用时，页面和健康接口仍可访问，启动任务返回 `503`。
 
@@ -139,7 +146,7 @@ inactive  --reset----> idle
 - Web 在平台内监管模式下周期校验 Supervisor 身份；父 Supervisor 消失时复用正常停服链，先关闭监听并要求 Worker 持久化活动 Attempt 的中断状态，再退出。无 systemd 的 Host Launcher 观察到 Supervisor 退出后退避重启。Launcher 自身失效时 Web 保留 liveness 供诊断，但 readiness 立即失败，因为服务树已失去下一层自动恢复能力；运维入口需停止残留 Supervisor 并重建完整链路。
 - Worker 心跳携带 PID 与 Linux 启动时钟；Web 只接受仍属于自身子进程的匹配身份，避免重启后旧心跳或 PID 复用被当作可用 Worker。`/api/ready` 还实时核验所有活动执行 leader，执行器、Worker、工作区、权限或进程身份任一降级即返回 `503`；`/api/health` 保留控制面 liveness 语义。
 - readiness 同时检查数据目录、运行状态目录和所有可用任务工作根目录的可写性与剩余空间。容量不足时 API 不再入队，Worker 不领取已排队命令；命令保持 `pending`，空间恢复后继续执行。活动 Attempt 不会仅因容量告警被强杀，其真实写盘错误仍按审计不完整失败记录。
-- 在线数据库备份使用 SQLite backup API 从活动 WAL 数据库取得事务一致快照，在私有临时目录执行 `quick_check`、外键、SHA-256、大小和核心表计数校验；数据库与清单落盘并 `fsync` 后，通过目录重命名一次性发布。新包成功发布后才轮转旧包，失败或崩溃不会覆盖最后一份有效备份。
+- 在线数据库备份通过独立只读连接的读事务固定 WAL 快照，再使用 SQLite backup API 分段复制，避免并发写入反复重启备份。只在未发布的副本上切换 DELETE journal，并由辅助进程通过 `VACUUM INTO` 回收空页，不阻塞 Web 事件循环或压缩在线主库。私有临时目录内执行 `quick_check`、外键、SHA-256、大小和核心表计数校验；数据库与清单落盘并 `fsync` 后，通过目录重命名一次性发布。新包成功发布后才轮转旧包，失败或崩溃不会覆盖最后一份有效备份。媒体文件不进入备份或恢复检查点。
 - 数据库备份调度与 Session Worker 解耦，不占用任务执行槽。启动时从最新有效备份的完成时间直接恢复真实到期时间；调度器使用进程内世代号约束 timer，重复初始化会先替换旧 timer，停止或重启前已经进入异步阶段的旧回调可以完成当前备份，但不能重新挂回旧调度链。它只保护 SQLite 事务数据；Attempt 原始输出、后台日志、Session runtime 和工作文件仍由完整数据恢复流程保护。
 - 平台恢复检查点使用 SQLite 持久维护租约建立跨 Web/Worker 的静默窗口。租约取得事务独立核对活动 Task、Attempt、Command、Schedule、External 和已认领 Bridge cleanup；队列、命令领取、到期调度领取、派发与回收认领都在各自写事务内复查租约，Worker 心跳仅在恢复检查点维护中保持只读。SQLite snapshot 使用最多 10 分钟的初始窗口且暂停租约续写，超时后 fail closed；快照完成后恢复正常续租。
 - 任务配置、Skill 管理、配置导入和命令 Skill 归因同样在各自 `IMMEDIATE` 写事务内复查维护租约；维护期间 Skill 查询复用已持久化来源快照，不因 GET 触发来源发现写入。这样长请求即使在租约建立前进入 HTTP 层，也不能在租约建立后提交。

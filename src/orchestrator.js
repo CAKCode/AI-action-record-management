@@ -43,6 +43,7 @@ const {
   getPlatformMaintenance,
 } = require('./store');
 const { ensureWorkspaceRoots, resolveWorkingDir, workspaceStatus } = require('./workspaces');
+const { taskAgentDirectory } = require('./task-session-workspace');
 const { storageCapacityStatus } = require('./storage-capacity');
 const {
   inspectProcess,
@@ -55,7 +56,9 @@ const {
   BRIDGE_RUNTIME_ROOT,
   BRIDGE_CHATFILE_ROOT,
   secureBridgeRuntimeStorage,
+  resolveBridgeSessionRuntime,
 } = require('./bridge-runtime-cleanup');
+const { restoreTaskSessionHistory } = require('./task-session-history');
 const { createInteractiveCliTranscriptStore } = require('./interactive-cli-transcript');
 const { recoverRollout } = require('../bin/recover-codex-rollout');
 
@@ -419,6 +422,10 @@ function buildTaskMessage(session, brief, continuing, snapshot) {
     `Request: ${brief || session.objective || 'Complete the requested task.'}`,
     `Skill snapshot: ${snapshot.path}`,
     `Available Skill IDs: ${skillIds.join(', ') || '(none)'}`,
+    ...(session.workspaceMode === 'session-clone' ? [
+      `Task Session root: ${session.sessionRoot}; frozen source: ${session.sourceRoot}.`,
+      'Use that Session root for outputs and that source directory for pytest. The Bridge CWD is only a small control workspace; never copy the source or test outputs into it.',
+    ] : []),
     'Runtime rules:',
     `- Read applicable snapshot SKILL.md files. Skill-driven shell commands must start with: ${skillWrapper} <skill-id> [skill-id ...] -- <command>`,
     `- Register every detached PID/LOG/DONE/STATE/META with explicit business identity before replying: ${skillWrapper} <business-skill-id> run-in-background -- ${backgroundWrapper} register --pid <PID> --log <LOG> --done <DONE> --state <STATE> --meta <META> --step-key <stable-scope> --step-label <label> --run-key <initial|rerun-N> --run-kind <initial|rerun> [--source-run-key <initial>] [--selection-mode <mode>] [--target-count <N>]. The wrapper records the exact Skill invocation automatically and the background execution inherits it. A Step is stable business scope; a rerun creates a new Run in the same Step. A technical retry reuses the returned STEP_RUN_ID with --step-run-id <ID>.`,
@@ -434,7 +441,7 @@ function buildBridgeArgs(session, message, attemptOutput, outputFile) {
     '--bot-id', BRIDGE_BOT_ID,
     '--bot-name', BRIDGE_BOT_NAME,
     '--runtime-root', BRIDGE_RUNTIME_ROOT,
-    '--source-dir', resolveWorkingDir(session.workingDir),
+    '--source-dir', resolveWorkingDir(taskAgentDirectory(session)),
     '--chatfile-root', BRIDGE_CHATFILE_ROOT,
     '--chat-key', session.persistentSessionKey,
     '--message', message,
@@ -511,10 +518,14 @@ async function startSession(command, workerId) {
   }
   if (activeSessions.has(session.id)) return deepClone(activeSessions.get(session.id).session);
 
-  const configuredWorkingDirectory = resolveWorkingDir(session.workingDir);
+  const configuredWorkingDirectory = resolveWorkingDir(taskAgentDirectory(session));
   const snapshot = ensureTaskSkillSnapshot(session.id);
   const continuing = Boolean(session.persistentSessionKey);
   const sessionKey = session.persistentSessionKey || bridgeSessionKey(session.id);
+  if (continuing) {
+    const runtime = resolveBridgeSessionRuntime(sessionKey);
+    if (runtime) restoreTaskSessionHistory(session.id, runtime);
+  }
   const taskBrief = command.input !== ''
     ? String(command.input)
     : String(session.lastBrief || session.objective || '');
@@ -627,6 +638,12 @@ async function launchAttempt(active, initialAttemptPrepared = false) {
     CODEX_TASK_ATTEMPT_ID: active.attemptId,
     CODEX_TASK_PERMISSION_MODE: 'danger-full-access',
     CODEX_TASK_APPROVAL_POLICY: 'never',
+    CODEX_TASK_WORKSPACE_MODE: active.session.workspaceMode || 'shared',
+    CODEX_TASK_SESSION_ROOT: active.session.sessionRoot || '',
+    CODEX_TASK_SOURCE_ROOT: active.session.sourceRoot || '',
+    CODEX_TASK_SOURCE_MODE: active.session.sourceMode || 'shared-repo',
+    CODEX_TASK_SOURCE_COMMIT: active.session.sourceCommit || '',
+    CODEX_TASK_SOURCE_MANIFEST_HASH: active.session.sourceManifestHash || '',
     CODEX_TASK_REAL_CODEX_BIN: REAL_CODEX_BIN,
     CODEX_BIN: FULL_ACCESS_CODEX_BIN,
     PATH: `${FULL_ACCESS_CODEX_DIR}${path.delimiter}${process.env.PATH || ''}`,

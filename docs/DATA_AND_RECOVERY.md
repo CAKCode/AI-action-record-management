@@ -22,6 +22,20 @@ data/
 
 `codex-tasks.db` 是主数据源。WAL 和 SHM 是 SQLite 运行文件，服务运行时不能只复制主数据库文件。`data/agents/` 是只用于首次迁移的旧 Agent 配置来源；迁移完成后平台不再读取它，恢复检查点会明确排除该目录，避免外部遗留工具写入时破坏平台一致性快照。
 
+完整云录制 Release Task 的源码工作区位于 Task Session 根目录的 `source/premium_robot`，
+输出位于 `task/<run-id>`。源码 commit、manifest SHA 和 `archiveState` 保存在 `tasks`；终态
+归档采用 `in-place` 模式，平台冻结并直接托管 Session 文件，不复制第二份代码。
+已发布 HTML、Markdown、case 日志和脚本等文本使用同目录的隐藏 `.snapshot` 版本保存当次内容，
+正文与子资源继续按 SHA-256 校验，视频和音频仍引用 Session 原文件。普通测试的
+`workspaceMode=shared` 仍使用项目共享目录。
+
+Session 根目录由 `CODEX_TASK_SESSIONS_DIR` 配置，不依赖原生 Bridge Runtime。
+运行库存把该目录纳入 Task 占用；Task 删除和 30 天到期清理统一回收它，原生 Runtime 回收
+单独进行。新模式不执行 `videos` 的归档后副本清理；源码、HTML、视频、日志和 Video Check
+原件就保留在同一 Session，SQLite 保存原件摘要、逐 artifact 引用及显示转换元数据。
+终态生成的 `archive-manifest.json` 覆盖 source/task，源码清单和单文件读取接口核验摘要。
+这些文件不随数据库备份或恢复检查点打包；部署恢复时还需保留 Session 存储，不能只恢复数据库。
+
 运行状态目录保存平台管理的未完成任务状态和任务 Skill 快照，必须与数据目录一起备份。Bridge 创建的 Codex Session home 属于外部 CLI 的实时内部状态，不是平台恢复检查点的一致恢复源；检查点恢复后平台保留任务、Turn、审计和原始 transcript，并按 Task 当前最新的持久 Session 标识创建后续 Turn。
 
 ## 数据保留策略
@@ -37,14 +51,15 @@ data/
 | 数据 | 策略 |
 | --- | --- |
 | SQLite、WAL、平台运行数据 | 使用平台现有在线数据库备份和恢复检查点；不把媒体目录混入数据库备份。 |
-| 唯一媒体对象 | 使用外部按 SHA-256 内容寻址的增量备份；同一摘要只保留一份对象，清单保存原始路径和引用关系。 |
+| 视频、音频、图片及媒体依赖 | 不进入平台备份；包含播放清单、切片和播放缓存。报告中保留原有媒体引用，业务源文件由操作者管理。 |
 | 项目代码 | 使用 Git；生成的视频副本不进入代码备份。 |
+| Release Task Session 源码 | 随 Task 的 Session 原地归档，记录 commit 和 manifest；Task 删除或 30 天清理时一起移除。 |
 | 项目 `task/<run-id>/videos` 临时目录 | 不进入长期备份；同 Run 报告资源归档完整后由 artifact 作业清除，未挂载文件会保留目录和原因。 |
 | 历史 `videos/<run-id>` 临时目录 | 由配置好的独立定时器每 30 天检查；符合保留条件时先隔离，后续检查达到隔离期才永久删除。 |
-| `standard_videos` 标准库 | 单独规划备份和保留周期，媒体清理任务永不处理。 |
+| `standard_videos` 标准库 | 不进入平台自动备份，仍由操作者管理；媒体清理任务永不处理。 |
 | 平台已托管报告 | 使用平台从 `archivedAt` 起 30 天的保留策略；报告 artifact 资源不再被每个恢复检查点重复打包。 |
 
-唯一媒体对象的增量备份必须在平台外部执行，并以对象摘要为幂等键；本仓库的清理脚本只负责临时 `videos` 目录的生命周期，不会伪装成媒体备份或删除标准库。
+当前策略不启动媒体增量备份或媒体全量打包；本仓库的清理脚本只负责临时 `videos` 目录的生命周期。媒体归档用于报告访问，与备份是不同操作；本次备份策略不改变视频归档、播放及源文件的生命周期。
 
 清理能力应按对象区分：运行库存回收只删除原生 Runtime，保留 Task 历史和托管报告视频；非活动未完成 Task 的删除会删除平台 Task 数据和托管产物；完成 Task 到期清理才按 30 天保留策略删除历史。上述操作不等于清空任意业务工作目录，平台也不会清理操作者管理的 `/data/jenkins/videos` 源文件。SQLite 删除记录后，数据库文件不保证立刻缩小；文件回收释放的空间与数据库页复用是不同的容量指标。
 
@@ -167,8 +182,8 @@ Bridge runtime 同样在同步时递归收紧：普通目录为 `0700`，普通�
 生成流程如下：
 
 1. 检查备份文件系统在写入一个估算快照后仍满足容量门槛。
-2. 在备份目录创建 `0700` 临时包，通过活动连接的 SQLite backup API 复制主库，包含当前 WAL 中已提交的数据。
-3. 对临时 `database.db` 执行 `quick_check`、`foreign_key_check`、核心表计数和 SHA-256 校验。
+2. 在备份目录创建 `0700` 临时包，通过独立只读连接开启读事务并固定 WAL 快照，再用 SQLite backup API 分段复制；并发任务继续写入，后续写入留给下一份备份，不反复重启当前复制。
+3. 将备份副本切为独立文件的 DELETE journal 模式；存在空页时，由辅助进程执行 `VACUUM INTO` 压缩副本并替换临时文件。在线主库不执行 VACUUM，Web 仍可处理报告请求和心跳。随后执行 `quick_check`、`foreign_key_check`、核心表计数和 SHA-256 校验。
 4. 以 `0600` 写入数据库和 `manifest.json`，同步文件与临时目录。
 5. 原子重命名整个目录发布，再同步父目录。
 6. 只有发布成功后才删除超出保留数的最旧有效包。
@@ -200,7 +215,7 @@ node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_t
 1. 在 SQLite 中取得带过期时间的持久维护租约，并在同一事务中确认活动 Task、Attempt、Command、Schedule、External 和已认领 Bridge cleanup 数量都为 0。
 2. 维护期间新写入 API 返回 `503` 和 `Retry-After`；已提交的 Run、原子创建、停止、完成、恢复、重置和删除幂等键仍可读取原结果，但未命中的新键在任何写入前失败。任务配置、Skill 管理、配置导入、命令 Skill 归因、命令领取、到期调度领取和调度派发均在写事务内复查租约。Skill 查询继续返回已持久化快照，但不会在维护窗口内刷新来源。readiness 标记 `platform_maintenance`，进程异常退出后租约会在 `expiresAt` 自动失效。
 3. 通过在线 backup API 创建已验证数据库，再复制到检查点并删除仅用于创建过程的 `platform_maintenance` 元数据，避免恢复后继承伪活动租约。
-4. 清点并归档数据和 runtime。实时 SQLite/WAL/SHM、备份目录递归、Bridge Session lock、整个 Bridge Codex Session home（含 rollout、SQLite/WAL/SHM、tmp 和 CLI 内部配置）、符号链接、特殊文件和平台暂存目录不会进入归档。Bridge home 不受平台维护租约控制，不能与平台数据库一起构成可验证的一致快照。
+4. 清点并归档数据和 runtime。实时 SQLite/WAL/SHM、备份目录递归、Bridge Session lock、整个 Bridge Codex Session home（含 rollout、SQLite/WAL/SHM、tmp 和 CLI 内部配置）、已托管报告 artifact、媒体文件、媒体目录、播放缓存、符号链接、特殊文件和平台暂存目录不会进入归档。排除的视频、音频、图片、播放清单、切片和缓存计入 `source.excluded.mediaFiles`；`.ts` 通过 MPEG-TS 同步字节识别，保留 TypeScript 源码。Bridge home 不受平台维护租约控制，不能与平台数据库一起构成可验证的一致快照。
 5. 归档完成后逐项复核源文件的设备、inode、模式、大小、mtime 和 ctime 纳秒指纹；变化即放弃临时包。
 6. 核对数据库完整性、外键、表计数、维护租约清理、归档路径/类型/数量/总字节、归档清单摘要和两个文件的 SHA-256。
 7. `fsync` 后以目录重命名原子发布。只有发布成功才轮转旧有效包；失败不会删除最后一份有效包。
@@ -215,7 +230,7 @@ node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_t
 
 检查点目录位于 `CODEX_DESK_BACKUP_DIR/recovery-checkpoints/<recovery-id>/`，只含 `database.db`、`payload.tar.gz` 和 `manifest.json`。目录和文件分别固定为 `0700`、`0600`。API 只返回固定字段的校验摘要、计数和覆盖声明，不返回主机路径、归档目录项、文件内容或下载地址。
 
-`payload.tar.gz` 内的 `data/` 和 `runtime/` 是逻辑恢复根。它包含 Attempt 原始 stdout/stderr、交互式 CLI transcript、已成功托管到 `data/sessions/<task>/external-attempt-output/` 的终态后台原始日志、原生 Codex rollout、Skill 快照以及 Session 级 `auth.json`。`auth.json` 可能含 `OPENAI_API_KEY`，整个检查点必须按高敏感凭据介质存储、传输和授权。SHA-256 只能发现非预期变化，不提供对拥有目录写权限主体的防篡改认证。
+`payload.tar.gz` 内的 `data/` 和 `runtime/` 是逻辑恢复根。它包含 Attempt 原始 stdout/stderr、交互式 CLI transcript、已成功托管到 `data/sessions/<task>/external-attempt-output/` 的终态后台原始日志、平台保留的会话历史及 Skill 快照。Bridge 实时 Codex Session home 整体排除；其他平台配置仍可能包含凭据，整个检查点继续按高敏感介质存储、传输和授权。SHA-256 只能发现非预期变化，不提供对拥有目录写权限主体的防篡改认证。
 
 覆盖边界是固定且可机读的：
 
@@ -256,10 +271,10 @@ node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_t
 
 1. 停止或完成所有活动任务，并停止 Web 服务和 Worker。
 2. 复制 SQLite 主库、WAL/SHM（若存在）、平台运行状态和原始日志；排除 `sessions/*/skill-report-artifacts`，避免重复保存已托管报告。
-3. 不复制 `CODEX_TASK_WORKSPACE_ROOTS` 下的项目工作目录和 `videos/<run-id>`；项目代码由 Git、唯一媒体对象由 SHA-256 增量备份、`standard_videos` 由独立备份负责。
+3. 不复制 `CODEX_TASK_WORKSPACE_ROOTS` 下的项目工作目录、`videos/<run-id>`、`standard_videos` 或其他媒体目录；项目代码由 Git 管理，媒体文件按当前策略不备份。
 4. 记录应用版本和非敏感环境配置，启动服务并执行健康检查。
 
-页面导出不包含这些数据，不能替代在线数据库备份、恢复检查点或外部媒体备份。
+页面导出不包含这些数据，不能替代在线数据库备份或恢复检查点；媒体文件不属于当前备份覆盖范围。
 
 ## 完整恢复
 

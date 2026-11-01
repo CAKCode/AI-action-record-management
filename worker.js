@@ -13,10 +13,12 @@ const {
   getSession,
   claimDueScheduledJobs,
   dispatchClaimedScheduledJob,
+  claimDueTaskSeriesSchedules,
   claimExternalAttemptArchives,
   processExternalAttemptArchive,
   claimSkillReportArtifactJobs,
   processSkillReportArtifactJob,
+  sealPendingSessionWorkspace,
   claimExternalArchiveVerifications,
   processExternalArchiveVerification,
   claimBridgeCleanupJobs,
@@ -48,6 +50,7 @@ let cleanupTicking = false;
 let archiveTicking = false;
 let reconciliationTicking = false;
 let retentionTicking = false;
+let seriesSchedulingTicking = false;
 let consecutivePollFailures = 0;
 const controlFailures = new Map();
 
@@ -175,13 +178,13 @@ async function tick() {
   return true;
 }
 
-function runBridgeCleanupCycle() {
+async function runBridgeCleanupCycle() {
   if (cleanupTicking || stopping) return;
   cleanupTicking = true;
   try {
     const jobs = claimBridgeCleanupJobs(WORKER_ID, 1);
     for (const job of jobs) {
-      const result = processBridgeCleanupJob(job, WORKER_ID);
+      const result = await processBridgeCleanupJob(job, WORKER_ID);
       if (!result.ok) reportTimerFailure('bridge-cleanup', new Error(result.error));
     }
   } finally {
@@ -210,7 +213,10 @@ async function runExternalArchiveCycle() {
       return;
     }
     const [verification] = claimExternalArchiveVerifications(WORKER_ID, 1);
-    if (!verification) return;
+    if (!verification) {
+      await sealPendingSessionWorkspace();
+      return;
+    }
     const result = await processExternalArchiveVerification(verification.id, WORKER_ID);
     if (!result.ok && !result.lostLease) {
       reportTimerFailure('external-archive', new Error(result.error || 'Background log integrity verification failed'));
@@ -246,6 +252,17 @@ function runTaskRetentionCycle() {
   }
 }
 
+function runTaskSeriesSchedulingCycle() {
+  if (seriesSchedulingTicking || stopping) return;
+  if (typeof claimDueTaskSeriesSchedules !== 'function') return;
+  seriesSchedulingTicking = true;
+  try {
+    claimDueTaskSeriesSchedules(WORKER_ID, 10);
+  } finally {
+    seriesSchedulingTicking = false;
+  }
+}
+
 const pollTimer = setInterval(runPoll, 250);
 const heartbeatTimer = setInterval(() => runTimer('heartbeat', () => heartbeatActive(WORKER_ID)), 2000);
 const bridgeCleanupTimer = setInterval(() => runTimer('bridge-cleanup', runBridgeCleanupCycle), 1000);
@@ -261,12 +278,17 @@ const taskRetentionTimer = setInterval(
 const recoveryTimer = setInterval(() => runTimer('recovery', () => {
   if (!stopping) recoverExpiredTasks();
 }), 5000);
+const taskSeriesScheduleTimer = setInterval(
+  () => runTimer('task-series-scheduler', runTaskSeriesSchedulingCycle),
+  1000,
+);
 
 runPoll();
-runBridgeCleanupCycle();
+runTimer('bridge-cleanup', runBridgeCleanupCycle);
 runTimer('external-reconciliation', runExternalReconciliationCycle);
 runTimer('external-archive', runExternalArchiveCycle);
 runTimer('retention', runTaskRetentionCycle);
+runTimer('task-series-scheduler', runTaskSeriesSchedulingCycle);
 console.log(`[codex-worker] ready ${WORKER_ID} at ${nowIso()}`);
 
 function shutdown(exitCode = 0, force = false) {
@@ -279,10 +301,11 @@ function shutdown(exitCode = 0, force = false) {
   clearInterval(externalReconciliationTimer);
   clearInterval(taskRetentionTimer);
   clearInterval(recoveryTimer);
+  clearInterval(taskSeriesScheduleTimer);
   shutdownWorker(force);
   const deadline = Date.now() + 4000;
   const shutdownTimer = setInterval(() => {
-    if (!listActiveSessions().length && !archiveTicking) {
+    if (!listActiveSessions().length && !archiveTicking && !cleanupTicking) {
       clearInterval(shutdownTimer);
       exitWorker(exitCode);
     }

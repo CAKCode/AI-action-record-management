@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   TASK_WORKSPACE_ROOTS,
+  TASK_SESSION_ROOT,
 } = require('./paths');
 const { ensureDir } = require('./utils');
 
@@ -28,7 +29,7 @@ function resolveWorkingDir(value) {
     throw workspaceError(`Working directory does not exist: ${candidate}`);
   }
   const resolved = fs.realpathSync(candidate);
-  const allowed = roots.some((root) => {
+  const allowed = [...roots, TASK_SESSION_ROOT].filter(root => fs.existsSync(root)).some((root) => {
     const resolvedRoot = fs.realpathSync(root);
     return pathContains(resolvedRoot, resolved);
   });

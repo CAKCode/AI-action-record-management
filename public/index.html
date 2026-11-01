@@ -41,6 +41,7 @@
       <nav class="nav" aria-label="Primary">
         <button class="nav-item active" data-view="overview"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg><span data-i18n="navOverview">总览</span></button>
         <button class="nav-item" data-view="tasks"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1"/></svg><span data-i18n="navTasks">任务 Session</span></button>
+        <button class="nav-item" data-view="release-cycles"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 3v4M16 3v4M7 11h10M7 15h6"/></svg><span data-i18n="navReleaseCycles">版本周期</span></button>
         <button class="nav-item" data-view="skills"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m13 2-8 12h6l-1 8 9-13h-6z"/></svg><span data-i18n="navSkills">Skills</span></button>
         <button class="nav-item" data-view="runtime"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5M12 17.5h5"/></svg><span data-i18n="navRuntime">运行库存</span></button>
         <button class="nav-item" data-view="audit"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H5v17h14V4h-3M9 3h6v4H9zM9 12h6M9 16h6"/></svg><span data-i18n="navAudit">操作审计</span></button>
@@ -157,6 +158,21 @@
         <div class="load-more-row"><button class="button secondary hidden" id="loadMoreTasksBtn" data-i18n="loadMore">加载更多</button></div>
       </section>
 
+      <section class="view" id="view-release-cycles">
+        <div class="section-toolbar">
+          <div class="inline-note" data-i18n="releaseCyclesNote">按提测版本查看手动和定时创建的独立 Task。关闭版本周期后只停止后续创建，不影响已运行任务。</div>
+          <button class="button secondary" data-action="refresh-release-cycles" data-i18n="refreshReleaseCycles">刷新</button>
+        </div>
+        <div class="release-cycle-grid" id="releaseCycleGrid"></div>
+        <section class="workspace-section hidden" id="releaseCycleTaskSection">
+          <div class="section-head">
+            <div><span class="section-label" data-i18n="releaseCycleTasksLabel">RELEASE TASKS</span><h2 id="releaseCycleTaskTitle"></h2></div>
+            <div class="toolbar-actions"><button class="button secondary" data-action="run-release-cycle" id="runReleaseCycleBtn" data-i18n="runReleaseCycle">立即创建 Task</button><button class="button danger" data-action="close-release-cycle" id="closeReleaseCycleBtn" data-i18n="closeReleaseCycle">结束版本周期</button></div>
+          </div>
+          <div class="task-grid large" id="releaseCycleTaskGrid"></div>
+        </section>
+      </section>
+
       <section class="view" id="view-skills">
         <div class="section-toolbar">
           <div class="inline-note" data-i18n="skillsNote">任务首次启动时冻结平台 Skill 与 Codex Skill 快照，恢复时保持版本一致。</div>
@@ -257,12 +273,20 @@
             <button data-tab="operations" data-i18n="operations">操作记录</button>
           </div>
           <div class="console-output" id="taskConsoleOutput"></div>
-          <form class="prompt-composer" id="continueTaskForm">
-            <label class="composer-label" for="continueInput" data-i18n="nextInstruction">下一步指令</label>
-            <textarea id="continueInput" maxlength="524288" data-i18n-placeholder="continuePlaceholder" placeholder="向这个 Session 发送下一条工作指令"></textarea>
-            <div class="composer-actions">
+          <form class="prompt-composer" id="continueTaskForm" data-expanded="false">
+            <div class="composer-toolbar">
+              <button class="composer-toggle" id="composerToggle" type="button" data-action="toggle-composer" aria-expanded="false" aria-controls="composerBody">
+                <span class="composer-toggle-icon" aria-hidden="true">⌃</span>
+                <span data-i18n="nextInstruction">下一步指令</span>
+                <span class="composer-toggle-hint" id="composerToggleHint" data-i18n="expandInstruction">展开输入</span>
+              </button>
               <span id="composerHint"></span>
-              <button class="button primary" type="submit" id="continueTaskBtn">继续工作</button>
+            </div>
+            <div class="composer-body hidden" id="composerBody">
+              <textarea id="continueInput" rows="3" aria-labelledby="composerToggle" maxlength="524288" data-i18n-placeholder="continuePlaceholder" placeholder="向这个 Session 发送下一条工作指令"></textarea>
+              <div class="composer-actions">
+                <button class="button primary" type="submit" id="continueTaskBtn">继续工作</button>
+              </div>
             </div>
           </form>
         </section>

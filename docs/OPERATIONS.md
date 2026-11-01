@@ -1,5 +1,36 @@
 # 部署与运维
 
+## 独立提测 Session 与原地归档
+
+完整云录制提测创建 `workspaceMode=session-clone` Task，普通业务测试仍默认 `shared`。
+`CODEX_TASK_SESSIONS_DIR` 配置 Session 的存储父目录，默认是第一个 workspace root 下的
+`codex-task-sessions`。平台给业务命令传入的是单 Task 的 `CODEX_TASK_SESSION_ROOT`，两者用途不同。
+目录需要作为业务产物持久保留，不能放进原生 Bridge Runtime 的临时回收目录。
+
+```text
+codex-task-sessions/<task-id>/
+├── .agent/                         # 小型 Bridge 控制工作区，不复制源码或媒体
+├── source/premium_robot/           # 独立 clone（含自己的 .git）
+├── source-manifest.json            # 远端、分支、冻结 commit、Task 身份
+├── task/<run-id>/{report,videos,logs}/
+└── archive-manifest.json           # 终态的文件清单、摘要、模式
+```
+
+HTML 和媒体的物理文件留在上面的目录，`skill_report_artifacts/resources` 保存其归属、原始
+SHA-256 和显示链接转换信息。报告、HLS/DASH 和 Video Check 的 URL 在响应时改写，原件不改写。
+运行中仍可预览，终态后仍可使用 Viewed、Range、日志弹窗和 Video Check 详情。
+原始后台执行日志、Attempt 输出和 CLI transcript 继续使用原有审计托管流程。
+
+Worker 等最后的结果收集 Turn、后台任务和报告作业都结束后，校验并将 source/task 文件设为
+只读，状态从 pending 变为 archived；失败时保留文件和原因。Task 的“待确认”和文件归档状态
+是不同层次，30 天窗口仍从用户确认完成时开始。继续执行只开放源码和输出父目录，旧 Run
+保持只读；新 Run 必须使用新目录，复用原冻结 commit。
+
+Task 删除和到期清理会回收整份 Session，直接回收原生 Runtime 则保留 Session 和可查看报告。
+SQLite 在线备份包含元数据，不包含这些文件；恢复检查点也不会重复打包此目录。需要跨机器
+恢复时应同时保留 Session 文件及同一时间点的数据库。不要把“数据库备份成功”视为媒体和
+源码已有第二份备份。旧 Task 不迁移，shared 模式继续原来的复制归档和项目视频清理。
+
 ## 功能范围
 
 | 领域 | 当前行为 |
@@ -221,7 +252,7 @@ node --test test/skill-report-artifact-http.test.js test/frontend-performance.te
 | `BRIDGE_RUNTIME_ROOT` | `<runtime>/bridge-sessions` | 平台管理的 Bridge Session runtime 根目录 |
 | `BRIDGE_CHATFILE_ROOT` | `<runtime>/bridge-chatfiles` | 平台管理的 Bridge chatfile 根目录 |
 | `CODEX_TASK_CGROUP_ROOT` | 从 `/proc/self/cgroup` 自动定位 | 可选的 cgroup v2 委派根；仅在自动定位不适用时覆盖 |
-| `CODEX_INTERACTIVE_DISCONNECT_TIMEOUT_MS` | `900000` | 最后一个交互终端连接断开后的保留时间；`0` 表示禁用自动结束 |
+| `CODEX_INTERACTIVE_DISCONNECT_TIMEOUT_MS` | `60000` | 最后一个交互终端连接断开后的保留时间；`0` 表示禁用自动结束 |
 | `CODEX_INTERACTIVE_REPLAY_BYTES` | `67108864` | 交互式 Codex CLI 断线重连的内存回放窗口，范围 `65536..134217728` 字节；完整历史仍由 transcript 保留 |
 | `SOURCE_CODEX_HOME` | 部署环境提供 | Codex Skill 来源 |
 | `WORKSPACE_CODEX_SKILLS_DIR` | `<项目>/.codex/skills` | 项目级 Codex Skill 来源 |
@@ -370,7 +401,15 @@ curl -fsS http://127.0.0.1:8091/api/ready
 改写 HTML、日志、报告正文、哈希或工作日志。报告中的 AK、SK、Token、Authorization、Cookie
 和其他凭据是测试证据，应按高敏感数据授权访问、备份和传输。
 
-显式交互 Codex CLI 在最后一个浏览器连接断开后默认等待 15 分钟再结束，避免失联进程长期占用资源。可通过 `CODEX_INTERACTIVE_DISCONNECT_TIMEOUT_MS=1000..86400000` 调整，或设为 `0` 禁用；该值会随 Launcher 重启配置保留。对值为 `0` 的部署应由外部操作规程确保断开终端得到显式结束。
+显式交互 Codex CLI 在最后一个浏览器连接断开后默认等待 60 秒再结束。可通过 `CODEX_INTERACTIVE_DISCONNECT_TIMEOUT_MS=1000..86400000` 调整，或设为 `0` 禁用；显式配置在升级后继续生效。终止时先发 SIGTERM，2 秒未退出则发 SIGKILL；重连等待前一个进程退出，再用同一个 threadId 执行 resume。
+
+Web 每 30 秒检查空闲超过 60 秒的 Task，释放其 managed Codex app-server、新版 `app-server daemon pid-update-loop` 和 `codex-code-mode-host` 代码执行辅助进程及进程内的线程。适用待确认、待输入、失败、停止、已完成和等待后台结果的 Task；活跃 CLI、正在排队或执行的 Turn 会保留。后台 pytest 独立运行，释放 Codex runtime 不会停止 pytest。进程释放不删除 Session 记录、Codex Home、认证、rollout、Skill 快照或报告；点击“重新连接”和后续 durable continuation 均可从原会话继续。已确认完成的 Task 保持既有只读行为，需要交互时先使用“恢复并继续”。
+
+释放期间有最长 30 秒的 Task runtime 协调租约，Worker 启动和 CLI 重连等待释放完成，不会同时关闭和恢复同一会话；异常重启后的过期租约自动失效。平台只在确认旧进程退出后记录 `session.runtime.released`，失败记录 `session.runtime.release.failed` 并留待下一次检查。
+
+回收根据进程环境中的 Session ID、`CODEX_HOME` 和可执行路径识别本会话组件，不依赖仍然存在的父进程或进程组。发送信号前校验 PID 启动时钟，先发 `SIGTERM`，默认等待 2 秒，再向仍存活的组件发 `SIGKILL` 并等待 1 秒；等待期间重新扫描辅助进程。删除、重置或运行库存回收先等待这些组件退出，再删除运行目录；回收失败保留运行目录，由原清理作业重试。Session 记录已丢失时，仍按清理作业保存的 Session 身份回收残留组件。Worker 正常停服会等待正在执行的清理作业结束。
+
+平台在释放前后保留本 Task 的 `sessions/*.jsonl` rollout：同一磁盘使用硬链接，跨磁盘才复制，不保存第二份媒体或 Codex 程序缓存。保留文件位于 Task 的平台目录中，随 Task 删除/保留清理一起处理。即使 Bridge 自身的 TTL 删除了临时 Codex Home，重连和后台续行也能恢复 rollout，并在交互重连时从服务的认证源刷新 auth/config。升级前已被删除、且没有保留副本的会话历史无法凭 threadId 重建，接口会明确报出历史缺失，不把 Task 的报告或 CLI transcript 冒充成原会话。
 
 `workerAvailable=false` 表示心跳超过约 10 秒、心跳进程已经消失、启动时钟不匹配或它不再是当前 Web 的 Worker 子进程。`executionProcesses.unverified>0` 表示活动任务登记的执行 leader 已消失或身份不匹配，应结合 `issues` 的任务和 Attempt 检查 Worker 日志与租约恢复。平台恢复检查点创建期间 `maintenance.active=true`，`degradedReasons` 包含 `platform_maintenance`，readiness 返回 `503`；租约意外未释放时最多在 `expiresAt` 后自行失效。
 
@@ -515,7 +554,7 @@ node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_t
 node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_task_api.js" backup verify BACKUP_ID
 ```
 
-每个备份是 `CODEX_DESK_BACKUP_DIR/<backup-id>/` 下的私有包，包含 `database.db` 和 `manifest.json`。平台先在临时目录调用 SQLite 在线 backup API，再执行 `quick_check`、外键检查、SHA-256、大小和核心表计数复验；文件 `fsync` 后才通过目录级原子重命名发布。只有新包发布成功才按 `CODEX_DB_BACKUP_RETENTION` 删除最旧有效包。单次备份默认最多运行 120 分钟，可通过 `CODEX_DB_BACKUP_MAX_DURATION_MINUTES` 配置；超时或服务关停会取消备份并删除未发布临时包。空间不足返回 `507`，已有备份不受影响。
+每个备份是 `CODEX_DESK_BACKUP_DIR/<backup-id>/` 下的私有包，包含 `database.db` 和 `manifest.json`。平台通过独立只读连接固定 WAL 快照并调用 SQLite 在线 backup API；备份副本切为 DELETE journal，空页由辅助进程通过 `VACUUM INTO` 压缩，在线主库保持不变，再执行 `quick_check`、外键检查、SHA-256、大小和核心表计数复验；文件 `fsync` 后才通过目录级原子重命名发布。只有新包发布成功才按 `CODEX_DB_BACKUP_RETENTION` 删除最旧有效包。单次备份默认最多运行 120 分钟，可通过 `CODEX_DB_BACKUP_MAX_DURATION_MINUTES` 配置；超时或服务关停会取消备份并删除未发布临时包。空间不足返回 `507`，已有备份不受影响。
 
 在线数据库备份只保护 SQLite 中的任务、Turn、Attempt、命令、工作日志、审计和 Skill 元数据。它不包含 Attempt 原始 stdout/stderr 文件、后台 pytest 日志、持久 Session runtime、Skill 快照目录或任务工作文件，因此不是完整灾难恢复点。
 
@@ -533,11 +572,11 @@ node "${CODEX_HOME:-$HOME/.codex}/skills/codex-task-platform-api/scripts/codex_t
 
 若检查点已经原子发布，但最后释放维护租约时发生异常，创建仍按成功返回，因为该包的完整性不受清理结果影响；返回值包含 `maintenanceReleaseUnconfirmed=true` 和租约最晚失效时间，健康状态保留清理告警，并写入 `recovery.checkpoint.maintenance_release_unconfirmed`。此时先通过 `recovery verify` 确认包，再观察 `runtime.maintenance`；租约会在 `expiresAt` 自动失效，不要删除可能已经属于其他维护操作的元数据。
 
-每个检查点目录仅包含 `database.db`、`payload.tar.gz` 和 `manifest.json`。目录为 `0700`，文件为 `0600`。归档包含 Session 级 `auth.json`，可能保存 `OPENAI_API_KEY`，必须按凭据介质管理；API 不提供下载、文件列表或内容接口。SHA-256 用于损坏检测而不是来源签名，拥有检查点目录写权限的主体仍属于信任边界。
+每个检查点目录仅包含 `database.db`、`payload.tar.gz` 和 `manifest.json`。目录为 `0700`，文件为 `0600`。归档包含平台会话历史、Skill 快照及运行配置，排除 Bridge 实时 Codex Session home；其他配置可能保存凭据，仍按凭据介质管理；API 不提供下载、文件列表或内容接口。SHA-256 用于损坏检测而不是来源签名，拥有检查点目录写权限的主体仍属于信任边界。
 
-平台恢复检查点不包含 `CODEX_TASK_WORKSPACE_ROOTS` 下的任务工作目录，也不包含 `data/sessions/*/skill-report-artifacts` 或位于平台数据和 runtime 之外的 pytest 日志、报告和其他业务产物。恢复包中的 `coverage.taskWorkingDirectories=false` 和 `coverage.externallyLocatedLogs=false` 是强制边界，不能把该包称为全业务备份。外部产物必须使用同一恢复点附近的独立备份；唯一媒体对象按 SHA-256 去重增量备份，`videos/<run-id>` 不进入长期备份，`standard_videos` 单独备份。
+平台恢复检查点不包含 `CODEX_TASK_WORKSPACE_ROOTS` 下的任务工作目录，也不包含 `data/sessions/*/skill-report-artifacts` 或位于平台数据和 runtime 之外的 pytest 日志、报告和其他业务产物。恢复包中的 `coverage.taskWorkingDirectories=false` 和 `coverage.externallyLocatedLogs=false` 是强制边界，不能把该包称为全业务备份。当前策略不备份视频、音频、图片、播放清单、切片和播放缓存，也不启动外部媒体增量备份；`videos/<run-id>`、源视频和 `standard_videos` 不进入平台备份。检查点的 `source.excluded.mediaFiles` 显示排除计数。
 
-配置导出同样不是完整备份。日常保护边界为：SQLite/WAL/平台运行数据由在线数据库备份和恢复检查点负责；项目代码由 Git 负责；唯一媒体对象由 SHA-256 去重增量备份负责；`videos/<run-id>` 不进入长期备份；`standard_videos` 独立备份；已托管报告只按平台 30 天策略保留，不再次打包。需要离线副本时，按[紧急离线备份](DATA_AND_RECOVERY.md#紧急离线备份)执行，并明确排除已托管报告和临时视频目录。
+配置导出同样不是完整备份。日常保护边界为：SQLite/WAL/平台运行数据由在线数据库备份和恢复检查点负责；项目代码由 Git 负责；媒体文件不备份；`videos/<run-id>`、源视频和 `standard_videos` 由原有生命周期或操作者管理；已托管报告只按平台 30 天策略保留，不再次打包。需要离线副本时，按[紧急离线备份](DATA_AND_RECOVERY.md#紧急离线备份)执行，并明确排除已托管报告和临时视频目录。
 
 恢复 SQLite 在线备份时也必须先停服，先保存目标环境现状，再把已复验包中的 `database.db` 恢复为数据目录的 `codex-tasks.db`，删除旧 `-wal/-shm`，设置 `0600` 后启动。若没有同步恢复对应原始日志和 runtime，历史中的文件引用可能缺失，只能作为数据库级恢复使用。恢复后检查健康接口、任务状态、历史、工作日志、审计和一个非生产任务。详细步骤见[数据与恢复](DATA_AND_RECOVERY.md)。
 

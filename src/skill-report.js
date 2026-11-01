@@ -314,6 +314,13 @@ function normalizeSkillReport(input) {
     metrics: metrics.map(normalizeMetric),
     sections: sections.map(normalizeSection),
   };
+  const relatedReportKeys = input.relatedReportKeys ?? input.related_report_keys;
+  if (relatedReportKeys != null) {
+    if (!Array.isArray(relatedReportKeys)) throw reportError('relatedReportKeys must be an array');
+    report.relatedReportKeys = [...new Set(relatedReportKeys.map((key, index) => (
+      identifier(key, `relatedReportKeys[${index}]`)
+    )))];
+  }
   if (new Set(report.metrics.map((metric) => metric.key)).size !== report.metrics.length) {
     throw reportError('metrics contains duplicate keys');
   }

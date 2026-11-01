@@ -16,6 +16,7 @@ const TEMPLATE_OPTIONS = new Map([
   ['--title', 'title'], ['--status', 'status'], ['--summary', 'summary'],
   ['--external-attempt', 'externalAttemptId'], ['--command', 'command'],
   ['--working-dir', 'workingDirectory'], ['--output', 'output'],
+  ['--related-reports', 'relatedReports'],
 ]);
 
 function fail(message, code = 64) {

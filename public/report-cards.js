@@ -41,6 +41,8 @@
       artifacts: [], metrics: [], sections: [section],
     };
     if (options.externalAttemptId) report.executionEvidence = { externalAttemptId: options.externalAttemptId };
+    if (options.relatedReports) report.relatedReportKeys = Array.isArray(options.relatedReports)
+      ? options.relatedReports : options.relatedReports.split(',').map(key => key.trim()).filter(Boolean);
     if (options.command) report.primaryExecution = {
       label: options.title || card.labels.zh, command: options.command,
       workingDirectory: options.workingDirectory || '', status: report.status,
@@ -48,5 +50,62 @@
     return report;
   }
 
-  return { definitions, definition, createTemplate };
+  function combinedStatus(statuses) {
+    if (!statuses.length) return 'unknown';
+    if (statuses.includes('running')) return 'running';
+    if (statuses.includes('pending')) return statuses.every(status => status === 'pending') ? 'pending' : 'running';
+    if (statuses.includes('blocked')) return 'blocked';
+    if (statuses.every(status => status === 'succeeded')) return 'succeeded';
+    if (statuses.every(status => status === 'failed')) return 'failed';
+    if (statuses.every(status => status === 'cancelled')) return 'cancelled';
+    if (statuses.every(status => status === 'unknown')) return 'unknown';
+    return 'partial';
+  }
+
+  function groupReports(reports, options = {}) {
+    const rerunKeys = options.rerunKeys || new Set();
+    const isRerun = report => rerunKeys.has(report.reportKey || report.id);
+    const byKey = new Map(reports.map(report => [report.reportKey, report]));
+    const parents = new Map();
+    for (const parent of reports) {
+      for (const key of parent.relatedReportKeys || []) {
+        const child = byKey.get(key);
+        if (!child || child === parent || parents.has(child)) continue;
+        // A rerun stage stays visible even when a final summary references it.
+        if (isRerun(child) && !isRerun(parent)) continue;
+        let ancestor = parent;
+        while (ancestor && ancestor !== child) ancestor = parents.get(ancestor);
+        if (!ancestor) parents.set(child, parent);
+      }
+    }
+    const children = new Map();
+    for (const [child, parent] of parents) {
+      if (!children.has(parent)) children.set(parent, []);
+      children.get(parent).push(child);
+    }
+    const descendants = report => (children.get(report) || []).flatMap(child => [child, ...descendants(child)]);
+    const groups = reports.filter(report => !parents.has(report))
+      .map(report => ({ report, relatedReports: descendants(report) }));
+    const reruns = groups.filter(group => isRerun(group.report));
+    if (reruns.length < 2) return groups;
+    const members = [...new Set(reruns.flatMap(group => [group.report, ...group.relatedReports]))];
+    const latest = [...members].sort((left, right) => (
+      Date.parse(right.publishedAt || 0) - Date.parse(left.publishedAt || 0)
+    ))[0];
+    const merged = {
+      report: {
+        reportKey: 'presentation:reruns', presentationGroup: 'rerun', reportType: 'test-result',
+        title: options.rerunTitle || 'Rerun results',
+        summary: options.rerunSummary?.(members.length) || `${members.length} rerun reports`,
+        status: combinedStatus(reruns.map(group => group.report.status || 'unknown')),
+        metrics: [], sections: [], artifacts: [],
+        publishedAt: latest.publishedAt || '',
+      },
+      relatedReports: members,
+    };
+    const first = groups.indexOf(reruns[0]);
+    return groups.flatMap((group, index) => index === first ? [merged] : isRerun(group.report) ? [] : [group]);
+  }
+
+  return { definitions, definition, createTemplate, groupReports, combinedStatus };
 }));

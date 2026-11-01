@@ -11,12 +11,27 @@ const {
   CODEX_SOURCE_SKILLS_DIR,
   WORKSPACE_CODEX_SKILLS_DIR,
   SKILL_SNAPSHOTS_DIR,
+  TASK_SESSION_ROOT,
 } = require('./paths');
+const {
+  normalizeWorkspaceMode,
+  normalizeArchiveMode,
+  normalizeArchiveState,
+  taskSessionPaths,
+  prepareTaskSessionWorkspace,
+  taskSessionRoot,
+  readSourceManifest,
+  inventorySessionWorkspace,
+  sealSessionWorkspace,
+  reopenSessionSource,
+  taskAgentDirectory,
+} = require('./task-session-workspace');
 const { getDatabase } = require('./database');
 const { pathContains, resolveWorkingDir } = require('./workspaces');
 const { validateTaskBody, validateSkillBody } = require('./validation');
 const { normalizeArtifactDeclarations, normalizeSkillReport } = require('./skill-report');
 const { measureTaskStorage } = require('./task-storage');
+const { retainTaskSessionHistory } = require('./task-session-history');
 const {
   readVideoCheckReport,
   rewriteVideoCheckReport,
@@ -31,6 +46,12 @@ const {
   unique,
   toArray,
 } = require('./utils');
+const {
+  nextCronAt,
+  normalizeSeriesId,
+  parseCron,
+  validateTimeZone,
+} = require('./task-series');
 const {
   pathEntryExists,
   ensureManagedDirectory,
@@ -77,6 +98,7 @@ const MAX_PYTEST_MEDIA_MANIFEST_BYTES = 8 * 1024 * 1024;
 const MAX_PYTEST_MEDIA_RESOURCES = 10000;
 const MAX_PYTEST_ARTIFACT_ALIAS_ENTRIES = 20000;
 const MAX_PYTEST_MEDIA_KEY_LENGTH = 512;
+const IN_PLACE_TEXT_EXTENSIONS = new Set(['.html', '.htm', '.txt', '.log', '.md', '.js', '.json', '.css', '.xml', '.m3u8', '.mpd']);
 const SCHEDULE_CLAIM_TTL_MS = 15000;
 const DEFAULT_EXTERNAL_CHECK_SECONDS = 300;
 const MIN_EXTERNAL_CHECK_SECONDS = 5;
@@ -85,6 +107,15 @@ const ACTIVE_EXTERNAL_STATUSES = ['running'];
 const ACTIVE_SCHEDULE_STATUSES = ['pending', 'leased', 'dispatched'];
 const ACTIVE_STATUSES = ['queued', 'running', 'recovering', 'stopping', 'waiting_scheduled'];
 const PLATFORM_MAINTENANCE_KEY = 'platform_maintenance';
+const RUNTIME_RELEASE_KEY_PREFIX = 'task_runtime_release:';
+const SERIES_QUEUE_BLOCKED_SQL = `EXISTS (
+  SELECT 1 FROM task_series_runs current_run
+  JOIN task_series_runs previous_run ON previous_run.release_cycle_id=current_run.release_cycle_id
+    AND previous_run.run_sequence<current_run.run_sequence
+  JOIN tasks previous_task ON previous_task.id=previous_run.task_id
+  WHERE current_run.task_id=tasks.id AND current_run.overlap_policy='queue'
+    AND previous_task.status IN ('queued','running','recovering','stopping','waiting_scheduled')
+)`;
 const skillReportResourceVerificationCache = new Map();
 const TASK_RETENTION_STATUS_KEY = 'task_retention_status';
 const TASK_RETENTION_DAYS = 30;
@@ -594,11 +625,20 @@ function readSkillMarkdownFile(baseDir) {
 
 function rowToSession(row) {
   if (!row) return null;
+  const workspaceMode = normalizeWorkspaceMode(row.workspace_mode);
   return {
     id: row.id,
     name: row.name,
     objective: row.objective,
     workingDir: row.working_dir,
+    workspaceMode,
+    sessionRoot: row.session_root || '',
+    sourceRoot: row.source_root || '',
+    sourceMode: row.source_mode || (workspaceMode === 'session-clone' ? 'session-clone' : 'shared-repo'),
+    sourceCommit: row.source_commit || '',
+    sourceManifestHash: row.source_manifest_hash || '',
+    archiveMode: normalizeArchiveMode(row.archive_mode, workspaceMode),
+    archiveState: normalizeArchiveState(row.archive_state, workspaceMode),
     notes: row.notes,
     project: normalizeTaskProject(row.project),
     tags: normalizeTaskTags(parseJson(row.tags_json, [])),
@@ -658,11 +698,34 @@ function enrichSessionsWithScheduling(db, sessions) {
     GROUP BY task_id
   `).all(...ACTIVE_SCHEDULE_STATUSES, ...ids)
     .map((row) => [row.task_id, { count: Number(row.count), nextDueAt: row.next_due_at || '' }]));
+  const seriesRuns = new Map(db.prepare(`
+    SELECT r.task_id, r.id AS series_run_id, r.release_cycle_id, r.schedule_id,
+           r.scheduled_for, r.trigger_type, r.run_sequence,
+           c.name AS release_cycle_name, c.release_key, c.status AS release_cycle_status
+    FROM task_series_runs r
+    JOIN release_cycles c ON c.id=r.release_cycle_id
+    WHERE r.task_id IN (${placeholders})
+    ORDER BY r.scheduled_for DESC, r.run_sequence DESC
+  `).all(...ids).reduce((map, row) => {
+    if (!map.has(row.task_id)) map.set(row.task_id, row);
+    return map;
+  }, new Map()));
   return sessions.map((session) => ({
     ...session,
     activeExternalAttempts: externalCounts.get(session.id) || 0,
     activeScheduledJobs: schedules.get(session.id)?.count || 0,
     nextScheduledAt: schedules.get(session.id)?.nextDueAt || '',
+    ...(seriesRuns.has(session.id) ? {
+      releaseCycleId: seriesRuns.get(session.id).release_cycle_id,
+      releaseCycleName: seriesRuns.get(session.id).release_cycle_name,
+      releaseKey: seriesRuns.get(session.id).release_key,
+      releaseCycleStatus: seriesRuns.get(session.id).release_cycle_status,
+      scheduleId: seriesRuns.get(session.id).schedule_id || '',
+      scheduledFor: seriesRuns.get(session.id).scheduled_for,
+      seriesRunId: seriesRuns.get(session.id).series_run_id,
+      seriesTriggerType: seriesRuns.get(session.id).trigger_type,
+      seriesRunSequence: Number(seriesRuns.get(session.id).run_sequence),
+    } : {}),
   }));
 }
 
@@ -857,7 +920,8 @@ function migrateLegacyData(db) {
 
 function reconcileStagedTaskFiles(db) {
   const getTaskGeneration = db.prepare('SELECT created_at FROM tasks WHERE id=?');
-  for (const parent of [SESSIONS_DIR, SKILL_SNAPSHOTS_DIR]) {
+  for (const parent of [SESSIONS_DIR, SKILL_SNAPSHOTS_DIR, TASK_SESSION_ROOT]) {
+    if (parent === TASK_SESSION_ROOT && !fs.existsSync(parent)) continue;
     ensureManagedDirectory(parent, {
       label: 'Staged task storage root',
     });
@@ -1306,6 +1370,21 @@ function listSessions(options = null) {
     clauses.push(`status IN (${statuses.map(() => '?').join(',')})`);
     params.push(...statuses);
   }
+  if (options.releaseCycleId) {
+    clauses.push(`EXISTS (
+      SELECT 1 FROM task_series_runs sr
+      WHERE sr.task_id=tasks.id AND sr.release_cycle_id=?
+    )`);
+    params.push(String(options.releaseCycleId));
+  }
+  if (options.releaseKey) {
+    clauses.push(`EXISTS (
+      SELECT 1 FROM task_series_runs sr
+      JOIN release_cycles rc ON rc.id=sr.release_cycle_id
+      WHERE sr.task_id=tasks.id AND rc.release_key=?
+    )`);
+    params.push(String(options.releaseKey));
+  }
   const maxPageSize = options.internal ? MAX_QUERY_LIMIT : MAX_SESSION_PAGE_SIZE;
   const limit = Math.min(maxPageSize, boundedLimit(options.limit, 100));
   const offset = boundedOffset(options.offset);
@@ -1316,6 +1395,377 @@ function listSessions(options = null) {
       .all(...params, limit, offset)
       .map(rowToSession),
   );
+}
+
+function rowToReleaseCycle(row, schedules = []) {
+  if (!row) return null;
+  const config = parseJson(row.config_json, {});
+  return {
+    id: row.id,
+    name: row.name,
+    project: normalizeTaskProject(row.project),
+    releaseKey: row.release_key,
+    workflow: row.workflow,
+    status: row.status,
+    taskTemplate: config.taskTemplate || {},
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    closedAt: row.closed_at || '',
+    schedules,
+  };
+}
+
+function rowToTaskSeriesSchedule(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    releaseCycleId: row.release_cycle_id,
+    cron: row.cron_expr,
+    timezone: row.timezone,
+    enabled: Boolean(row.enabled),
+    nextRunAt: row.next_run_at,
+    lastRunAt: row.last_run_at || '',
+    misfirePolicy: row.misfire_policy,
+    overlapPolicy: row.overlap_policy,
+    lastError: row.last_error || '',
+    failureCount: Number(row.failure_count || 0),
+    nextAttemptAt: row.next_attempt_at || '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function releaseCycleTaskTemplate(data, project) {
+  const template = data?.taskTemplate && typeof data.taskTemplate === 'object'
+    ? data.taskTemplate
+    : data || {};
+  const task = {
+    name: String(template.name || `${data?.name || data?.releaseKey || 'release'} regression`).trim(),
+    objective: String(template.objective || data?.objective || '').trim(),
+    workingDir: String(template.workingDir || '.').trim() || '.',
+    notes: String(template.notes || '').trim(),
+    project: normalizeTaskProject(template.project || project),
+    tags: normalizeTaskTags(template.tags || []),
+    enabled: template.enabled !== false,
+    autoResume: template.autoResume !== false,
+    maxRetries: template.maxRetries == null ? 2 : Number(template.maxRetries),
+    workspaceMode: template.workspaceMode || 'session-clone',
+    sourceMode: template.sourceMode || ((template.workspaceMode || 'session-clone') === 'session-clone' ? 'session-clone' : 'shared-repo'),
+  };
+  validateTaskBody({ id: 'series-template', ...task }, { creating: true, requireId: true });
+  return task;
+}
+
+function listReleaseCycles(options = {}) {
+  const db = ensureStorage();
+  const clauses = [];
+  const params = [];
+  if (options.project) {
+    clauses.push('c.project=?');
+    params.push(normalizeTaskProject(options.project));
+  }
+  if (options.status) {
+    const statuses = String(options.status).split(',').map((item) => item.trim()).filter(Boolean);
+    if (statuses.length) {
+      clauses.push(`c.status IN (${statuses.map(() => '?').join(',')})`);
+      params.push(...statuses);
+    }
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const rows = db.prepare(`SELECT c.*, COUNT(DISTINCT r.task_id) AS task_count,
+      MAX(r.scheduled_for) AS last_task_at
+    FROM release_cycles c
+    LEFT JOIN task_series_runs r ON r.release_cycle_id=c.id
+    ${where}
+    GROUP BY c.id ORDER BY c.updated_at DESC, c.id`).all(...params);
+  const scheduleRows = db.prepare(`SELECT * FROM task_series_schedules
+    WHERE release_cycle_id IN (${rows.length ? rows.map(() => '?').join(',') : "''"})
+    ORDER BY created_at`).all(...rows.map((row) => row.id));
+  const byCycle = new Map();
+  for (const row of scheduleRows) {
+    if (!byCycle.has(row.release_cycle_id)) byCycle.set(row.release_cycle_id, []);
+    byCycle.get(row.release_cycle_id).push(rowToTaskSeriesSchedule(row));
+  }
+  return rows.map((row) => ({
+    ...rowToReleaseCycle(row, byCycle.get(row.id) || []),
+    taskCount: Number(row.task_count || 0),
+    lastTaskAt: row.last_task_at || '',
+  }));
+}
+
+function getReleaseCycle(id) {
+  const db = ensureStorage();
+  const cycle = db.prepare('SELECT * FROM release_cycles WHERE id=?').get(normalizeSeriesId(id));
+  return cycle ? listReleaseCycles().find((item) => item.id === cycle.id) : null;
+}
+
+function createReleaseCycle(data = {}, context = {}) {
+  const id = normalizeSeriesId(data.id);
+  const releaseKey = String(data.releaseKey || id).trim();
+  if (!releaseKey || releaseKey.length > 200) throw statusError('releaseKey must be a non-empty string of at most 200 characters', 400);
+  const workflow = String(data.workflow || 'full-release-regression').trim();
+  const taskTemplate = releaseCycleTaskTemplate(data, data.project);
+  const now = nowIso();
+  const db = ensureStorage();
+  db.transaction(() => {
+    assertNoPlatformMaintenance(db);
+    if (db.prepare('SELECT 1 FROM release_cycles WHERE id=? OR release_key=?').get(id, releaseKey)) {
+      throw statusError(`Release cycle ${id} or release key ${releaseKey} already exists`, 409);
+    }
+    db.prepare(`INSERT INTO release_cycles
+      (id, name, project, release_key, workflow, status, config_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`)
+      .run(id, String(data.name || releaseKey).trim(), normalizeTaskProject(data.project), releaseKey,
+        workflow, JSON.stringify({ taskTemplate }), now, now);
+    appendAuditEvent({
+      scope: 'config', entityType: 'release_cycle', entityId: id,
+      kind: 'release_cycle.created', message: `Created release cycle ${id}`,
+      payload: { id, releaseKey, project: normalizeTaskProject(data.project), workflow },
+      actor: context.actor || 'operator', requestId: context.requestId || '',
+    }, db);
+  }).immediate();
+  return getReleaseCycle(id);
+}
+
+function createTaskSeriesSchedule(cycleId, data = {}, context = {}) {
+  const normalizedCycleId = normalizeSeriesId(cycleId);
+  const id = normalizeSeriesId(data.id);
+  const cron = String(data.cron || data.cronExpr || '').trim();
+  const timezone = validateTimeZone(data.timezone || 'Asia/Shanghai');
+  parseCron(cron);
+  if (!['once', 'skip'].includes(String(data.misfirePolicy || 'once'))) {
+    throw statusError('misfirePolicy must be once or skip', 400);
+  }
+  if (!['queue', 'skip', 'parallel'].includes(String(data.overlapPolicy || 'queue'))) {
+    throw statusError('overlapPolicy must be queue, skip, or parallel', 400);
+  }
+  const nextRunAt = nextCronAt(cron, new Date(), timezone);
+  const now = nowIso();
+  const db = ensureStorage();
+  db.transaction(() => {
+    assertNoPlatformMaintenance(db);
+    const cycle = db.prepare('SELECT * FROM release_cycles WHERE id=?').get(normalizedCycleId);
+    if (!cycle) throw statusError(`Release cycle ${normalizedCycleId} not found`, 404);
+    if (cycle.status !== 'active') throw statusError('Closed release cycles cannot receive new schedules', 409);
+    if (db.prepare('SELECT 1 FROM task_series_schedules WHERE id=?').get(id)) {
+      throw statusError(`Schedule ${id} already exists`, 409);
+    }
+    db.prepare(`INSERT INTO task_series_schedules
+      (id, release_cycle_id, cron_expr, timezone, enabled, next_run_at,
+       misfire_policy, overlap_policy, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, normalizedCycleId, cron, timezone,
+        data.enabled === false ? 0 : 1, nextRunAt,
+        data.misfirePolicy || 'once', data.overlapPolicy || 'queue', now, now);
+    appendAuditEvent({
+      scope: 'config', entityType: 'task_series_schedule', entityId: id,
+      kind: 'task_series_schedule.created', message: `Created schedule ${id}`,
+      payload: { id, releaseCycleId: normalizedCycleId, cron, timezone, nextRunAt },
+      actor: context.actor || 'operator', requestId: context.requestId || '',
+    }, db);
+  }).immediate();
+  return rowToTaskSeriesSchedule(db.prepare('SELECT * FROM task_series_schedules WHERE id=?').get(id));
+}
+
+function closeReleaseCycle(cycleId, context = {}) {
+  const id = normalizeSeriesId(cycleId);
+  const now = nowIso();
+  const db = ensureStorage();
+  db.transaction(() => {
+    assertNoPlatformMaintenance(db);
+    const cycle = db.prepare('SELECT * FROM release_cycles WHERE id=?').get(id);
+    if (!cycle) throw statusError(`Release cycle ${id} not found`, 404);
+    if (cycle.status === 'closed') return;
+    if (cycle.status === 'archived') throw statusError('Archived release cycles cannot be closed', 409);
+    db.prepare(`UPDATE release_cycles SET status='closed', closed_at=?, updated_at=? WHERE id=?`)
+      .run(now, now, id);
+    db.prepare(`UPDATE task_series_schedules SET enabled=0, updated_at=?
+      WHERE release_cycle_id=? AND enabled=1`).run(now, id);
+    appendAuditEvent({
+      scope: 'config', entityType: 'release_cycle', entityId: id,
+      kind: 'release_cycle.closed', message: `Closed release cycle ${id}`,
+      payload: { id, closedAt: now }, actor: context.actor || 'operator',
+      requestId: context.requestId || '',
+    }, db);
+  }).immediate();
+  return getReleaseCycle(id);
+}
+
+function releaseCycleTaskId(scheduleId, scheduledFor) {
+  const digest = crypto.createHash('sha256').update(`${scheduleId}:${scheduledFor}`).digest('hex').slice(0, 24);
+  return `series-${digest}`;
+}
+
+function createReleaseCycleTaskInTransaction(db, cycle, options = {}, context = {}) {
+  if (cycle.status !== 'active') throw statusError('Closed release cycles cannot create new tasks', 409);
+  const config = parseJson(cycle.config_json, {});
+  const template = releaseCycleTaskTemplate({ ...config, project: cycle.project }, cycle.project);
+  const scheduledFor = String(options.scheduledFor || nowIso());
+  const triggerType = options.triggerType === 'cron' ? 'cron' : 'manual';
+  const scheduleId = options.scheduleId ? normalizeSeriesId(options.scheduleId) : null;
+  if (scheduleId && db.prepare('SELECT 1 FROM task_series_runs WHERE schedule_id=? AND scheduled_for=?')
+    .get(scheduleId, scheduledFor)) {
+    const existing = db.prepare(`SELECT t.* FROM task_series_runs r JOIN tasks t ON t.id=r.task_id
+      WHERE r.schedule_id=? AND r.scheduled_for=?`).get(scheduleId, scheduledFor);
+    return { session: enrichSessionsWithScheduling(db, [rowToSession(existing)])[0], created: false };
+  }
+  const identity = scheduleId
+    ? `${scheduleId}:${scheduledFor}`
+    : (context.idempotencyKey || scheduledFor);
+  const taskId = canonicalTaskId(options.taskId || releaseCycleTaskId(cycle.id, identity));
+  const existingRun = db.prepare('SELECT task_id FROM task_series_runs WHERE task_id=?').get(taskId);
+  if (existingRun) {
+    const existingTask = db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId);
+    return { session: enrichSessionsWithScheduling(db, [rowToSession(existingTask)])[0], created: false };
+  }
+  const dateLabel = scheduledFor.slice(0, 10);
+  const taskBody = {
+    ...template,
+    ...options.taskBody,
+    id: taskId,
+    name: String(options.taskBody?.name || `${template.name} · ${dateLabel}`).trim(),
+    objective: String(options.taskBody?.objective || template.objective).trim(),
+    project: cycle.project,
+    tags: normalizeTaskTags([...(template.tags || []), `release:${cycle.release_key}`]),
+    releaseCycleId: undefined,
+  };
+  saveSessionInTransaction(db, taskId, { ...taskBody, status: 'idle' }, { ...context, createOnly: true });
+  const session = queueSessionRunInTransaction(
+    db, taskId, taskBody.objective,
+    options.idempotencyKey || context.idempotencyKey || `series:${scheduleId || cycle.id}:${scheduledFor}`,
+    context, 'run', true,
+  );
+  const runId = eventId('series-run');
+  const sequence = Number(db.prepare('SELECT COALESCE(MAX(run_sequence), 0) AS value FROM task_series_runs WHERE release_cycle_id=?')
+    .get(cycle.id).value) + 1;
+  db.prepare(`INSERT INTO task_series_runs
+      (id, release_cycle_id, schedule_id, task_id, scheduled_for, trigger_type, run_sequence, overlap_policy, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'created', ?)`)
+    .run(runId, cycle.id, scheduleId, taskId, scheduledFor, triggerType, sequence,
+      options.overlapPolicy || 'parallel', nowIso());
+  return { session: enrichSessionsWithScheduling(db, [rowToSession(session)])[0], created: true, runId };
+}
+
+function createReleaseCycleTask(cycleId, data = {}, context = {}) {
+  const id = normalizeSeriesId(cycleId);
+  const db = ensureStorage();
+  return db.transaction(() => {
+    assertNoPlatformMaintenance(db);
+    const cycle = db.prepare('SELECT * FROM release_cycles WHERE id=?').get(id);
+    if (!cycle) throw statusError(`Release cycle ${id} not found`, 404);
+    return createReleaseCycleTaskInTransaction(db, cycle, {
+      ...data, taskBody: data, triggerType: 'manual', scheduledFor: data.scheduledFor || nowIso(),
+    }, context);
+  }).immediate();
+}
+
+function listReleaseCycleTasks(cycleId, options = {}) {
+  return listSessions({ ...options, releaseCycleId: normalizeSeriesId(cycleId), internal: true });
+}
+
+function linkTaskToReleaseCycle(taskId, cycleId, options = {}, context = {}) {
+  const normalizedTaskId = canonicalTaskId(taskId);
+  const normalizedCycleId = normalizeSeriesId(cycleId);
+  const db = ensureStorage();
+  return db.transaction(() => {
+    assertNoPlatformMaintenance(db);
+    return linkTaskToReleaseCycleInTransaction(db, normalizedTaskId, normalizedCycleId, options, context);
+  }).immediate();
+}
+
+function linkTaskToReleaseCycleInTransaction(db, taskId, cycleId, options = {}, context = {}) {
+  const normalizedTaskId = canonicalTaskId(taskId);
+  const normalizedCycleId = normalizeSeriesId(cycleId);
+  const task = db.prepare('SELECT * FROM tasks WHERE id=?').get(normalizedTaskId);
+  const cycle = db.prepare('SELECT * FROM release_cycles WHERE id=?').get(normalizedCycleId);
+  if (!task) throw statusError(`Session ${normalizedTaskId} not found`, 404);
+  if (!cycle) throw statusError(`Release cycle ${normalizedCycleId} not found`, 404);
+  const existing = db.prepare('SELECT * FROM task_series_runs WHERE task_id=?').get(normalizedTaskId);
+  if (existing) {
+    if (existing.release_cycle_id !== normalizedCycleId) throw statusError('Task belongs to a different release cycle', 409);
+    return enrichSessionsWithScheduling(db, [rowToSession(task)])[0];
+  }
+  if (cycle.status !== 'active') throw statusError('Closed release cycles cannot receive new Tasks', 409);
+  const sequence = Number(db.prepare('SELECT COALESCE(MAX(run_sequence), 0) AS value FROM task_series_runs WHERE release_cycle_id=?')
+    .get(normalizedCycleId).value) + 1;
+  db.prepare(`INSERT INTO task_series_runs
+    (id, release_cycle_id, task_id, scheduled_for, trigger_type, run_sequence, status, created_at)
+    VALUES (?, ?, ?, ?, 'manual', ?, 'created', ?)`)
+    .run(eventId('series-run'), normalizedCycleId, normalizedTaskId,
+      String(options.scheduledFor || nowIso()), sequence, nowIso());
+  appendAuditEvent({
+    scope: 'config', taskId: normalizedTaskId, entityType: 'release_cycle', entityId: normalizedCycleId,
+    kind: 'release_cycle.task_linked', message: `Linked Task ${normalizedTaskId} to release cycle ${normalizedCycleId}`,
+    payload: { taskId: normalizedTaskId, releaseCycleId: normalizedCycleId },
+    actor: context.actor || 'operator', requestId: context.requestId || '',
+  }, db);
+  return enrichSessionsWithScheduling(db, [rowToSession(task)])[0];
+}
+
+function dispatchTaskSeriesSchedule(db, scheduleId, now, workerId) {
+  if (platformMaintenanceFromDatabase(db)) return null;
+  const schedule = db.prepare(`SELECT s.* FROM task_series_schedules s
+    JOIN release_cycles c ON c.id=s.release_cycle_id
+    WHERE s.id=? AND s.enabled=1 AND c.status='active' AND s.next_run_at<=?
+      AND (s.next_attempt_at='' OR s.next_attempt_at<=?)`).get(scheduleId, now, now);
+  if (!schedule) return null;
+  const cycle = db.prepare('SELECT * FROM release_cycles WHERE id=?').get(schedule.release_cycle_id);
+  const scheduledFor = schedule.next_run_at;
+  const nextRunAt = nextCronAt(schedule.cron_expr, new Date(now), schedule.timezone);
+  const missed = nextCronAt(schedule.cron_expr, new Date(scheduledFor), schedule.timezone) <= now;
+  const active = db.prepare(`SELECT 1 FROM task_series_runs r JOIN tasks t ON t.id=r.task_id
+    WHERE r.release_cycle_id=? AND t.status IN ('queued','running','recovering','stopping','waiting_scheduled') LIMIT 1`)
+    .get(cycle.id);
+  const skipReason = missed && schedule.misfire_policy === 'skip'
+    ? 'missed_schedule' : (active && schedule.overlap_policy === 'skip' ? 'previous_run_active' : '');
+  const run = skipReason ? { created: false, skipped: skipReason } : createReleaseCycleTaskInTransaction(db, cycle, {
+    scheduleId: schedule.id,
+    scheduledFor,
+    triggerType: 'cron',
+    overlapPolicy: schedule.overlap_policy,
+  }, { actor: `series-scheduler:${workerId}` });
+  db.prepare(`UPDATE task_series_schedules SET next_run_at=?, last_run_at=?, updated_at=?,
+    last_error='', failure_count=0, next_attempt_at='' WHERE id=?`)
+    .run(nextRunAt, skipReason ? schedule.last_run_at : scheduledFor, now, schedule.id);
+  if (skipReason) appendAuditEvent({
+    scope: 'runtime', entityType: 'task_series_schedule', entityId: schedule.id,
+    kind: 'task_series_schedule.skipped', message: `Skipped schedule ${schedule.id}: ${skipReason}`,
+    payload: { scheduledFor, reason: skipReason, nextRunAt }, actor: `series-scheduler:${workerId}`,
+  }, db);
+  return { scheduleId: schedule.id, ...run };
+}
+
+function claimDueTaskSeriesSchedules(workerId, limit = 10) {
+  const db = ensureStorage();
+  if (platformMaintenanceFromDatabase(db)) return [];
+  const now = nowIso();
+  const due = db.prepare(`SELECT s.id FROM task_series_schedules s
+      JOIN release_cycles c ON c.id=s.release_cycle_id
+      WHERE s.enabled=1 AND s.next_run_at<=? AND c.status='active'
+        AND (s.next_attempt_at='' OR s.next_attempt_at<=?)
+      ORDER BY s.next_run_at LIMIT ?`).all(now, now, Math.max(1, Math.min(50, Number(limit || 10))));
+  const result = [];
+  for (const candidate of due) {
+    try {
+      const dispatched = db.transaction(() => dispatchTaskSeriesSchedule(db, candidate.id, now, workerId)).immediate();
+      if (dispatched) result.push(dispatched);
+    } catch (error) {
+      // One invalid plan must not roll back other plans or restart active Turns.
+      db.transaction(() => {
+        const schedule = db.prepare('SELECT * FROM task_series_schedules WHERE id=?').get(candidate.id);
+        if (!schedule) return;
+        const failures = Number(schedule.failure_count || 0) + 1;
+        const retryAt = new Date(Date.now() + Math.min(300000, 30000 * 2 ** Math.min(failures - 1, 4))).toISOString();
+        db.prepare(`UPDATE task_series_schedules SET last_error=?, failure_count=?, next_attempt_at=?, updated_at=? WHERE id=?`)
+          .run(String(error.message), failures, retryAt, nowIso(), candidate.id);
+        appendAuditEvent({ scope: 'runtime', entityType: 'task_series_schedule', entityId: candidate.id,
+          kind: 'task_series_schedule.failed', level: 'error', message: `Schedule ${candidate.id} failed: ${error.message}`,
+          payload: { retryAt, failures }, actor: `series-scheduler:${workerId}` }, db);
+      }).immediate();
+      result.push({ scheduleId: candidate.id, created: false, error: error.message });
+    }
+  }
+  return result;
 }
 
 function sessionStats() {
@@ -1500,48 +1950,77 @@ function saveSessionInTransaction(db, id, data, context = {}) {
   const normalizedId = canonicalTaskId(id);
   const existing = db.prepare('SELECT * FROM tasks WHERE id = ?').get(normalizedId);
   if (existing && context.createOnly) throw statusError(`Session ${normalizedId} already exists`, 409);
+  const workspaceMode = normalizeWorkspaceMode(data.workspaceMode ?? existing?.workspace_mode);
   validateTaskBody({ ...data, id: normalizedId }, { creating: !existing, requireId: true });
+  if (existing?.status === 'completed') throw statusError('Completed sessions are immutable history records', 409);
+  if (existing && ACTIVE_STATUSES.includes(existing.status)) throw statusError('Active sessions cannot be edited', 409);
+  if (existing && workspaceMode !== existing.workspace_mode) {
+    throw statusError('Create a new Task to change its workspace mode', 409);
+  }
+  if (!existing && data.releaseCycleId) {
+    const cycle = db.prepare('SELECT status FROM release_cycles WHERE id=?').get(normalizeSeriesId(data.releaseCycleId));
+    if (!cycle) throw statusError('Release cycle not found', 404);
+    if (cycle.status !== 'active') throw statusError('Closed release cycles cannot receive new Tasks', 409);
+  }
+  const sessionPaths = workspaceMode === 'session-clone'
+    ? prepareTaskSessionWorkspace(normalizedId)
+    : null;
+  const effectiveWorkingDir = workspaceMode === 'session-clone'
+    ? sessionPaths.root
+    : (data.workingDir ?? existing?.working_dir ?? '.');
+  validateTaskBody({ ...data, id: normalizedId, workingDir: effectiveWorkingDir, workspaceMode }, { creating: !existing, requireId: true });
   const now = nowIso();
+  const sourceRoot = workspaceMode === 'session-clone'
+    ? (existing?.source_root || sessionPaths.source)
+    : '';
+  const sessionRoot = workspaceMode === 'session-clone'
+    ? (existing?.session_root || sessionPaths.root)
+    : '';
+  const archiveMode = normalizeArchiveMode(undefined, workspaceMode);
+  const archiveState = normalizeArchiveState(existing?.archive_state, workspaceMode);
   if (existing) {
-    if (existing.status === 'completed') {
-      throw statusError('Completed sessions are immutable history records', 409);
-    }
-    if (ACTIVE_STATUSES.includes(existing.status)) {
-      throw statusError('Active sessions cannot be edited', 409);
-    }
-    resolveWorkingDir(data.workingDir ?? existing.working_dir);
+    resolveWorkingDir(effectiveWorkingDir);
     db.prepare(`
       UPDATE tasks SET
         name = ?, objective = ?, working_dir = ?, notes = ?, project = ?, tags_json = ?, enabled = ?,
-        auto_resume = ?, max_retries = ?, version = version + 1, updated_at = ?
+        auto_resume = ?, max_retries = ?, workspace_mode = ?, session_root = ?, source_root = ?,
+        source_mode = ?, source_commit = ?, source_manifest_hash = ?, archive_mode = ?, archive_state = ?,
+        version = version + 1, updated_at = ?
       WHERE id = ?
     `).run(
       String(data.name ?? existing.name).trim(),
       String(data.objective ?? existing.objective).trim(),
-      String(data.workingDir ?? existing.working_dir).trim() || '.',
+      effectiveWorkingDir,
       String(data.notes ?? existing.notes).trim(),
       normalizeTaskProject(data.project ?? existing.project),
       JSON.stringify(normalizeTaskTags(data.tags ?? parseJson(existing.tags_json, []))),
       (data.enabled ?? Boolean(existing.enabled)) ? 1 : 0,
       (data.autoResume ?? Boolean(existing.auto_resume)) ? 1 : 0,
       Math.min(MAX_TASK_RETRIES, Math.max(0, Number(data.maxRetries ?? existing.max_retries ?? 2))),
+      workspaceMode, sessionRoot, sourceRoot,
+      String(data.sourceMode ?? existing.source_mode ?? (workspaceMode === 'session-clone' ? 'session-clone' : 'shared-repo')),
+      String(data.sourceCommit ?? existing.source_commit ?? ''),
+      String(data.sourceManifestHash ?? existing.source_manifest_hash ?? ''),
+      archiveMode, archiveState,
       now,
       normalizedId,
     );
   } else {
     const status = normalizeLegacyStatus(data.status || 'idle');
     if (!['idle', 'completed'].includes(status)) throw statusError('New sessions must start in idle state', 400);
-    resolveWorkingDir(data.workingDir || '.');
+    resolveWorkingDir(effectiveWorkingDir);
     db.prepare(`
       INSERT INTO tasks (
         id, name, objective, working_dir, notes, project, tags_json, enabled, status, summary,
         last_run_at, last_finished_at, archived_at, run_count, current_pid,
         persistent_session_key, auto_resume, max_retries, retry_count, recovery_count,
-        last_brief, last_error, recovery_state, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        last_brief, last_error, recovery_state, workspace_mode, session_root, source_root,
+        source_mode, source_commit, source_manifest_hash, archive_mode, archive_state,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       normalizedId, String(data.name || normalizedId).trim(), String(data.objective || '').trim(),
-      String(data.workingDir || '.').trim() || '.', String(data.notes || '').trim(),
+      effectiveWorkingDir, String(data.notes || '').trim(),
       normalizeTaskProject(data.project), JSON.stringify(normalizeTaskTags(data.tags)),
       data.enabled === false ? 0 : 1,
       status, String(data.summary || ''), String(data.lastRunAt || ''), String(data.lastFinishedAt || ''),
@@ -1550,6 +2029,9 @@ function saveSessionInTransaction(db, id, data, context = {}) {
       Math.min(MAX_TASK_RETRIES, Math.max(0, Number(data.maxRetries ?? 2))), Number(data.retryCount || 0),
       Number(data.recoveryCount || 0), String(data.lastBrief || ''),
       String(data.lastError || ''), status === 'completed' ? 'archived' : String(data.recoveryState || status),
+      workspaceMode, sessionRoot, sourceRoot,
+      String(data.sourceMode || (workspaceMode === 'session-clone' ? 'session-clone' : 'shared-repo')),
+      String(data.sourceCommit || ''), String(data.sourceManifestHash || ''), archiveMode, archiveState,
       String(data.createdAt || now), now,
     );
   }
@@ -1562,6 +2044,8 @@ function saveSessionInTransaction(db, id, data, context = {}) {
       ...(data.name != null ? { name: data.name } : {}),
       ...(data.objective != null ? { objective: data.objective } : {}),
       ...(data.workingDir != null ? { workingDir: data.workingDir } : {}),
+      ...(data.workspaceMode != null ? { workspaceMode } : {}),
+      ...(data.sourceMode != null ? { sourceMode: data.sourceMode } : {}),
       ...(data.notes != null ? { notes: data.notes } : {}),
       ...(data.project != null ? { project: normalizeTaskProject(data.project) } : {}),
       ...(data.tags != null ? { tags: normalizeTaskTags(data.tags) } : {}),
@@ -1571,6 +2055,9 @@ function saveSessionInTransaction(db, id, data, context = {}) {
     },
     actor: context.actor || 'operator', requestId: context.requestId || '',
   }, db);
+  if (data.releaseCycleId) {
+    return linkTaskToReleaseCycleInTransaction(db, normalizedId, data.releaseCycleId, {}, context);
+  }
   return rowToSession(db.prepare('SELECT * FROM tasks WHERE id=?').get(normalizedId));
 }
 
@@ -1580,6 +2067,124 @@ function saveSession(id, data, context = {}) {
     assertNoPlatformMaintenance(db);
     return saveSessionInTransaction(db, id, data, context);
   }).immediate();
+}
+
+function updateTaskSourceMetadata(taskId, data = {}, context = {}) {
+  const db = ensureStorage();
+  const normalizedId = canonicalTaskId(taskId);
+  return db.transaction(() => {
+    assertNoPlatformMaintenance(db);
+    const task = db.prepare('SELECT * FROM tasks WHERE id=?').get(normalizedId);
+    if (!task) throw statusError(`Session ${normalizedId} not found`, 404);
+    if (task.status === 'completed') throw statusError('Completed sessions are immutable history records', 409);
+    if (task.workspace_mode !== 'session-clone') {
+      throw statusError('Source metadata is only available for session-clone tasks', 409);
+    }
+    const paths = taskSessionPaths(normalizedId);
+    const sourceRoot = path.resolve(String(data.sourceRoot || paths.source));
+    if (sourceRoot !== path.resolve(paths.source)) {
+      throw statusError('Source root must be the Task session source directory', 409);
+    }
+    const source = readSourceManifest(normalizedId);
+    const sourceCommit = String(data.sourceCommit || source.manifest.commit).trim();
+    const sourceManifestHash = String(data.sourceManifestHash || source.hash).trim();
+    if (sourceCommit !== source.manifest.commit || sourceManifestHash !== source.hash) {
+      throw statusError('Source metadata does not match the Session source manifest', 409);
+    }
+    if (task.source_commit && task.source_commit !== sourceCommit) {
+      throw statusError('The frozen Task source commit cannot change', 409);
+    }
+    if (sourceCommit && !/^[0-9a-f]{40,64}$/i.test(sourceCommit)) {
+      throw statusError('Source commit must be a Git SHA', 400);
+    }
+    if (sourceManifestHash && !/^[0-9a-f]{64}$/i.test(sourceManifestHash)) {
+      throw statusError('Source manifest hash must be SHA-256', 400);
+    }
+    const sourceMode = String(data.sourceMode || 'session-clone').trim() || 'session-clone';
+    if (sourceMode !== 'session-clone') throw statusError('Source mode must be session-clone', 400);
+    const archiveState = normalizeArchiveState(data.archiveState || 'active', 'session-clone');
+    if (!['active', 'pending'].includes(archiveState)) throw statusError('Archive state is set by platform verification', 409);
+    db.prepare(`
+      UPDATE tasks SET source_root=?, source_mode=?, source_commit=?, source_manifest_hash=?,
+        archive_state=?, version=version+1, updated_at=? WHERE id=?
+    `).run(sourceRoot, sourceMode, sourceCommit, sourceManifestHash, archiveState, nowIso(), normalizedId);
+    insertSessionWorklog(db, normalizedId, {
+      kind: 'task.source.updated',
+      message: `Updated frozen source metadata for ${normalizedId}`,
+      payload: { sourceRoot, sourceMode, sourceCommit, sourceManifestHash, archiveState },
+      actor: context.actor || 'release-pipeline', requestId: context.requestId || '',
+    });
+    appendAuditEvent({
+      scope: 'execution', taskId: normalizedId, entityType: 'task-source', entityId: normalizedId,
+      kind: 'task.source.updated', message: `Updated source metadata for ${normalizedId}`,
+      payload: { sourceRoot, sourceMode, sourceCommit, sourceManifestHash, archiveState },
+      actor: context.actor || 'release-pipeline', requestId: context.requestId || '',
+    }, db);
+    return rowToSession(db.prepare('SELECT * FROM tasks WHERE id=?').get(normalizedId));
+  }).immediate();
+}
+
+async function sealPendingSessionWorkspace(taskId = '') {
+  const db = ensureStorage();
+  if (platformMaintenanceFromDatabase(db)) return;
+  const task = db.prepare(`SELECT * FROM tasks WHERE workspace_mode='session-clone'
+    AND archive_state='pending' AND status='waiting_review' AND source_commit<>''
+    AND NOT EXISTS (SELECT 1 FROM skill_report_artifact_jobs j WHERE j.task_id=tasks.id
+    AND j.status IN ('pending','processing','retry')) AND (?='' OR id=?) LIMIT 1`).get(taskId, taskId);
+  if (!task || trackingCounts(db, task.id).external || taskRuntimeActivity(db, task.id).active) return;
+  try {
+    const inventory = await inventorySessionWorkspace(task.id);
+    if (inventory.sourceCommit !== task.source_commit || inventory.sourceManifestHash !== task.source_manifest_hash) {
+      throw new Error('Source archive differs from the frozen Task source');
+    }
+    db.transaction(() => {
+      const current = db.prepare('SELECT * FROM tasks WHERE id=? AND created_at=?').get(task.id, task.created_at);
+      if (!current || current.version !== task.version || current.status !== 'waiting_review' || trackingCounts(db, task.id).scheduled
+        || trackingCounts(db, task.id).external || taskRuntimeActivity(db, task.id).active
+        || platformMaintenanceFromDatabase(db)) return;
+      const inventoryHash = sealSessionWorkspace(task.id, inventory);
+      db.prepare("UPDATE tasks SET archive_state='archived', version=version+1, updated_at=? WHERE id=?")
+        .run(nowIso(), task.id);
+      insertSessionWorklog(db, task.id, { kind: 'task.workspace.archived', message: 'Session files sealed in place',
+        payload: { files: inventory.entries.filter(e => e.kind === 'file').length, inventoryHash, copiedBytes: 0 } });
+    }).immediate();
+  } catch (error) {
+    db.prepare("UPDATE tasks SET archive_state='failed', version=version+1 WHERE id=? AND created_at=? AND archive_state='pending'")
+      .run(task.id, task.created_at);
+    if (db.prepare('SELECT 1 FROM tasks WHERE id=?').get(task.id)) insertSessionWorklog(db, task.id, {
+      kind: 'task.workspace.archive_failed', level: 'warn', message: `Session archive: ${error.message}` });
+  }
+}
+
+function listTaskSourceFiles(taskId) {
+  const task = getSession(taskId);
+  if (!task) return null;
+  const manifestPath = path.join(task.sessionRoot, 'archive-manifest.json');
+  if (task.workspaceMode !== 'session-clone' || !fs.existsSync(manifestPath)) return { files: [], archiveState: task.archiveState };
+  const raw = fs.readFileSync(manifestPath);
+  const evidence = ensureStorage().prepare(`SELECT payload_json FROM worklog_events
+    WHERE task_id=? AND kind='task.workspace.archived' ORDER BY sequence DESC LIMIT 1`).get(task.id);
+  if (hashBuffer(raw) !== parseJson(evidence?.payload_json, {})?.inventoryHash) {
+    throw statusError('Session archive inventory failed integrity verification', 409);
+  }
+  const inventory = JSON.parse(raw);
+  return { taskId: task.id, commit: inventory.sourceCommit, archiveState: task.archiveState,
+    files: inventory.entries.filter(e => e.kind === 'file' && e.path.startsWith('source/premium_robot/')
+      && !e.path.startsWith('source/premium_robot/.git/')).map(e => ({ path: e.path.slice('source/premium_robot/'.length),
+      bytes: e.bytes, sha256: e.sha256 })) };
+}
+
+async function openTaskSourceFile(taskId, relativePath) {
+  const files = listTaskSourceFiles(taskId);
+  const entry = files?.files.find(e => e.path === relativePath);
+  if (!entry) return null;
+  const source = inPlaceArtifactPath(ensureStorage(), taskId, path.join(taskSessionPaths(taskId).source, relativePath));
+  const opened = await openDigestedRegularFile(source);
+  if (opened.bytes !== entry.bytes || opened.sha256 !== entry.sha256) {
+    await opened.handle.close();
+    throw statusError('Source file failed archive integrity verification', 409);
+  }
+  return { fileHandle: opened.handle, fileName: path.basename(relativePath), bytes: opened.bytes, mediaType: 'text/plain; charset=utf-8' };
 }
 
 function updateSession(session, expectedWorkerId = '') {
@@ -1598,6 +2203,9 @@ function updateSession(session, expectedWorkerId = '') {
       persistent_session_key=@persistentSessionKey, auto_resume=@autoResume, max_retries=@maxRetries,
       retry_count=@retryCount, recovery_count=@recoveryCount, last_brief=@lastBrief, last_error=@lastError,
       recovery_state=@recoveryState, skill_snapshot_id=@skillSnapshotId,
+      workspace_mode=@workspaceMode, session_root=@sessionRoot, source_root=@sourceRoot,
+      source_mode=@sourceMode, source_commit=@sourceCommit, source_manifest_hash=@sourceManifestHash,
+      archive_mode=@archiveMode, archive_state=@archiveState,
       lease_owner=@leaseOwner, lease_expires_at=@leaseExpiresAt,
       cancel_requested=@cancelRequested, version=version+1, updated_at=@updatedAt
     WHERE id=@id
@@ -1623,6 +2231,14 @@ function updateSession(session, expectedWorkerId = '') {
     maxRetries: Math.min(MAX_TASK_RETRIES, Math.max(0, Number(merged.maxRetries || 0))),
     recoveryCount: Math.max(0, Number(merged.recoveryCount || 0)),
     skillSnapshotId: merged.skillSnapshotId || null,
+    workspaceMode: normalizeWorkspaceMode(merged.workspaceMode),
+    sessionRoot: merged.sessionRoot || '',
+    sourceRoot: merged.sourceRoot || '',
+    sourceMode: merged.sourceMode || '',
+    sourceCommit: merged.sourceCommit || '',
+    sourceManifestHash: merged.sourceManifestHash || '',
+    archiveMode: normalizeArchiveMode(merged.archiveMode, merged.workspaceMode),
+    archiveState: normalizeArchiveState(merged.archiveState, merged.workspaceMode),
     expectedWorkerId: String(expectedWorkerId || ''),
     updatedAt: now,
   });
@@ -1668,7 +2284,7 @@ function deleteSession(id, context = {}) {
         .get(normalizedId)) {
         throw statusError('Session report artifact archival is still in progress', 409);
       }
-      stagedFiles = stageTaskFilesForDeletion(normalizedId, latest.created_at);
+      stagedFiles = stageTaskFilesForDeletion(normalizedId, latest.created_at, latest.workspace_mode);
       enqueueBridgeCleanupJob(db, latest, 'deleted', context);
       db.prepare(`
         UPDATE bridge_cleanup_jobs SET reason='deleted', updated_at=?
@@ -1789,7 +2405,7 @@ function purgeCompletedTaskGeneration(db, candidate, cutoff, maintenanceOwner) {
         throw statusError('Completed task Runtime cleanup is still in progress', 409);
       }
 
-      stagedFiles = stageTaskFilesForDeletion(task.id, task.created_at);
+      stagedFiles = stageTaskFilesForDeletion(task.id, task.created_at, task.workspace_mode);
       const cleanupJobId = enqueueBridgeCleanupJob(db, task, 'deleted', { actor: 'system' });
       if (cleanupJobId) {
         db.prepare(`
@@ -2004,7 +2620,7 @@ function bridgeCleanupSourceDir(db, task) {
     return path.resolve(execution.configured_working_directory);
   }
   try {
-    return resolveWorkingDir(task.working_dir);
+    return resolveWorkingDir(taskAgentDirectory(task));
   } catch {
     return '';
   }
@@ -2125,28 +2741,34 @@ function assertBridgeCleanupOwnership(db, jobId, workerId) {
   return row;
 }
 
-function processBridgeCleanupJob(job, workerId) {
+function assertBridgeCleanupReferences(db, current) {
+  const references = db.prepare(`
+    SELECT id, created_at, status FROM tasks WHERE persistent_session_key=?
+  `).all(current.session_key);
+  if (current.reason === 'deleted') {
+    if (references.length) throw new Error('Bridge Session key is still referenced by a platform task');
+  } else {
+    const matching = references.filter((task) => task.id === current.task_id
+      && task.created_at === current.task_created_at && task.status === 'completed');
+    if (references.length !== 1 || matching.length !== 1) {
+      throw new Error('Completed task generation no longer exclusively owns the Bridge Session key');
+    }
+  }
+}
+
+async function processBridgeCleanupJob(job, workerId) {
   const db = ensureStorage();
   try {
     const current = assertBridgeCleanupOwnership(db, job.id, workerId);
-    const references = db.prepare(`
-      SELECT id, created_at, status FROM tasks WHERE persistent_session_key=?
-    `).all(current.session_key);
-    if (current.reason === 'deleted') {
-      if (references.length) throw new Error('Bridge Session key is still referenced by a platform task');
-    } else {
-      const matching = references.filter((task) => task.id === current.task_id
-        && task.created_at === current.task_created_at && task.status === 'completed');
-      if (references.length !== 1 || matching.length !== 1) {
-        throw new Error('Completed task generation no longer exclusively owns the Bridge Session key');
-      }
-    }
-    const result = cleanupBridgeSessionResources({
+    assertBridgeCleanupReferences(db, current);
+    const result = await cleanupBridgeSessionResources({
       sessionKey: current.session_key,
       sourceDir: current.source_dir,
       sessionId: current.session_id,
     }, {
       onResolved(sessionId) {
+        assertBridgeCleanupOwnership(db, current.id, workerId);
+        assertBridgeCleanupReferences(db, current);
         const changed = db.prepare(`
           UPDATE bridge_cleanup_jobs SET session_id=?, updated_at=?
           WHERE id=? AND status='processing' AND lease_owner=?
@@ -2369,13 +2991,17 @@ function taskStorageInventory(db, runtimes) {
     if (runtime.task) runtimeBytes.set(runtime.task.id, (runtimeBytes.get(runtime.task.id) || 0) + Number(runtime.bytes || 0));
   }
   return db.prepare(`
-    SELECT task.id, task.name, task.status, task.created_at,
+    SELECT task.id, task.name, task.status, task.created_at, task.workspace_mode,
       EXISTS(SELECT 1 FROM external_attempts external WHERE external.task_id=task.id
         AND (external.archive_status='archiving' OR external.archive_verify_status='verifying'))
       OR EXISTS(SELECT 1 FROM skill_report_artifact_jobs job WHERE job.task_id=task.id AND job.status='processing') AS archiving
     FROM tasks task ORDER BY task.created_at DESC, task.id
   `).all().map(task => {
-    const storage = measureTaskStorage(sessionDir(task.id), path.join(SKILL_SNAPSHOTS_DIR, safeId(task.id)));
+    const storage = measureTaskStorage(
+      sessionDir(task.id),
+      path.join(SKILL_SNAPSHOTS_DIR, safeId(task.id)),
+      task.workspace_mode === 'session-clone' ? taskSessionRoot(task.id) : '',
+    );
     const nativeBytes = runtimeBytes.get(task.id) || 0;
     return {
       taskId: task.id, name: task.name, taskStatus: task.status, taskCreatedAt: task.created_at,
@@ -2454,19 +3080,23 @@ function requestBridgeSessionReclaim(sessionId, confirmation, context = {}) {
   return publicBridgeCleanupJob(queued);
 }
 
-function cleanupTaskFiles(taskId) {
+function cleanupTaskFiles(taskId, workspaceMode = 'shared') {
   const normalizedId = safeId(taskId);
-  for (const target of [sessionDir(normalizedId), path.join(SKILL_SNAPSHOTS_DIR, normalizedId)]) {
+  const targets = [sessionDir(normalizedId), path.join(SKILL_SNAPSHOTS_DIR, normalizedId)];
+  if (workspaceMode === 'session-clone') targets.push(taskSessionRoot(normalizedId));
+  for (const target of targets) {
     if (fileExists(target)) removeTree(target);
   }
 }
 
-function stageTaskFilesForDeletion(taskId, taskCreatedAt = '') {
+function stageTaskFilesForDeletion(taskId, taskCreatedAt = '', workspaceMode = 'shared') {
   const normalizedId = safeId(taskId);
   const generation = hashContent(taskCreatedAt).slice(0, 16);
   const staged = [];
   try {
-    for (const target of [sessionDir(normalizedId), path.join(SKILL_SNAPSHOTS_DIR, normalizedId)]) {
+    const targets = [sessionDir(normalizedId), path.join(SKILL_SNAPSHOTS_DIR, normalizedId)];
+    if (workspaceMode === 'session-clone') targets.push(taskSessionRoot(normalizedId));
+    for (const target of targets) {
       if (!fileExists(target)) continue;
       const tombstone = `${target}.deleting-${generation}-${crypto.randomUUID()}`;
       fs.renameSync(target, tombstone);
@@ -2667,6 +3297,7 @@ function rowToSkillReportArtifact(row) {
     mediaType: row.media_type,
     bytes: Number(row.bytes),
     sha256: row.sha256,
+    storageMode: row.storage_mode || 'managed-copy',
     url: `/api/sessions/${encodeURIComponent(row.task_id)}/skill-reports/${encodeURIComponent(row.report_id)}/artifacts/${encodeURIComponent(row.id)}`,
     createdAt: row.created_at,
   };
@@ -2801,7 +3432,8 @@ function registeredSkillReportArtifacts(db, row, report) {
           + `/external-attempts/${encodeURIComponent(externalAttemptId)}`
           + `/artifacts/${encodeURIComponent(String(artifact.key || ''))}`,
       };
-      if (external.status === 'running' || artifact.kind !== 'pytest-html') return registered;
+      if (external.status === 'running' || artifact.kind !== 'pytest-html'
+        || publishedExternalAttemptArtifact(db, row.task_id, externalAttemptId, artifact)) return registered;
       try {
         const stat = fs.lstatSync(String(artifact.path || ''));
         if (!stat.isFile() || stat.isSymbolicLink() || stat.size === 0) {
@@ -2848,6 +3480,7 @@ function rowToSkillReport(row, db = null) {
     observedAt: report.observedAt || '',
     executionEvidence: report.executionEvidence || null,
     primaryExecution: report.primaryExecution || null,
+    relatedReportKeys: Array.isArray(report.relatedReportKeys) ? report.relatedReportKeys : [],
     artifactDeclarations: Array.isArray(report.artifacts) ? report.artifacts : [],
     metrics: Array.isArray(report.metrics) ? report.metrics : [],
     sections: Array.isArray(report.sections) ? report.sections : [],
@@ -3431,6 +4064,7 @@ const EXTERNAL_ARTIFACT_MEDIA_TYPES = new Map([
   ['.woff2', 'font/woff2'],
 ]);
 const PYTEST_MEDIA_ATTRIBUTE_REFERENCE = /\b(?:href|data-src|src)\s*=\s*(?:"|'|\\?&(?:#34|quot);)((?:\.\.\/|\.\/)?(?:[A-Za-z0-9_%+@(),.-]+\/)*[A-Za-z0-9_%+@(),.-]+\.(?:aac|avif|bmp|flv|gif|jpe?g|m3u8|m4a|m4s|m4v|mov|mp3|mp4|mpd|ogg|opus|png|svg|ts|vtt|wav|webm|webp)(?:\?[^"'\\<>\s&]*)?(?:#[^"'\\<>\s&]*)?)/gi;
+const PYTEST_CASE_SOURCE_REFERENCE = /\bdata-case-source\s*=\s*(?:"|'|\\?&(?:#34|quot);)((?:\.\.\/|\.\/)?(?:[A-Za-z0-9_%+@(),.-]+\/)*[A-Za-z0-9_%+@(),.-]+\.js)/gi;
 
 function pytestMediaResourceUrl(taskId, reportId, artifactId, resourceId) {
   return `/api/sessions/${encodeURIComponent(taskId)}`
@@ -3876,6 +4510,7 @@ async function archivePytestMediaResources(htmlContent, options) {
   const descriptors = new Map();
   const countedMediaPaths = new Set();
   const warnings = [];
+  let lastProgressAt = 0;
   const mediaResourceLimit = Number.isInteger(options.mediaResourceLimit)
     ? Math.max(0, options.mediaResourceLimit)
     : MAX_PYTEST_MEDIA_RESOURCES;
@@ -3910,6 +4545,7 @@ async function archivePytestMediaResources(htmlContent, options) {
         resourceId,
         extension,
       ),
+      storageMode: options.inPlace ? 'in-place' : 'managed-copy',
       resolvedPath,
       extension,
       status: 'pending',
@@ -3920,12 +4556,17 @@ async function archivePytestMediaResources(htmlContent, options) {
         resourceId,
       ),
     };
+    if (options.inPlace) descriptor.managedPath = resolvedPath;
     descriptors.set(resolvedPath, descriptor);
     return descriptor;
   }
 
   async function archiveDescriptor(descriptor) {
     if (descriptor.status === 'done' || descriptor.status === 'archiving') return descriptor;
+    if (Date.now() - lastProgressAt >= 1000) {
+      await options.onProgress?.();
+      lastProgressAt = Date.now();
+    }
     descriptor.status = 'archiving';
     let archived;
     if (['.m3u8', '.mpd'].includes(descriptor.extension)) {
@@ -3960,21 +4601,32 @@ async function archivePytestMediaResources(htmlContent, options) {
         replaceLiteralReferences(transformedManifest, replacements),
         'utf8',
       );
-      archived = await archiveBufferAtomically(transformed, descriptor.managedPath, {
-        onProgress: options.onProgress,
-      });
+      if (options.inPlace) {
+        archived = { bytes: manifest.length, sha256: hashBuffer(manifest), viewContent: transformed.toString('utf8') };
+      } else {
+        archived = await archiveBufferAtomically(transformed, descriptor.managedPath, { onProgress: options.onProgress });
+      }
     } else {
-      archived = await archiveFileAtomically({
+      archived = options.inPlace
+        ? await digestRegularFile(descriptor.resolvedPath, { onProgress: options.onProgress })
+        : await archiveFileAtomically({
         sourcePath: descriptor.resolvedPath,
         destinationPath: descriptor.managedPath,
         onProgress: options.onProgress,
       });
     }
+    if (options.inPlace && IN_PLACE_TEXT_EXTENSIONS.has(descriptor.extension)) {
+      const content = await readStablePytestArtifactFile(descriptor.resolvedPath);
+      if (content.length !== archived.bytes || hashBuffer(content) !== archived.sha256) {
+        throw statusError('Pytest text resource changed while it was archived', 409);
+      }
+      descriptor.managedPath = await snapshotInPlaceArtifactText(options.taskId, descriptor.resolvedPath, content);
+    }
     Object.assign(descriptor, archived, { status: 'done' });
     return descriptor;
   }
 
-  ensureManagedDirectory(skillReportArtifactResourceDir(
+  if (!options.inPlace) ensureManagedDirectory(skillReportArtifactResourceDir(
     options.taskId,
     options.reportId,
     options.artifactId,
@@ -4006,8 +4658,11 @@ async function archivePytestMediaResources(htmlContent, options) {
   }
 
   await archiveReferences(options.logReferences || [], { countsTowardMediaLimit: false });
+  await archiveReferences([...referenceHtml.matchAll(PYTEST_CASE_SOURCE_REFERENCE)].map(match => match[1]),
+    { countsTowardMediaLimit: false });
   await archiveReferences(mediaReferencesInHtml(referenceHtml));
   let archivedHtml = replaceLiteralReferences(sourceHtml, replacements);
+  let checkView = null;
   const check = readVideoCheckReport(archivedHtml);
   if (check && !/^(?:\/|[A-Za-z][A-Za-z0-9+.-]*:)/.test(check.descriptor.source)) {
     const { descriptor, snapshot } = check;
@@ -4058,11 +4713,10 @@ async function archivePytestMediaResources(htmlContent, options) {
       const rewriteDetails = (payload) => payload?.run_id === descriptor.run_id
         ? mapVideoCheckDetails(payload, (source) => detailReplacements.get(source) || source)
         : payload;
-      const archivedSummary = await archiveBufferAtomically(
-        Buffer.from(videoCheckSummaryScript(rewriteDetails(summary)), 'utf8'),
-        summaryResource.managedPath,
-        { onProgress: options.onProgress },
-      );
+      const summaryView = videoCheckSummaryScript(rewriteDetails(summary));
+      const archivedSummary = options.inPlace
+        ? { bytes: summaryContent.length, sha256: hashBuffer(summaryContent), viewContent: summaryView }
+        : await archiveBufferAtomically(Buffer.from(summaryView, 'utf8'), summaryResource.managedPath, { onProgress: options.onProgress });
       Object.assign(summaryResource, archivedSummary, { status: 'done' });
       await archiveJsonCompanion(summaryResource);
       archivedHtml = rewriteVideoCheckReport(archivedHtml, (settings) => (
@@ -4070,6 +4724,7 @@ async function archivePytestMediaResources(htmlContent, options) {
           ? { ...settings, source: summaryResource.url }
           : settings
       ), rewriteDetails);
+      checkView = { runId: descriptor.run_id, source: summaryResource.url, details: [...detailReplacements] };
     } catch (error) {
       warnings.push(`Video Check ${descriptor.source}: ${String(error.message || error)}`);
     }
@@ -4078,6 +4733,7 @@ async function archivePytestMediaResources(htmlContent, options) {
     content: Buffer.from(archivedHtml, 'utf8'),
     resources: [...descriptors.values()].filter((descriptor) => descriptor.status === 'done'),
     warnings,
+    view: { replacements: [...replacements], check: checkView },
   };
 }
 
@@ -4257,6 +4913,10 @@ async function readExternalArtifactSnapshot(opened) {
     }
     position += bytesRead;
   }
+  const after = await opened.handle.stat({ bigint: true });
+  if (fileStatFingerprint(after) !== fileStatFingerprint(opened.stat)) {
+    throw statusError('Registered background artifact changed while its preview was read', 409);
+  }
   return content;
 }
 
@@ -4287,10 +4947,12 @@ function externalArtifactPreviewHtml(content, taskId, attemptId, artifactKey) {
     PYTEST_MEDIA_ATTRIBUTE_REFERENCE,
     (attribute, reference) => attribute.replace(reference, resourceUrl(reference)),
   );
+  const withCaseSources = preview.replace(PYTEST_CASE_SOURCE_REFERENCE,
+    (attribute, reference) => attribute.replace(reference, resourceUrl(reference)));
   const imageExtraReplacements = new Map(
     [...pytestImageExtraReferences(html)].map((reference) => [reference, resourceUrl(reference)]),
   );
-  const withImages = replaceLiteralReferences(preview, imageExtraReplacements);
+  const withImages = replaceLiteralReferences(withCaseSources, imageExtraReplacements);
   const withVideoCheck = rewriteVideoCheckReport(withImages, (descriptor) => (
     typeof descriptor.source === 'string'
       && !/^(?:\/|[A-Za-z][A-Za-z0-9+.-]*:)/.test(descriptor.source)
@@ -4697,7 +5359,153 @@ function publishMissingPlatformReports(taskId, data, skillIds) {
   }
 }
 
+function inPlaceArtifactPath(db, taskId, filePath) {
+  const task = db.prepare('SELECT workspace_mode, session_root FROM tasks WHERE id=?').get(taskId);
+  const root = taskSessionRoot(taskId);
+  if (task?.workspace_mode !== 'session-clone' || task.session_root !== root
+    || !pathContains(root, filePath) || fs.realpathSync(filePath) !== path.resolve(filePath)) {
+    throw statusError('In-place artifact must belong to its Task Session directory', 409);
+  }
+  return path.resolve(filePath);
+}
+
+async function snapshotInPlaceArtifactText(taskId, sourcePath, content) {
+  inPlaceArtifactPath(ensureStorage(), taskId, sourcePath);
+  const extension = path.extname(sourcePath).toLowerCase();
+  // Keep platform versions outside business processors' HTML/log extension globs.
+  const destination = path.join(path.dirname(sourcePath), `.artifact-version-${hashBuffer(content)}${extension}.snapshot`);
+  const verifyExisting = async () => {
+    let observed;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try { observed = await digestRegularFile(destination); break; }
+      catch (error) {
+        if (error.code !== 'ARCHIVE_FILE_CHANGED' || attempt === 3) throw error;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+    if (observed.bytes !== content.length || observed.sha256 !== hashBuffer(content)) {
+      throw statusError('Published text snapshot failed integrity verification', 409);
+    }
+  };
+  if (pathEntryExists(destination)) {
+    await verifyExisting();
+    return destination;
+  }
+  const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
+  let handle;
+  try {
+    handle = await fs.promises.open(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+    await handle.writeFile(content);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    try { await fs.promises.link(temporary, destination); }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      await verifyExisting();
+    }
+    await fs.promises.unlink(temporary);
+    await fsyncDirectory(path.dirname(destination));
+  } finally {
+    await handle?.close();
+    try { await fs.promises.unlink(temporary); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  return destination;
+}
+
+function applyInPlaceHtmlView(html, view) {
+  const replacements = new Map(view.replacements || []);
+  const references = [...replacements.keys()].filter(Boolean).sort((a, b) => b.length - a.length);
+  const rewritten = references.length
+    ? html.replace(new RegExp(references.map(escapeRegexPattern).join('|'), 'g'), reference => replacements.get(reference))
+    : html;
+  if (!view.check) return rewritten;
+  const details = new Map(view.check.details || []);
+  return rewriteVideoCheckReport(rewritten, descriptor => descriptor.run_id === view.check.runId
+    ? { ...descriptor, source: view.check.source } : descriptor,
+  snapshot => snapshot.run_id === view.check.runId
+    ? mapVideoCheckDetails(snapshot, source => details.get(source) || source) : snapshot);
+}
+
+async function archiveInPlaceArtifact(db, taskId, row, candidate, context) {
+  const sourcePath = inPlaceArtifactPath(db, taskId, candidate.sourcePath);
+  const content = await readStablePytestArtifactFile(sourcePath, { label: candidate.label });
+  const sha256 = hashBuffer(content);
+  const artifactId = `report-artifact-${hashContent(`${row.id}\0${candidate.key}`).slice(0, 32)}`;
+  const existing = db.prepare('SELECT * FROM skill_report_artifacts WHERE id=?').get(artifactId);
+  if (existing) {
+    const archived = await openDigestedRegularFile(inPlaceArtifactPath(db, taskId, existing.managed_path));
+    try {
+      if (archived.sha256 !== existing.sha256 || archived.bytes !== Number(existing.bytes)) {
+        throw statusError('An archived in-place artifact failed integrity verification', 409);
+      }
+    } finally { await archived.handle.close(); }
+    return { mediaWarningCount: 0 };
+  }
+  // Pytest and later report-processing steps can still update the source file.
+  // Keep the published document stable; media stays in its original location.
+  if (candidate.kind === 'pytest-html') assertCompletedPytestHtml(content, candidate.label);
+  const managedPath = await snapshotInPlaceArtifactText(taskId, sourcePath, content);
+  let resources = [];
+  let warnings = [];
+  let view = {};
+  if (candidate.kind === 'pytest-html') {
+    const check = readVideoCheckReport(content.toString('utf8'));
+    if (check) {
+      const summaryPath = path.resolve(path.dirname(sourcePath), decodeLocalArtifactReference(check.descriptor.source, 'Video Check results'));
+      if (pathEntryExists(summaryPath)) {
+        const summary = readVideoCheckSummaryScript((await readStablePytestArtifactFile(summaryPath)).toString('utf8'));
+        if (summary?.run_id === check.descriptor.run_id && !summary.complete
+          && !['finished', 'stopped', 'interrupted'].includes(summary.worker_state)) {
+          throw statusError('Video Check is still running', 409);
+        }
+      }
+    }
+    const selfContained = await selfContainedPytestHtml(content, sourcePath, candidate.workingDirectory);
+    const indexed = await archivePytestMediaResources(selfContained.content, {
+      taskId, reportId: row.id, artifactId, sourcePath,
+      containmentRoot: candidate.workingDirectory, referenceContent: content,
+      logReferences: selfContained.externalLogReferences, inPlace: true, onProgress: context.renewLease,
+    });
+    ({ resources, warnings, view } = indexed);
+    view.containmentRoot = candidate.workingDirectory;
+  }
+  const now = nowIso();
+  db.transaction(() => {
+    const latest = db.prepare('SELECT created_at FROM tasks WHERE id=?').get(taskId);
+    if (!latest) throw statusError('Task was deleted during in-place archival', 409);
+    db.prepare(`INSERT INTO skill_report_artifacts
+      (id, task_id, report_id, artifact_key, label, kind, file_name, media_type, managed_path,
+       bytes, sha256, source_sha256, created_at, storage_mode, view_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in-place', ?)`)
+      .run(artifactId, taskId, row.id, candidate.key, candidate.label, candidate.kind,
+        candidate.fileName, candidate.mediaType, managedPath, content.length, sha256, sha256, now, JSON.stringify(view));
+    for (const resource of resources) {
+      inPlaceArtifactPath(db, taskId, resource.managedPath);
+      db.prepare(`INSERT INTO skill_report_artifact_resources
+        (id, task_id, report_id, artifact_id, resource_key, file_name, media_type, managed_path,
+         bytes, sha256, created_at, storage_mode, view_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in-place', ?)`)
+        .run(resource.id, taskId, row.id, artifactId, resource.resourceKey, resource.fileName,
+          resource.mediaType, resource.managedPath, resource.bytes, resource.sha256, now,
+          JSON.stringify(resource.viewContent == null ? {} : { content: resource.viewContent }));
+    }
+    insertSessionWorklog(db, taskId, { kind: 'skill.report.artifact.archived',
+      message: `Registered in-place artifact ${candidate.label}`,
+      payload: { artifactId, storageMode: 'in-place', resources: resources.length,
+        textSnapshotBytes: content.length + resources.filter(resource => resource.managedPath.endsWith('.snapshot'))
+          .reduce((sum, resource) => sum + resource.bytes, 0), mediaCopiedBytes: 0 },
+      actor: context.actor || 'artifact-worker' });
+    if (warnings.length) insertSessionWorklog(db, taskId, { kind: 'skill.report.artifact.media_partial', level: 'warn',
+      message: `${candidate.label}: ${warnings.length} unavailable resource(s)`, payload: { warnings: warnings.slice(0, 100) } });
+  }).immediate();
+  return { mediaWarningCount: warnings.length };
+}
+
 async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {}) {
+  if (db.prepare('SELECT archive_mode FROM tasks WHERE id=?').get(taskId)?.archive_mode === 'in-place') {
+    return archiveInPlaceArtifact(db, taskId, row, candidate, context);
+  }
   await context.renewLease?.();
   ensureSessionStorage(taskId);
   ensureManagedDirectory(sessionSkillReportArtifactDir(taskId), {
@@ -4899,12 +5707,13 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
       db.prepare(`
         INSERT INTO skill_report_artifacts(
           id, task_id, report_id, artifact_key, label, kind, file_name,
-          media_type, managed_path, bytes, sha256, source_sha256, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          media_type, managed_path, bytes, sha256, source_sha256, created_at, view_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         artifactId, taskId, row.id, candidate.key, candidate.label, candidate.kind,
         candidate.fileName, candidate.mediaType, destinationPath,
         archived.bytes, archived.sha256, sourceSha256, createdAt,
+        JSON.stringify({ containmentRoot: candidate.workingDirectory || path.dirname(path.resolve(candidate.sourcePath)) }),
       );
       insertSessionWorklog(db, taskId, {
         turnId: row.turn_id || null,
@@ -5123,7 +5932,7 @@ async function archiveSkillReportArtifacts(sessionId, reportId, context = {}) {
   const row = db.prepare('SELECT * FROM skill_reports WHERE task_id=? AND id=?')
     .get(taskId, String(reportId || ''));
   if (!row) throw statusError('Skill report not found', 404);
-  const task = db.prepare('SELECT status FROM tasks WHERE id=?').get(taskId);
+  const task = db.prepare('SELECT status, archive_mode FROM tasks WHERE id=?').get(taskId);
   if (!task) throw statusError(`Session ${taskId} not found`, 404);
   if (task.status === 'completed') {
     throw statusError('Completed sessions are immutable history records', 409);
@@ -5179,7 +5988,7 @@ async function archiveSkillReportArtifacts(sessionId, reportId, context = {}) {
   if (failures.length) {
     throw artifactArchivalError(failures, declarations.length - reusable.artifactsByKey.size);
   }
-  if (mediaWarningCount === 0) {
+  if (mediaWarningCount === 0 && task.archive_mode !== 'in-place') {
     await removeArchivedProjectVideos(db, taskId, row, artifactCandidates, context);
   }
   completeSkillReportArtifactJob(db, row.id, context.jobOwner);
@@ -5244,6 +6053,33 @@ function reportArtifactJobRetryDelayMs(attemptCount) {
   return Math.min(REPORT_ARTIFACT_JOB_MAX_RETRY_MS, 5000 * (2 ** exponent));
 }
 
+function retireSupersededSessionArtifactRetries(db, now) {
+  const superseded = db.prepare(`
+    SELECT job.report_id, job.task_id, job.last_error, latest.id AS replacement_id
+    FROM skill_report_artifact_jobs job
+    JOIN tasks task ON task.id=job.task_id AND task.archive_mode='in-place'
+    JOIN skill_reports previous ON previous.id=job.report_id
+    JOIN skill_reports latest ON latest.task_id=previous.task_id
+      AND latest.report_key=previous.report_key AND latest.revision>previous.revision
+    JOIN skill_report_artifact_jobs replacement ON replacement.report_id=latest.id
+    WHERE job.status='retry' AND replacement.status='completed'
+      AND NOT EXISTS (SELECT 1 FROM skill_reports newer
+        WHERE newer.task_id=latest.task_id AND newer.report_key=latest.report_key
+          AND newer.revision>latest.revision)
+  `).all();
+  for (const job of superseded) {
+    db.prepare(`UPDATE skill_report_artifact_jobs
+      SET status='failed', next_attempt_at='', completed_at=?, updated_at=?
+      WHERE report_id=? AND status='retry'`).run(now, now, job.report_id);
+    insertSessionWorklog(db, job.task_id, {
+      kind: 'skill.report.artifact.superseded',
+      message: 'Stopped an older artifact retry after its replacement revision archived successfully',
+      payload: { reportId: job.report_id, replacementReportId: job.replacement_id, error: job.last_error },
+      actor: 'artifact-worker',
+    });
+  }
+}
+
 function claimSkillReportArtifactJobs(workerId, limit = 1) {
   const db = ensureStorage();
   const owner = String(workerId || '').trim();
@@ -5251,6 +6087,7 @@ function claimSkillReportArtifactJobs(workerId, limit = 1) {
   const now = nowIso();
   const leaseExpiresAt = new Date(Date.now() + REPORT_ARTIFACT_JOB_LEASE_MS).toISOString();
   return db.transaction(() => {
+    retireSupersededSessionArtifactRetries(db, now);
     const candidates = db.prepare(`
       SELECT * FROM skill_report_artifact_jobs
       WHERE (
@@ -5329,6 +6166,9 @@ async function processSkillReportArtifactJob(reportId, workerId) {
 }
 
 async function archiveFailureAnalysisMarkdownArtifact(db, taskId, row, candidate, context) {
+  if (db.prepare('SELECT archive_mode FROM tasks WHERE id=?').get(taskId)?.archive_mode === 'in-place') {
+    return archiveInPlaceArtifact(db, taskId, row, candidate, context || {});
+  }
   await context?.renewLease?.();
   ensureSessionStorage(taskId);
   ensureManagedDirectory(sessionSkillReportArtifactDir(taskId), {
@@ -5438,7 +6278,9 @@ async function redactSkillReportArtifacts() {
   // intentionally immutable in analysis mode, including credential values.
   const result = { scanned: rows.length, redacted: 0, unchanged: rows.length };
   for (const row of rows) {
-    const expectedPath = skillReportArtifactFile(row.task_id, row.report_id, row.id, row.kind);
+    const expectedPath = row.storage_mode === 'in-place'
+      ? inPlaceArtifactPath(db, row.task_id, row.managed_path)
+      : skillReportArtifactFile(row.task_id, row.report_id, row.id, row.kind);
     if (path.resolve(row.managed_path) !== path.resolve(expectedPath)) {
       throw statusError('Managed pytest HTML report path does not match its task ownership', 409);
     }
@@ -5481,7 +6323,9 @@ async function openSkillReportArtifactFile(sessionId, reportId, artifactId, opti
     WHERE artifact.task_id=? AND artifact.report_id=? AND artifact.id=?
   `).get(taskId, String(reportId || ''), String(artifactId || ''));
   if (!row) return null;
-  const expectedPath = skillReportArtifactFile(taskId, row.report_id, row.id, row.kind);
+  const expectedPath = row.storage_mode === 'in-place'
+    ? inPlaceArtifactPath(db, taskId, row.managed_path)
+    : skillReportArtifactFile(taskId, row.report_id, row.id, row.kind);
   if (path.resolve(row.managed_path) !== path.resolve(expectedPath)) {
     throw statusError('Managed pytest HTML report path does not match its task ownership', 409);
   }
@@ -5493,6 +6337,15 @@ async function openSkillReportArtifactFile(sessionId, reportId, artifactId, opti
   if (opened.bytes !== Number(row.bytes) || opened.sha256 !== row.sha256) {
     await opened.handle.close();
     throw statusError('Managed Skill report artifact failed integrity verification', 409);
+  }
+  if (row.storage_mode === 'in-place' && row.kind === 'pytest-html') {
+    try {
+      const content = await opened.handle.readFile('utf8');
+      const view = parseJson(row.view_json, {});
+      const selfContained = await selfContainedPytestHtml(Buffer.from(content), expectedPath, view.containmentRoot);
+      const rendered = Buffer.from(applyInPlaceHtmlView(selfContained.content.toString('utf8'), view));
+      return { content: rendered, bytes: rendered.length, fileName: skillReportArtifactFileName(row), mediaType: row.media_type };
+    } finally { await opened.handle.close(); }
   }
   return {
     fileHandle: opened.handle,
@@ -5662,7 +6515,9 @@ async function openSkillReportArtifactResourceFile(
     String(resourceId || ''),
   );
   if (!row) return null;
-  const expectedPath = skillReportArtifactResourceFile(
+  const expectedPath = row.storage_mode === 'in-place'
+    ? inPlaceArtifactPath(db, taskId, row.managed_path)
+    : skillReportArtifactResourceFile(
     taskId,
     row.report_id,
     row.artifact_id,
@@ -5699,6 +6554,13 @@ async function openSkillReportArtifactResourceFile(
     await opened.handle.close();
     throw statusError('Managed pytest HTML media failed integrity verification', 409);
   }
+  const view = parseJson(row.view_json, {});
+  if (row.storage_mode === 'in-place' && typeof view.content === 'string') {
+    await opened.handle.close();
+    const content = Buffer.from(view.content);
+    return { content, bytes: content.length, fileName: row.file_name, mediaType: row.media_type,
+      managedPath: expectedPath, sha256: row.sha256 };
+  }
   return {
     fileHandle: opened.handle,
     bytes: opened.bytes,
@@ -5707,6 +6569,48 @@ async function openSkillReportArtifactResourceFile(
     managedPath: expectedPath,
     sha256: row.sha256,
   };
+}
+
+function listTaskPytestReports(sessionId) {
+  const db = ensureStorage();
+  const taskId = canonicalTaskId(sessionId);
+  const runs = db.prepare(`SELECT runs.*, steps.step_key FROM step_runs runs
+    JOIN task_steps steps ON steps.id=runs.step_id WHERE runs.task_id=?`).all(taskId);
+  const byRun = new Map(runs.map(run => [run.id, run]));
+  const attempts = new Map(db.prepare('SELECT * FROM external_attempts WHERE task_id=?').all(taskId).map(row => [row.id, row]));
+  const reports = db.prepare(`SELECT * FROM skill_reports r WHERE task_id=? AND revision=(
+    SELECT MAX(revision) FROM skill_reports latest WHERE latest.task_id=r.task_id AND latest.report_key=r.report_key)
+    ORDER BY sequence`).all(taskId);
+  const artifacts = db.prepare("SELECT * FROM skill_report_artifacts WHERE task_id=? AND kind='pytest-html'").all(taskId);
+  const artifactsById = new Map(artifacts.map(artifact => [artifact.id, artifact]));
+  const descriptors = [];
+  for (const report of reports) {
+    const payload = parseJson(report.payload_json, {});
+    const attempt = attempts.get(payload.executionEvidence?.externalAttemptId);
+    const run = byRun.get(report.step_run_id || attempt?.step_run_id);
+    let root = run;
+    const visited = new Set();
+    while (root?.source_run_id && !visited.has(root.id) && byRun.has(root.source_run_id)) {
+      visited.add(root.id); root = byRun.get(root.source_run_id);
+    }
+    const rerun = run?.run_kind === 'rerun' || /^rerun(?:[-_. ]?\d+)?$/i.test(run?.run_key || '')
+      || /(?:^|:)rerun(?:[-_. ]?\d+)?(?=:|$)/i.test(report.report_key);
+    let scope = root?.step_key || attempt?.chain_key || report.report_key;
+    if (rerun) scope = scope.replace(/(?:[:_-])rerun(?:[-_. ]?\d+)?(?:[:_-].*)?$/i, '');
+    else if (!root && !attempt?.chain_key) scope = scope.replace(/:initial$/i, '');
+    const managed = skillReportArtifacts(db, taskId, report.id)
+      .map(artifact => artifactsById.get(artifact.id)).filter(Boolean);
+    const declarations = (payload.artifacts || []).filter(artifact => artifact.kind === 'pytest-html');
+    const members = [...managed, ...declarations.filter(declaration => !managed.some(artifact => artifact.artifact_key === declaration.key))];
+    for (const artifact of members) descriptors.push({
+      id: artifact.id || `${report.id}:${artifact.key}`, filePath: artifact.managed_path || '',
+      sha256: artifact.sha256 || '', bytes: Number(artifact.bytes || 0), scope, rerun,
+      executionKey: attempt?.id || run?.id || report.report_key,
+      at: run?.finished_at || attempt?.finished_at || run?.started_at || report.published_at,
+      running: ['pending', 'running'].includes(attempt?.status || run?.status || report.status),
+    });
+  }
+  return descriptors;
 }
 
 function listSkillReports(sessionId, options = {}) {
@@ -6614,11 +7518,48 @@ async function openExternalAttemptLogFile(taskId, attemptId, options = {}) {
   }
 }
 
+function publishedExternalAttemptArtifact(db, taskId, attemptId, declaration) {
+  // Each artifact and all its resources are published in one transaction, before
+  // source cleanup. Other artifacts may still be archiving, and execution status
+  // reconciliation can lag behind the archive's terminal-evidence validation.
+  const rows = db.prepare(`SELECT artifact.*, report.payload_json
+    FROM skill_report_artifacts artifact
+    JOIN skill_reports report ON report.id=artifact.report_id AND report.task_id=artifact.task_id
+    JOIN external_attempts execution ON execution.task_id=artifact.task_id AND execution.id=?
+    WHERE artifact.task_id=? AND artifact.artifact_key=? AND artifact.kind=?
+      AND json_extract(report.payload_json,'$.executionEvidence.externalAttemptId')=execution.id
+      AND COALESCE(report.step_run_id,'')=COALESCE(execution.step_run_id,'')
+    ORDER BY report.sequence DESC`).all(String(attemptId), taskId, declaration.key, declaration.kind);
+  return rows.find(row => {
+    const declared = (parseJson(row.payload_json, {}).artifacts || []).find(item => item.key === declaration.key);
+    return !declared?.path || path.resolve(declared.path) === path.resolve(declaration.path);
+  }) || null;
+}
+
+function publishedExternalAttemptResource(db, taskId, attemptId, declaration, relativePath) {
+  const artifact = publishedExternalAttemptArtifact(db, taskId, attemptId, declaration);
+  if (!artifact) return null;
+  const root = parseJson(artifact.view_json, {}).containmentRoot
+    || externalArtifactResourceRoot(db, taskId, attemptId, declaration);
+  const sourcePath = path.resolve(path.dirname(path.resolve(declaration.path)), relativePath);
+  if (!pathContains(root, sourcePath)) return null;
+  const key = path.relative(root, sourcePath).split(path.sep).join('/');
+  const resource = db.prepare(`SELECT id,file_name FROM skill_report_artifact_resources
+    WHERE task_id=? AND report_id=? AND artifact_id=? AND resource_key=?`)
+    .get(taskId, artifact.report_id, artifact.id, key);
+  return resource ? {
+    redirectUrl: rowToSkillReportArtifact(artifact).url + '/resources/' + resource.id,
+    formatHint: path.extname(resource.file_name),
+  } : null;
+}
+
 async function openExternalAttemptArtifactFile(taskId, attemptId, artifactKey, options = {}) {
   const db = ensureStorage();
   const normalizedTaskId = safeId(taskId);
   const declaration = externalArtifactDeclaration(db, normalizedTaskId, attemptId, artifactKey);
   if (!declaration) return null;
+  const published = publishedExternalAttemptArtifact(db, normalizedTaskId, attemptId, declaration);
+  if (published) return { redirectUrl: rowToSkillReportArtifact(published).url };
   const mediaType = declaration.kind === 'pytest-html'
     ? 'text/html; charset=utf-8'
     : declaration.kind === 'failure-analysis-markdown'
@@ -6634,30 +7575,16 @@ async function openExternalAttemptArtifactFile(taskId, attemptId, artifactKey, o
     });
     const openedPath = await fs.promises.realpath(`/proc/self/fd/${opened.handle.fd}`);
     if (openedPath !== path.resolve(declaration.path)) {
-      await opened.handle.close();
       throw statusError('Registered background artifact must not use symbolic links', 409);
     }
-  } catch (error) {
-    try { await opened?.handle.close(); } catch {}
-    if (error?.code === 'REGISTERED_ARTIFACT_MISSING') return null;
-    if (error?.code === 'ARCHIVE_READ_ABORTED') {
-      error.statusCode = 499;
-      error.expected = true;
+    if (opened.bytes > MAX_SKILL_REPORT_ARTIFACT_BYTES) {
+      throw statusError(`Registered artifact exceeds ${MAX_SKILL_REPORT_ARTIFACT_BYTES} bytes`, 413);
     }
-    throw error;
-  }
-  if (opened.bytes > MAX_SKILL_REPORT_ARTIFACT_BYTES) {
-    await opened.handle.close();
-    throw statusError(`Registered artifact exceeds ${MAX_SKILL_REPORT_ARTIFACT_BYTES} bytes`, 413);
-  }
-  if (mediaType === 'text/html; charset=utf-8') {
-    try {
+    if (mediaType === 'text/html; charset=utf-8') {
       const snapshot = await readExternalArtifactSnapshot(opened);
-      if (declaration.executionStatus === 'running') {
-        assertPytestHtmlDocument(snapshot, 'Registered pytest HTML report');
-      } else {
-        assertCompletedPytestHtml(snapshot, 'Registered pytest HTML report');
-      }
+      // A terminal process does not mean report post-processing/archival is done.
+      // Preview remains available; the archive still requires a complete document.
+      assertPytestHtmlDocument(snapshot, 'Registered pytest HTML report');
       await opened.handle.close();
       opened = null;
       const sourcePath = path.resolve(declaration.path);
@@ -6690,19 +7617,33 @@ async function openExternalAttemptArtifactFile(taskId, attemptId, artifactKey, o
         fileName: pytestArtifactDisplayFileName(declaration.path),
         mediaType,
       };
-    } catch (error) {
-      try { await opened?.handle.close(); } catch {}
-      throw error;
     }
+    return {
+      fileHandle: opened.handle,
+      bytes: opened.bytes,
+      fileName: path.basename(declaration.path),
+      mediaType,
+    };
+  } catch (error) {
+    try { await opened?.handle.close(); } catch {}
+    if (error?.code === 'REGISTERED_ARTIFACT_MISSING' || error?.code === 'ENOENT') {
+      // Publication and cleanup can finish while the source open is in flight.
+      const archived = publishedExternalAttemptArtifact(db, normalizedTaskId, attemptId, declaration);
+      return archived ? { redirectUrl: rowToSkillReportArtifact(archived).url } : null;
+    }
+    if (error?.code === 'ARCHIVE_READ_ABORTED') {
+      error.statusCode = 499;
+      error.expected = true;
+    }
+    const retries = Number(options.previewRetries || 0);
+    const changed = Number(error.statusCode) === 409 || error.code === 'ARCHIVE_FILE_CHANGED';
+    if (changed && retries < 3 && !options.signal?.aborted) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      return openExternalAttemptArtifactFile(taskId, attemptId, artifactKey, { ...options, previewRetries: retries + 1 });
+    }
+    if (error.code === 'ARCHIVE_FILE_CHANGED') error.statusCode = 409;
+    throw error;
   }
-  return {
-    fileHandle: opened.handle,
-    bytes: opened.bytes,
-    fileName: declaration.kind === 'pytest-html'
-      ? pytestArtifactDisplayFileName(declaration.path)
-      : path.basename(declaration.path),
-    mediaType,
-  };
 }
 
 async function openExternalAttemptArtifactResourceFile(taskId, attemptId, artifactKey, resourcePath, options = {}) {
@@ -6717,6 +7658,8 @@ async function openExternalAttemptArtifactResourceFile(taskId, attemptId, artifa
     error.statusCode = 404;
     throw error;
   }
+  const published = publishedExternalAttemptResource(db, normalizedTaskId, attemptId, declaration, relativePath);
+  if (published) return published;
   const root = externalArtifactResourceRoot(db, normalizedTaskId, attemptId, declaration);
   const sourcePath = path.resolve(path.dirname(path.resolve(declaration.path)), relativePath);
   if (!pathContains(root, sourcePath)) return null;
@@ -6734,7 +7677,9 @@ async function openExternalAttemptArtifactResourceFile(taskId, attemptId, artifa
     }
   } catch (error) {
     try { await opened?.handle.close(); } catch {}
-    if (error?.code === 'REGISTERED_ARTIFACT_RESOURCE_MISSING') return null;
+    if (error?.code === 'REGISTERED_ARTIFACT_RESOURCE_MISSING' || error?.code === 'ENOENT') {
+      return publishedExternalAttemptResource(db, normalizedTaskId, attemptId, declaration, relativePath);
+    }
     throw error;
   }
   if (opened.bytes > MAX_SKILL_REPORT_ARTIFACT_BYTES) {
@@ -9040,6 +9985,7 @@ function queueSessionRunInTransaction(
   if (ACTIVE_STATUSES.includes(task.status)) {
     throw statusError('Session already has an active run command', 409);
   }
+  if (task.workspace_mode === 'session-clone') reopenSessionSource(taskId);
   const now = nowIso();
   db.prepare(`
     INSERT INTO commands(id, task_id, type, input, idempotency_key, status, created_at)
@@ -9047,6 +9993,7 @@ function queueSessionRunInTransaction(
   `).run(commandId, taskId, commandType, runInput, key, now);
   db.prepare(`
     UPDATE tasks SET status='queued', recovery_state='queued', last_brief=?,
+      archive_state=CASE WHEN workspace_mode='session-clone' THEN 'active' ELSE archive_state END,
       cancel_requested=0, version=version+1, updated_at=? WHERE id=?
   `).run(runInput || task.objective || '', now, taskId);
   insertSessionWorklog(db, taskId, {
@@ -9071,10 +10018,17 @@ function queueSessionRun(sessionId, input = '', idempotencyKey = '', context = {
 }
 
 function sessionMatchesCreateRequest(task, taskId, data) {
+  const workspaceMode = normalizeWorkspaceMode(data.workspaceMode);
+  const expectedWorkingDir = workspaceMode === 'session-clone'
+    ? taskSessionRoot(taskId)
+    : (String(data.workingDir || '.').trim() || '.');
   return task.id === taskId
     && task.name === String(data.name || taskId).trim()
     && task.objective === String(data.objective || '').trim()
-    && task.working_dir === (String(data.workingDir || '.').trim() || '.')
+    && task.working_dir === expectedWorkingDir
+    && (data.workspaceMode == null || task.workspace_mode === workspaceMode)
+    && (data.sourceMode == null
+      || task.source_mode === String(data.sourceMode || (workspaceMode === 'session-clone' ? 'session-clone' : 'shared-repo')))
     && task.notes === String(data.notes || '').trim()
     && normalizeTaskProject(task.project) === normalizeTaskProject(data.project)
     && JSON.stringify(normalizeTaskTags(parseJson(task.tags_json, [])))
@@ -9108,7 +10062,11 @@ function createAndQueueSession(id, data, input = '', idempotencyKey = '', contex
         || originalCommand.input !== runInput || !sessionMatchesCreateRequest(task, taskId, data)) {
         throw statusError(`Session ${taskId} already exists with a different create-and-run request`, 409);
       }
-      return { session: rowToSession(task), created: false };
+      const linked = db.prepare('SELECT release_cycle_id FROM task_series_runs WHERE task_id=?').get(taskId);
+      if ((linked?.release_cycle_id || '') !== String(data.releaseCycleId || '')) {
+        throw statusError('Idempotency request does not match the original release cycle', 409);
+      }
+      return { session: enrichSessionsWithScheduling(db, [rowToSession(task)])[0], created: false };
     }
     if (keyedCommand) throw statusError('Idempotency key belongs to a missing task', 409);
     saveSessionInTransaction(db, taskId, { ...data, status: 'idle' }, { ...context, createOnly: true });
@@ -9120,7 +10078,7 @@ function createAndQueueSession(id, data, input = '', idempotencyKey = '', contex
       context,
       'create_run',
     );
-    return { session, created: true };
+    return { session: enrichSessionsWithScheduling(db, [session])[0], created: true };
   }).immediate();
 }
 
@@ -9139,9 +10097,13 @@ function claimPendingCommands(workerId, limit = 10) {
       SELECT commands.* FROM commands
       JOIN tasks ON tasks.id=commands.task_id
       WHERE commands.status='pending' AND tasks.status='queued'
+        AND NOT ${SERIES_QUEUE_BLOCKED_SQL}
+        AND NOT EXISTS (SELECT 1 FROM metadata m
+          WHERE m.key='${RUNTIME_RELEASE_KEY_PREFIX}' || tasks.id
+            AND json_extract(m.value, '$.expiresAt')>?)
       ORDER BY commands.created_at LIMIT ?
     `)
-      .all(Math.max(1, Number(limit || 10)));
+      .all(now, Math.max(1, Number(limit || 10)));
     const claimed = [];
     const expires = new Date(Date.now() + COMMAND_CLAIM_TTL_MS).toISOString();
     const statement = db.prepare(`
@@ -9331,7 +10293,11 @@ function acquireTaskLease(taskId, workerId, ttlMs = 15000) {
     UPDATE tasks SET lease_owner=?, lease_expires_at=?, version=version+1, updated_at=?
     WHERE id=? AND status='queued'
       AND (lease_owner IS NULL OR lease_owner=? OR lease_expires_at IS NULL OR lease_expires_at < ?)
-  `).run(workerId, expires, now, safeId(taskId), workerId, now);
+      AND NOT ${SERIES_QUEUE_BLOCKED_SQL}
+      AND NOT EXISTS (SELECT 1 FROM metadata m
+        WHERE m.key='${RUNTIME_RELEASE_KEY_PREFIX}' || tasks.id
+          AND json_extract(m.value, '$.expiresAt')>?)
+  `).run(workerId, expires, now, safeId(taskId), workerId, now, now);
   return result.changes === 1;
 }
 
@@ -9439,6 +10405,69 @@ function requestSessionStop(sessionId, context = {}) {
     finalizeStoppedTaskIfRuntimeEmpty(taskId, context);
   }
   return stopped;
+}
+
+const IDLE_RUNTIME_TASK_SQL = `
+  persistent_session_key<>'' AND status NOT IN ('queued','running','recovering','stopping')
+  AND current_pid IS NULL AND (lease_owner IS NULL OR lease_owner='')
+  AND COALESCE(NULLIF(last_finished_at,''),updated_at)<=?
+  AND NOT EXISTS (SELECT 1 FROM commands c WHERE c.task_id=tasks.id AND c.status IN ('pending','processing'))`;
+
+function listIdleTaskRuntimes(cutoff = new Date(Date.now() - 60000).toISOString()) {
+  return ensureStorage().prepare(`SELECT id FROM tasks WHERE ${IDLE_RUNTIME_TASK_SQL} ORDER BY updated_at,id`)
+    .all(cutoff).map(row => row.id);
+}
+
+function getTaskRuntimeRelease(taskId) {
+  const row = ensureStorage().prepare('SELECT value FROM metadata WHERE key=?').get(RUNTIME_RELEASE_KEY_PREFIX + safeId(taskId));
+  const lease = parseJson(row?.value, null);
+  return lease?.expiresAt > nowIso() ? lease : null;
+}
+
+function claimIdleTaskRuntime(taskId, cutoff = new Date(Date.now() - 60000).toISOString()) {
+  const db = ensureStorage();
+  return db.transaction(() => {
+    if (platformMaintenanceFromDatabase(db) || getTaskRuntimeRelease(taskId)) return null;
+    const task = db.prepare(`SELECT * FROM tasks WHERE id=? AND ${IDLE_RUNTIME_TASK_SQL}`).get(taskId, cutoff);
+    if (!task) return null;
+    const lease = { taskId: task.id, taskCreatedAt: task.created_at, sessionKey: task.persistent_session_key,
+      sourceDir: bridgeCleanupSourceDir(db, task),
+      owner: crypto.randomUUID(), expiresAt: new Date(Date.now() + 30000).toISOString() };
+    db.prepare(`INSERT INTO metadata(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
+      .run(RUNTIME_RELEASE_KEY_PREFIX + task.id, JSON.stringify(lease));
+    return lease;
+  }).immediate();
+}
+
+function finishIdleTaskRuntimeRelease(lease, result) {
+  const db = ensureStorage();
+  return db.transaction(() => {
+    const key = RUNTIME_RELEASE_KEY_PREFIX + lease.taskId;
+    const stored = db.prepare('SELECT value FROM metadata WHERE key=?').get(key);
+    if (parseJson(stored?.value, null)?.owner !== lease.owner) return false;
+    db.prepare('DELETE FROM metadata WHERE key=?').run(key);
+    const task = db.prepare('SELECT created_at,persistent_session_key FROM tasks WHERE id=?').get(lease.taskId);
+    if (task?.created_at !== lease.taskCreatedAt || task.persistent_session_key !== lease.sessionKey) return true;
+    if (result.released.length || result.errors.length) insertSessionWorklog(db, lease.taskId, {
+      kind: result.errors.length ? 'session.runtime.release.failed' : 'session.runtime.released',
+      level: result.errors.length ? 'warn' : 'info',
+      message: result.errors.length ? 'Idle Codex runtime release needs retry.'
+        : `Released ${result.released.length} idle Codex process(es); Session history retained for reconnect.`,
+      payload: { sessionId: result.sessionId, releasedCount: result.released.length, errors: result.errors },
+      actor: 'system',
+    });
+    return true;
+  }).immediate();
+}
+
+function retainOwnedTaskSessionHistory(taskId, sessionKey) {
+  const db = ensureStorage();
+  return db.transaction(() => {
+    if (platformMaintenanceFromDatabase(db)) return 0;
+    const task = db.prepare('SELECT persistent_session_key FROM tasks WHERE id=?').get(taskId);
+    if (task?.persistent_session_key !== sessionKey) return 0;
+    return retainTaskSessionHistory(taskId, sessionKey);
+  }).immediate();
 }
 
 function finalizeSessionTurn(data) {
@@ -9554,6 +10583,7 @@ function finalizeSessionTurn(data) {
     const taskChanged = db.prepare(`
       UPDATE tasks SET status=?, current_pid=NULL, current_pid_start_ticks='', current_process_group_id=NULL,
         summary=?, last_finished_at=?, archived_at='',
+        archive_state=CASE WHEN workspace_mode='session-clone' AND ?<>'waiting_scheduled' THEN 'pending' ELSE archive_state END,
         last_error=?, recovery_state=?, retry_count=?, cancel_requested=0,
         recovery_count=CASE WHEN ?='waiting_review' THEN 0 ELSE recovery_count END,
         lease_owner=NULL, lease_expires_at=NULL, version=version+1, updated_at=?
@@ -9562,6 +10592,7 @@ function finalizeSessionTurn(data) {
       finalStatus,
       String(data.summary || ''),
       finishedAt,
+      finalStatus,
       ['waiting_review', 'waiting_scheduled', 'stopped'].includes(finalStatus) && requestedFinalStatus === 'waiting_review'
         ? ''
         : String(data.summary || ''),
@@ -9663,6 +10694,9 @@ function completeSession(sessionId, context = {}) {
     }
     if (taskRuntimeActivity(db, taskId).active) {
       throw statusError('Task still has owned runtime processes or threads', 409);
+    }
+    if (task.workspace_mode === 'session-clone' && task.archive_state !== 'archived') {
+      throw statusError('Session files are awaiting in-place archive verification', 409);
     }
     const now = nowIso();
     db.prepare(`
@@ -10298,7 +11332,10 @@ function exportConfigBundle() {
       id: session.id,
       name: session.name,
       objective: session.objective,
-      workingDir: session.workingDir,
+      workingDir: session.workspaceMode === 'session-clone' ? '.' : session.workingDir,
+      ...(session.workspaceMode === 'session-clone'
+        ? { workspaceMode: session.workspaceMode, sourceMode: session.sourceMode }
+        : {}),
       notes: session.notes,
       project: session.project,
       tags: session.tags,
@@ -10336,7 +11373,7 @@ function importConfigBundle(bundle, mode = 'merge', context = {}) {
     const sessionId = canonicalTaskId(session?.id);
     if (sessionIds.has(sessionId)) throw statusError(`Duplicate imported session id: ${sessionId}`, 400);
     sessionIds.add(sessionId);
-    resolveWorkingDir(session.workingDir || '.');
+    if (session.workspaceMode !== 'session-clone') resolveWorkingDir(session.workingDir || '.');
     if (ACTIVE_STATUSES.includes(String(session.status || 'idle'))) {
       throw statusError(`Session ${session.id} has an active status that cannot be imported`, 400);
     }
@@ -10363,9 +11400,9 @@ function importConfigBundle(bundle, mode = 'merge', context = {}) {
         throw statusError('Wait for background log archival before importing configuration', 409);
       }
       if (mode === 'replace') {
-        const removedTasks = db.prepare("SELECT id, created_at FROM tasks WHERE status<>'completed'").all();
+        const removedTasks = db.prepare("SELECT id, created_at, workspace_mode FROM tasks WHERE status<>'completed'").all();
         removedTaskIds = removedTasks.map((row) => row.id);
-        for (const task of removedTasks) stagedFiles.push(...stageTaskFilesForDeletion(task.id, task.created_at));
+        for (const task of removedTasks) stagedFiles.push(...stageTaskFilesForDeletion(task.id, task.created_at, task.workspace_mode));
         db.prepare("DELETE FROM tasks WHERE status<>'completed'").run();
         db.prepare("DELETE FROM skills WHERE origin='managed'").run();
       }
@@ -10534,12 +11571,25 @@ module.exports = {
   importSkillArchive,
   deleteSkill,
   listSessions,
+  listReleaseCycles,
+  getReleaseCycle,
+  createReleaseCycle,
+  createTaskSeriesSchedule,
+  closeReleaseCycle,
+  createReleaseCycleTask,
+  listReleaseCycleTasks,
+  linkTaskToReleaseCycle,
+  claimDueTaskSeriesSchedules,
   sessionStats,
   countExecutingSessions,
   checkStateInvariants,
   listActiveProcessIdentities,
   getSession,
   saveSession,
+  updateTaskSourceMetadata,
+  sealPendingSessionWorkspace,
+  listTaskSourceFiles,
+  openTaskSourceFile,
   updateSession,
   deleteSession,
   taskRetentionStatus,
@@ -10549,6 +11599,11 @@ module.exports = {
   bridgeCleanupStatus,
   listBridgeRuntimeInventory,
   requestBridgeSessionReclaim,
+  listIdleTaskRuntimes,
+  getTaskRuntimeRelease,
+  claimIdleTaskRuntime,
+  finishIdleTaskRuntimeRelease,
+  retainOwnedTaskSessionHistory,
   appendSessionWorklog,
   listSessionWorklogs,
   publishSkillReport,
@@ -10558,12 +11613,14 @@ module.exports = {
   redactSkillReportArtifacts,
   redactHistoricalSkillReports,
   openSkillReportArtifactFile,
+  snapshotInPlaceArtifactText,
   openSkillReportArtifactResourceFile,
   skillReportArtifactPlayerFormatHints,
   skillReportArtifactPlaybackAlternatives,
   listSkillReportArtifactMediaViews,
   markSkillReportArtifactMediaViewed,
   listSkillReports,
+  listTaskPytestReports,
   appendSessionLatestLog,
   readSessionLatestLog,
   appendAuditEvent,

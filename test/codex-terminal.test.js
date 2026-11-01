@@ -108,6 +108,7 @@ test('interactive Codex terminal resumes the isolated task thread and replays ou
     'resume', '019f-thread-id',
   ]);
   assert.equal(spawnCalls[0].options.env.CODEX_HOME, codexHome);
+  assert.equal(spawnCalls[0].options.env.WECOM_BRIDGE_SESSION_ID, 'session-1234567890abcdef');
   assert.equal(spawnCalls[0].options.env.TERM, 'xterm-256color');
   assert.equal(JSON.parse(firstSocket.messages[0]).state, 'connected');
 
@@ -263,7 +264,7 @@ test('reconnecting after exit starts a new terminal without stale cleanup removi
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-test('a disconnected interactive terminal is terminated after its reconnect grace period', () => {
+test('a disconnected terminal exits before reconnect resumes the same thread', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-terminal-disconnect-'));
   const runtime = {
     sessionId: 'session-disconnect',
@@ -274,6 +275,8 @@ test('a disconnected interactive terminal is terminated after its reconnect grac
   };
   for (const directory of [runtime.cwdDir, runtime.codexHome, runtime.chatfileDir]) fs.mkdirSync(directory);
   const processHandle = new FakePtyProcess();
+  const nextProcess = new FakePtyProcess();
+  let spawns = 0;
   const timers = [];
   const manager = createCodexTerminalManager({
     getTask: () => ({
@@ -281,7 +284,10 @@ test('a disconnected interactive terminal is terminated after its reconnect grac
       persistentSessionKey: 'single:disconnect-task',
     }),
     codexBinary: '/usr/bin/codex-test',
-    pty: { spawn() { return processHandle; } },
+    pty: { spawn(_command, args) {
+      assert.equal(args.at(-1), runtime.threadId);
+      return spawns++ === 0 ? processHandle : nextProcess;
+    } },
     resolveRuntime: () => runtime,
     environment: { CODEX_INTERACTIVE_DISCONNECT_TIMEOUT_MS: '' },
     setTimeout(callback) {
@@ -300,14 +306,18 @@ test('a disconnected interactive terminal is terminated after its reconnect grac
   assert.deepEqual(processHandle.kills, ['SIGTERM']);
 
   const reconnectingSocket = new FakeSocket();
-  manager.attach('disconnect-task', reconnectingSocket);
+  const reconnecting = manager.attachWhenReady('disconnect-task', reconnectingSocket);
+  assert.equal(spawns, 1);
+  processHandle.emitExit({ exitCode: 0, signal: 15 });
+  await reconnecting;
+  assert.equal(spawns, 2);
   reconnectingSocket.emit('close');
-  assert.equal(timers.length, 2);
+  assert.equal(timers.length, 3);
   const resumedSocket = new FakeSocket();
   manager.attach('disconnect-task', resumedSocket);
-  assert.equal(timers[1].cancelled, true);
+  assert.equal(timers[2].cancelled, true);
 
-  processHandle.emitExit({ exitCode: 0, signal: 15 });
+  nextProcess.emitExit({ exitCode: 0, signal: 15 });
   manager.shutdown();
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
