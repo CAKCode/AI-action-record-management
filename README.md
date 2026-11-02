@@ -36,6 +36,30 @@ Codex Task Sessions 把一次自然语言请求从排队、执行、后台测试
 
 ![任务指令输入区](docs/screenshots/task-composer-desktop.png)
 
+### pytest 报告与证据
+
+pytest 报告以结构化结果卡呈现 Pass、Fail、耗时、当前状态和业务结果，失败用例可以展开 expected/actual、SID、Channel 和证据范围。
+
+![pytest 报告总览](docs/screenshots/pytest-report-overview.png)
+
+![pytest 失败证据](docs/screenshots/pytest-report-evidence.png)
+
+同一测试目标的首轮和 Rerun #1 会分开展示，并保留每轮的命令、Skill、通过/失败数量和时间线。
+
+![pytest 首轮与重跑](docs/screenshots/pytest-rerun-summary.png)
+
+### 已登记 HTML 与媒体 Viewed
+
+平台在后台执行登记时保存每份真实 pytest HTML 的 `kind`、稳定 key 和文件名；报告卡展示 HTML 入口、命令和执行归属，终态后切换到托管 artifact。运行中快照与终态归档使用同一条登记链路，避免从摘要或旧 Task 猜测报告文件。
+
+![已登记 pytest 命令和报告](docs/screenshots/pytest-registered-command.png)
+
+Agent 记录页保留 Task 指令、平台命令、Attempt 和 Skill 归因，便于从报告回溯到实际执行。
+
+![Agent 命令和 Skill 记录](docs/screenshots/pytest-agent-records.png)
+
+pytest HTML 中的 HLS、DASH、FLV、音频和日志资源会按 artifact 登记并归档；已托管媒体的 Viewed 状态写入 SQLite，同一报告在其他电脑打开或刷新也能看到已查看标记。一次真实媒体审计覆盖 **17 份 HTML、7,517 次 case 执行、2,264 个已挂载条目**，并保留了 **1,104 条共享 Viewed 记录**。
+
 完整的项目定位、核心能力、截图验证数据和质量检查见[作品介绍](docs/PROJECT_SHOWCASE.md)。
 
 ## 核心能力
