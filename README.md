@@ -12,7 +12,7 @@
 | **核心能力** | Task/Session 生命周期、后台执行、结构化报告、pytest HTML 与媒体归档、Video Check、版本周期、运行库存、备份恢复和操作审计 |
 | **工程重点** | 幂等操作、进程身份校验、任务续跑、失败重跑、证据链、SQLite WAL、SHA-256 完整性校验和安全路径边界 |
 | **技术栈** | Node.js、SQLite、WebSocket、PTY、原生 HTML/CSS/JavaScript、Node Test Runner |
-| **展示入口** | [作品介绍](docs/PROJECT_SHOWCASE.md) · [页面截图](#页面截图) · [架构设计](docs/ARCHITECTURE.md) · [API 参考](docs/API.md) |
+| **展示入口** | [作品介绍](docs/PROJECT_SHOWCASE.md) · [流程示意](#页面与流程示意) · [架构设计](docs/ARCHITECTURE.md) · [API 参考](docs/API.md) |
 
 ## 作品介绍
 
@@ -20,45 +20,15 @@ Codex Task Sessions 把一次自然语言请求从排队、执行、后台测试
 
 它重点解决长时间任务容易中断、测试结果难留证据、报告和媒体分散在不同目录的问题：后台命令通过 PID/LOG/DONE/STATE/META 登记，Worker 在 Codex 退出后继续观察；pytest HTML、日志、视频、音频和 Video Check 结果可以在运行中预览，并在终态后进入受校验的托管归档。
 
-### 页面截图
+### 页面与流程示意
 
-任务详情页集中展示最终统计、回归命令、业务轨迹和报告入口，支持桌面端和移动端查看。
+以下截图使用脱敏的通用名称、统计和路径，展示 Task、Worker、报告、Artifact、HTML 登记和媒体 Viewed 的流程。
 
-![任务摘要桌面端](docs/screenshots/task-summary-desktop.png)
+![Task 工作流](docs/screenshots/workflow-overview.svg)
 
-![任务摘要移动端](docs/screenshots/task-summary-mobile.png)
+![报告与 Artifact 生命周期](docs/screenshots/report-artifact-redacted.svg)
 
-报告区域展示真实 HTML 文件名、大小、状态和打开入口，并支持查看重跑结果。
-
-![任务报告列表](docs/screenshots/task-reports-desktop.png)
-
-底部指令区支持展开输入、保留草稿和继续发送下一步指令。
-
-![任务指令输入区](docs/screenshots/task-composer-desktop.png)
-
-### pytest 报告与证据
-
-pytest 报告以结构化结果卡呈现 Pass、Fail、耗时、当前状态和业务结果，失败用例可以展开 expected/actual、SID、Channel 和证据范围。
-
-![pytest 报告总览](docs/screenshots/pytest-report-overview.png)
-
-![pytest 失败证据](docs/screenshots/pytest-report-evidence.png)
-
-同一测试目标的首轮和 Rerun #1 会分开展示，并保留每轮的命令、Skill、通过/失败数量和时间线。
-
-![pytest 首轮与重跑](docs/screenshots/pytest-rerun-summary.png)
-
-### 已登记 HTML 与媒体 Viewed
-
-平台在后台执行登记时保存每份真实 pytest HTML 的 `kind`、稳定 key 和文件名；报告卡展示 HTML 入口、命令和执行归属，终态后切换到托管 artifact。运行中快照与终态归档使用同一条登记链路，避免从摘要或旧 Task 猜测报告文件。
-
-![已登记 pytest 命令和报告](docs/screenshots/pytest-registered-command.png)
-
-Agent 记录页保留 Task 指令、平台命令、Attempt 和 Skill 归因，便于从报告回溯到实际执行。
-
-![Agent 命令和 Skill 记录](docs/screenshots/pytest-agent-records.png)
-
-pytest HTML 中的 HLS、DASH、FLV、音频和日志资源会按 artifact 登记并归档；已托管媒体的 Viewed 状态写入 SQLite，同一报告在其他电脑打开或刷新也能看到已查看标记。一次真实媒体审计覆盖 **17 份 HTML、7,517 次 case 执行、2,264 个已挂载条目**，并保留了 **1,104 条共享 Viewed 记录**。
+报告卡可以展示结构化结果、失败证据、首轮与 Rerun、已登记 HTML、归档媒体和 Viewed 状态；截图中的业务信息均为占位示例。
 
 完整的项目定位、核心能力、截图验证数据和质量检查见[作品介绍](docs/PROJECT_SHOWCASE.md)。
 
@@ -176,6 +146,7 @@ Shell 中遗留的任务级路径继承给新服务。每个 Task 仍会在
 | [部署与运维](docs/OPERATIONS.md) | 运行依赖、目录权限、配置、升级、健康检查和故障处理 |
 | [架构设计](docs/ARCHITECTURE.md) | 组件职责、状态机、不变量和一致性策略 |
 | [API 参考](docs/API.md) | HTTP API、请求约束、响应字段和操作语义 |
+| [固定上报卡片](docs/REPORT_CARD_TEMPLATES.md) | 五类卡片、重跑与最终汇总预设、固定字段及完整示例 |
 | [Skill 结构化报告](docs/SKILL_REPORTS.md) | 报告 Schema、发布协议和 artifact 规则 |
 | [数据与恢复](docs/DATA_AND_RECOVERY.md) | 数据布局、保留、备份、检查点和恢复步骤 |
 | [媒体保留](docs/MEDIA_RETENTION.md) | pytest 生成视频的 30 天隔离清理与恢复点去重 |
