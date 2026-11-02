@@ -22,6 +22,10 @@ Codex Task Sessions 是一个面向 Codex 执行任务的持久化工作台。�
 
 作品截图采用脱敏的通用名称、统计和路径，只展示产品流程和交互结构。
 
+![任务摘要 Tab](screenshots/task-summary-redacted.png)
+
+![Codex CLI Tab](screenshots/task-codex-cli-redacted.png)
+
 ![Task 工作流](screenshots/workflow-overview.svg)
 
 ![报告与 Artifact 生命周期](screenshots/report-artifact-redacted.svg)

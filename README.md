@@ -24,6 +24,10 @@ Codex Task Sessions 把一次自然语言请求从排队、执行、后台测试
 
 以下截图使用脱敏的通用名称、统计和路径，展示 Task、Worker、报告、Artifact、HTML 登记和媒体 Viewed 的流程。
 
+![任务摘要 Tab](docs/screenshots/task-summary-redacted.png)
+
+![Codex CLI Tab](docs/screenshots/task-codex-cli-redacted.png)
+
 ![Task 工作流](docs/screenshots/workflow-overview.svg)
 
 ![报告与 Artifact 生命周期](docs/screenshots/report-artifact-redacted.svg)
