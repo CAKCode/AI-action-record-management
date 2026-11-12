@@ -1,0 +1,30 @@
+{
+  "title": "示例：失败用例重跑",
+  "status": "partial",
+  "summary": "重跑 5 项，4 项恢复通过，1 项仍失败。",
+  "metrics": {
+    "selected": 5,
+    "passed": 4,
+    "failed": 1,
+    "recovered": 4,
+    "persistent": 1
+  },
+  "rows": [
+    {
+      "case": "tests/test_example.py::test_service",
+      "outcome": "failed",
+      "detail": "第二次仍返回 503，继续分析。"
+    }
+  ],
+  "context": [
+    {
+      "label": "原执行",
+      "value": "demo:initial",
+      "format": "code"
+    },
+    {
+      "label": "范围",
+      "value": "仅首轮失败用例"
+    }
+  ]
+}

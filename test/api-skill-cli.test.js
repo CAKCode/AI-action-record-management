@@ -10,7 +10,7 @@ const ROOT_DIR = path.resolve(__dirname, '..');
 const CODEX_HOME = process.env.CODEX_HOME
   ? path.resolve(process.env.CODEX_HOME)
   : path.join(os.homedir(), '.codex');
-const SCRIPT = path.join(
+const SCRIPT = process.env.CODEX_TASK_API_SKILL_SCRIPT || path.join(
   CODEX_HOME,
   'skills',
   'codex-task-platform-api',
@@ -75,6 +75,20 @@ test.before(async () => {
     });
     response.setHeader('content-type', 'application/json');
     response.setHeader('x-request-id', request.headers['x-request-id'] || 'mock-request');
+    if (request.url === '/api/release-cycles/wait-cycle' && request.method === 'DELETE') {
+      response.statusCode = 202;
+      response.end(JSON.stringify({ ok: true, deleted: false, deletionId: 'deletion-fixture' })); return;
+    }
+    if (request.url === '/api/release-cycle-deletions/deletion-fixture') {
+      response.end(JSON.stringify({ ok: true, deleted: true, deletionId: 'deletion-fixture', deletedTasks: 2 })); return;
+    }
+    if (request.url.startsWith('/api/release-cycles')) {
+      response.end(JSON.stringify({ method: request.method, url: request.url, body: body.length ? JSON.parse(body) : null }));
+      return;
+    }
+    if (request.url.startsWith('/api/sessions?')) {
+      response.end('[]'); return;
+    }
     if (request.url === '/api/health') {
       response.end(JSON.stringify({ ok: true, runtime: { bridgeAvailable: true } }));
       return;
@@ -390,4 +404,71 @@ test('API Skill CLI exits cleanly when a downstream pipe closes early', async ()
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.signal, null);
   assert.equal(result.stderr, '');
+});
+
+test('version cycle CLI carries templates, Cron, series filters and deletion identity through the API', async () => {
+  const template = path.join(tempDir, 'task-template.json');
+  fs.writeFileSync(template, JSON.stringify({ name: 'Hourly sample', objective: 'Collect and sample two normal cases per Task',
+    workspaceMode: 'shared', sourceMode: 'shared-repo' }));
+  const created = await runCli(['release-cycle', 'create', '--id', 'hourly-cycle', '--name', 'Hourly normal',
+    '--release-key', 'hourly-normal', '--project', 'cloudRecord', '--workflow', 'cloud-recording-normal-sample',
+    '--task-template-file', template, '--cron', '17 * * * *', '--timezone', 'Asia/Shanghai',
+    '--overlap-policy', 'queue', '--misfire-policy', 'once', '--idempotency-key', 'create-hourly']);
+  assert.equal(created.status, 0, created.stderr);
+  const createRequest = requests.at(-1);
+  assert.equal(createRequest.url, '/api/release-cycles');
+  assert.equal(createRequest.method, 'POST');
+  assert.equal(createRequest.headers['idempotency-key'], 'create-hourly');
+  const body = JSON.parse(createRequest.body);
+  assert.equal(body.taskTemplate.objective, 'Collect and sample two normal cases per Task');
+  assert.deepEqual(body.schedule, { cron: '17 * * * *', timezone: 'Asia/Shanghai', overlapPolicy: 'queue', misfirePolicy: 'once' });
+
+  for (const [args, method, url] of [
+    [['list', '--project', 'cloudRecord', '--status', 'active,closed'], 'GET', '/api/release-cycles?project=cloudRecord&status=active%2Cclosed'],
+    [['get', 'hourly-cycle'], 'GET', '/api/release-cycles/hourly-cycle'],
+    [['tasks', 'hourly-cycle', '--limit', '5', '--offset', '1', '--status', 'running'], 'GET', '/api/release-cycles/hourly-cycle/tasks?limit=5&offset=1&status=running'],
+    [['close', 'hourly-cycle'], 'POST', '/api/release-cycles/hourly-cycle/close'],
+  ]) {
+    const response = await runCli(['release-cycle', ...args]);
+    assert.equal(response.status, 0, response.stderr);
+    assert.equal(requests.at(-1).method, method); assert.equal(requests.at(-1).url, url);
+  }
+  const scheduled = await runCli(['release-cycle', 'schedule-create', 'hourly-cycle', '--id', 'hourly-plan',
+    '--cron', '17 * * * *', '--timezone', 'Asia/Shanghai', '--enabled', 'false', '--overlap-policy', 'skip']);
+  assert.equal(scheduled.status, 0, scheduled.stderr);
+  assert.equal(requests.at(-1).url, '/api/release-cycles/hourly-cycle/schedules');
+  assert.deepEqual(JSON.parse(requests.at(-1).body), { id: 'hourly-plan', cron: '17 * * * *', timezone: 'Asia/Shanghai', enabled: false, overlapPolicy: 'skip' });
+
+  const count = requests.length;
+  const missingKey = await runCli(['release-cycle', 'run', 'hourly-cycle']);
+  assert.equal(missingKey.status, 64); assert.equal(requests.length, count);
+  const run = await runCli(['release-cycle', 'run', 'hourly-cycle', '--task-id', 'sample-task', '--idempotency-key', 'sample-first']);
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(JSON.parse(requests.at(-1).body), { taskId: 'sample-task', idempotencyKey: 'sample-first' });
+  const removed = await runCli(['release-cycle', 'delete', 'hourly-cycle', '--idempotency-key', 'delete-hourly',
+    '--release-cycle-created-at', '2026-11-04T00:00:00.000Z']);
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.equal(requests.at(-1).method, 'DELETE');
+  assert.equal(requests.at(-1).headers['x-release-cycle-created-at'], '2026-11-04T00:00:00.000Z');
+  assert.equal(requests.at(-1).headers['idempotency-key'], 'delete-hourly');
+
+  const linked = await runCli(['task', 'create', '--start', '--id', 'atomic-task', '--name', 'Linked task',
+    '--objective', 'Sample two normal cases', '--release-cycle-id', 'hourly-cycle', '--idempotency-key', 'linked-create']);
+  assert.equal(linked.status, 0, linked.stderr);
+  assert.equal(JSON.parse(requests.at(-1).body).releaseCycleId, 'hourly-cycle');
+  const filtered = await runCli(['task', 'list', '--release-cycle-id', 'hourly-cycle', '--release-key', 'hourly-normal']);
+  assert.equal(filtered.status, 0, filtered.stderr);
+  assert.equal(requests.at(-1).url, '/api/sessions?releaseCycleId=hourly-cycle&releaseKey=hourly-normal');
+  const beforeWait = requests.length;
+  const invalidWait = await runCli(['release-cycle', 'delete', 'wait-cycle', '--wait=invalid']);
+  assert.equal(invalidWait.status, 64); assert.equal(requests.length, beforeWait);
+  const waited = await runCli(['release-cycle', 'delete', 'wait-cycle', '--wait', '--idempotency-key', 'wait-delete']);
+  assert.equal(waited.status, 0, waited.stderr);
+  assert.equal(JSON.parse(waited.stdout).deletedTasks, 2);
+  assert.deepEqual(requests.slice(beforeWait).map(request => [request.method, request.url]), [
+    ['DELETE', '/api/release-cycles/wait-cycle'], ['GET', '/api/release-cycle-deletions/deletion-fixture'],
+  ]);
+  const progress = await runCli(['release-cycle', 'deletion', 'deletion-fixture']);
+  assert.equal(progress.status, 0, progress.stderr);
+  assert.equal(JSON.parse(progress.stdout).deleted, true);
 });

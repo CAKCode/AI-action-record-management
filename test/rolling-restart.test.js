@@ -190,6 +190,7 @@ test('guarded rolling restart blocks new work and verifies the replacement proce
       tasks: 0, attempts: 0, commands: 0, scheduledJobs: 0, externalAttempts: 0,
       externalArchives: 0, externalArchiveVerifications: 0, reportArtifactArchives: 0,
       bridgeCleanups: 0,
+      releaseCycleDeletions: 0,
     });
     await waitForExit(fixture.launcher);
     const newOwner = readOwner(fixture.runtimeDir);

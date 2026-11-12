@@ -1,0 +1,38 @@
+{
+  "title": "示例：最终汇总",
+  "status": "partial",
+  "summary": "流程已结束，重跑后最终 Pass 194、Fail 1，仍需处理 1 项失败。",
+  "cumulative": {
+    "total": 205,
+    "passed": 194,
+    "failed": 6,
+    "skipped": 5,
+    "error": 0,
+    "xfailed": 0
+  },
+  "final": {
+    "total": 200,
+    "passed": 194,
+    "failed": 1,
+    "skipped": 5,
+    "error": 0,
+    "xfailed": 0
+  },
+  "complete": true,
+  "reportCount": 2,
+  "executed": 200,
+  "context": [
+    {
+      "label": "业务版本",
+      "value": "example-v1"
+    },
+    {
+      "label": "原始阶段",
+      "value": "demo:deployment, demo:initial, demo:rerun-1",
+      "format": "code"
+    }
+  ],
+  "relatedReportKeys": [
+    "demo:analysis"
+  ]
+}

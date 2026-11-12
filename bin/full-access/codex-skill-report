@@ -9,7 +9,7 @@ const YAML = require('yaml');
 const { processSkillReportArtifactJob, publishSkillReport } = require('../../src/store');
 const { closeDatabase } = require('../../src/database');
 const { MAX_REPORT_BYTES } = require('../../src/skill-report');
-const { createTemplate } = require('../../public/report-cards');
+const { createTemplate, cardCatalog } = require('../../public/report-cards');
 
 const TEMPLATE_OPTIONS = new Map([
   ['--type', 'type'], ['--skill-id', 'skillId'], ['--report-key', 'reportKey'],
@@ -17,6 +17,7 @@ const TEMPLATE_OPTIONS = new Map([
   ['--external-attempt', 'externalAttemptId'], ['--command', 'command'],
   ['--working-dir', 'workingDirectory'], ['--output', 'output'],
   ['--related-reports', 'relatedReports'],
+  ['--preset', 'preset'], ['--data', 'dataFile'], ['--lang', 'language'],
 ]);
 
 function fail(message, code = 64) {
@@ -25,6 +26,7 @@ function fail(message, code = 64) {
 }
 
 function parseArguments(values) {
+  if (values.length === 1 && values[0] === 'cards') return { action: 'cards' };
   if (values[0] === 'template') {
     const options = { action: 'template' };
     for (let index = 1; index < values.length; index += 2) {
@@ -80,9 +82,14 @@ function assertActiveSkill(report) {
 async function main() {
   try {
     const options = parseArguments(process.argv.slice(2));
+    if (options.action === 'cards') {
+      process.stdout.write(`${JSON.stringify(cardCatalog(), null, 2)}\n`);
+      return;
+    }
     if (options.action === 'template') {
       const activeSkill = String(process.env.CODEX_ACTIVE_SKILL_IDS || '').split(',').map(value => value.trim()).find(Boolean);
-      const report = createTemplate({ ...options, skillId: options.skillId || activeSkill });
+      const data = options.dataFile ? readReport(options.dataFile) : {};
+      const report = createTemplate({ ...options, data, skillId: options.skillId || activeSkill });
       const content = `${JSON.stringify(report, null, 2)}\n`;
       if (options.output) fs.writeFileSync(path.resolve(options.output), content, { mode: 0o600 });
       else process.stdout.write(content);

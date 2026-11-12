@@ -40,7 +40,7 @@ SQLite 在线备份包含元数据，不包含这些文件；恢复检查点也�
 | Step 与 Run | Step 表示 `normal`、`long` 等稳定业务步骤；Rerun 是同一 Step 下的新 Run；技术 Retry 复用原 Run，只增加 External Attempt generation |
 | 项目与标签 | 任务配置和 API 保存分类与标签，默认项目为 `cloudRecord`；前端组合筛选已加载列表，不据此选择业务工作流 |
 | 后台执行 | 外部命令登记 PID/LOG/DONE/STATE/META 后释放 Codex；Worker 每秒核对终态，到期仍运行时轻量顺延调度，终态后才创建结果收集 Turn；停止前再次核对 |
-| 业务报告 | 每个 Run 使用稳定 `reportKey` 和自己的 `TRACKING_ID`；启动时可登记一份或多份 pytest HTML，运行中报告立即显示登记项，源文件生成后可打开只读快照；终态自动合并并切换到托管入口；Fail 分析 Markdown 使用相同 artifact 机制 |
+| 业务报告 | 每个 Run 使用稳定 `reportKey` 和自己的 `TRACKING_ID`；启动时可登记一份或多份 pytest HTML，运行中报告立即显示登记项，源文件生成后可打开只读快照；终态自动合并并切换到托管入口；Fail 分析 HTML / Markdown 使用相同 artifact 机制 |
 | 报告可靠性 | 运行中快照使用认证、`private, no-store` 和 sandbox CSP，但依赖业务源文件且不代表归档完成；终态 artifact 归档使用持久任务、租约和退避重试，单份 HTML 无效不会阻止同报告其他文件归档 |
 | 运行库存 | 异步回收 `completed_retained` 或 `orphan` Runtime，释放原生文件；平台报告、托管视频与历史保留，已回收 Session 不能恢复 |
 | 审计与恢复 | 保存 Turn、Attempt、命令、原始事件、Skill 版本和人工修正；支持 SQLite 在线备份、平台恢复检查点、受管日志完整性校验和服务重启恢复 |
@@ -401,11 +401,59 @@ curl -fsS http://127.0.0.1:8091/api/ready
 改写 HTML、日志、报告正文、哈希或工作日志。报告中的 AK、SK、Token、Authorization、Cookie
 和其他凭据是测试证据，应按高敏感数据授权访问、备份和传输。
 
+版本周期“结束”只关闭后续 Task 创建；“删除”会停止并清理该周期全部关联 Task 和自有产物。
+删除有 Task 的周期先返回 `202` / `deletionId`，Web 的清理循环读取 `release_cycle_deletions` 与
+`release_cycle_deletion_tasks`，持续推进停止、文件清理与原生 Runtime 回收。用
+`GET /api/release-cycle-deletions/:id` 或 Skill 的 `release-cycle deletion ID` 检查进度；
+`deleted=true` 才代表完成，`lastError` 表示正在等待重试的故障。清理中的租约计入维护活动数，
+待处理或重试的任务可以随服务重启恢复，不要求浏览器一直打开。
+
+已有 Task 即使显示待确认或失败，只要登记的后台进程仍存活，删除也会先停止并等待其退出，
+再清理文件。停止过程中的延迟信号、工作日志和状态回写绑定 Task 创建代次；Task 已删除或
+同名 ID 已重新创建时，旧回调自动失效。
+
+停止 API 先核对幂等回执和 Task 创建代次，再终止 CLI 或核对后台结果；已提交的旧停止请求
+不会关闭同名新 Task 的 CLI，也不会取消新 Task 的结果收集调度。CLI 等待期间发生 Task
+重建时，实际停止操作会再次核对原代次；后台结果核对与停止状态写入在同一个数据库事务中完成。
+确认完成 API 同样先读取幂等回执并核对 Task 代次，再结束 CLI、封存终端记录与工作区；
+每次异步等待后继续核对原代次，旧完成请求不会关闭或封存同名新 Task 的会话。
+同一 Task 的确认完成请求串行执行；此期间新的 CLI 连接等待完成操作结束。确认成功后读取历史
+transcript，确认失败后可继续恢复原会话，不会在验证或封存期间启动新的 CLI。其他 Task 的连接不受影响。
+对已经完成的 Task 使用新的幂等键再次确认时，也会先保存该键对应的原任务回执，再返回成功；
+即使随后删除并重建同名 Task，重试旧键也只返回原结果。
+
+本次 Task 执行上下文和会话标记用于识别所属本机子进程，覆盖后台启动后尚未登记的窗口；
+空闲回收和普通服务停服仍保留独立后台测试。跨 Task 的常驻共享服务应独立管理其生命周期，
+不应携带某个 Task 的执行上下文作为所有权标记。
+文件暂存名称绑定 Task ID 与创建时间，启动恢复与删除事务协调；文件清理失败的清单持久化并重试。
+旧版“删除后保留 Task”的隐藏周期在新版启动时转为“已结束”，已有 Task、产物和执行状态保留，
+可再显式选择新删除操作。操作审计和幂等回执不作为业务产物删除。
+
 显式交互 Codex CLI 在最后一个浏览器连接断开后默认等待 60 秒再结束。可通过 `CODEX_INTERACTIVE_DISCONNECT_TIMEOUT_MS=1000..86400000` 调整，或设为 `0` 禁用；显式配置在升级后继续生效。终止时先发 SIGTERM，2 秒未退出则发 SIGKILL；重连等待前一个进程退出，再用同一个 threadId 执行 resume。
+
+交互终端容量只统计仍存活的 CLI，退出后即释放名额，网页继续查看输出不占运行名额。CLI 终止信号发送到经 PID 身份核验的 PTY 进程组，覆盖包装进程及其原生 CLI 子进程。Web 停服期间关闭终端连接、等待各 CLI 实际退出，再按原 Session ID 和 Codex Home 回收后台组件；保留会话与报告文件。停服等待与 Worker 退出并行进行，失败会记录错误并以非零状态退出，不把未退出进程标记为回收成功。
+
+启动包装进程先退出时，仍保留强制终止定时器并等待原 PTY 进程组退出；脱离该进程组的
+原生 `codex exec/resume` 按所属 Session 和 Codex Home 回收。普通停服保留独立后台业务进程。
+关闭最后一个浏览器连接也会保留尚未退出的进程组记录；删除、重新连接和停服共用同一退出
+等待过程，直到整个进程组退出后才释放运行名额。包装进程自行退出时同样收尾其所属进程组。
+浏览器历史释放后，平台单独保留轻量运行时归属记录，不保留其终端回放缓冲；空闲回收也覆盖
+所属的原生 `codex exec/resume`。实际回收成功后才移除对应归属记录，停服同样读取这些记录，
+避免遗漏已经关闭浏览器的 CLI 子进程；会话文件仍保留用于重新连接。
+CLI 启动后会先登记进程及运行时归属，再初始化终端日志。日志初始化失败仍返回 `507`，
+同时按正常退出流程停止、等待并在需要时强制结束所属进程组；停服继续回收已登记的原生组件。
+这类初始化失败不会给 Task 留下永久的终端错误标记，修复存储问题后可以重新连接。
+
+Web 启动时用当前 HTTP 认证配置原子更新 Runtime 中权限为 `0600` 的 `task-api-auth.json`。
+托管 Task 通过 `codex-skill-use codex-task-platform-api -- ...` 调用 API 时，包装命令只给其 API
+子进程补齐本机认证；显式认证优先，其他 API origin 不自动使用本机凭据。该文件属于私有运行材料，
+不进入 Skill 快照或业务报告，不应提交 Git；包含 Runtime 的恢复检查点仍按敏感备份处理。
 
 Web 每 30 秒检查空闲超过 60 秒的 Task，释放其 managed Codex app-server、新版 `app-server daemon pid-update-loop` 和 `codex-code-mode-host` 代码执行辅助进程及进程内的线程。适用待确认、待输入、失败、停止、已完成和等待后台结果的 Task；活跃 CLI、正在排队或执行的 Turn 会保留。后台 pytest 独立运行，释放 Codex runtime 不会停止 pytest。进程释放不删除 Session 记录、Codex Home、认证、rollout、Skill 快照或报告；点击“重新连接”和后续 durable continuation 均可从原会话继续。已确认完成的 Task 保持既有只读行为，需要交互时先使用“恢复并继续”。
 
 释放期间有最长 30 秒的 Task runtime 协调租约，Worker 启动和 CLI 重连等待释放完成，不会同时关闭和恢复同一会话；异常重启后的过期租约自动失效。平台只在确认旧进程退出后记录 `session.runtime.released`，失败记录 `session.runtime.release.failed` 并留待下一次检查。
+
+同一次检查也扫描已删除 Task 遗留的 Codex 后台组件，不依赖 Task 行或 Session JSON 仍然存在。按进程环境中的平台 bot、Task ID、Session key、源目录计算出的 Session ID、Codex Home 和组件命令确认归属；Task ID 或 Session key 仍被任意现存 Task 引用时跳过。发送信号前及等待退出期间重新检查引用，重新出现的引用会中止后续回收。此路径只结束后台组件并记录 `runtime.orphan.released` / `runtime.orphan.release.failed` 审计，不删除文件，不处理 pytest 或其他业务进程；平台维护期间暂停。
 
 回收根据进程环境中的 Session ID、`CODEX_HOME` 和可执行路径识别本会话组件，不依赖仍然存在的父进程或进程组。发送信号前校验 PID 启动时钟，先发 `SIGTERM`，默认等待 2 秒，再向仍存活的组件发 `SIGKILL` 并等待 1 秒；等待期间重新扫描辅助进程。删除、重置或运行库存回收先等待这些组件退出，再删除运行目录；回收失败保留运行目录，由原清理作业重试。Session 记录已丢失时，仍按清理作业保存的 Session 身份回收残留组件。Worker 正常停服会等待正在执行的清理作业结束。
 
@@ -512,10 +560,10 @@ outbox 固定为普通文件 `0600`，采用临时文件、`fsync`、重命名�
 3. DONE、STATE 和 META 必须由当前 generation 在 `startedAt` 之后写入。META 至少提供绝对 `work_dir`，终态应包含 `exit_code` 和结束时间；复用旧固定文件名会被识别为 stale evidence。
 4. 每个已知 HTML 必须在启动登记时重复传入 `--artifact pytest-html:<stable-key>:<absolute-path>`。wrapper 是否直接包含 pytest `--html` 不再重要，但未登记路径不会从 `.cmd`、摘要或普通报告字段猜测。
 5. 同一次执行产生多份 HTML 时，每份使用唯一 key 和绝对路径；多个独立 pytest 应各自登记 External Attempt、Step Run 和 `reportKey`。同一个工作目录允许并行，但 LOG/DONE/STATE/META/HTML 必须避免互相覆盖。
-6. 适用的 Skill 必须先发布一份 `status=running`、含 `executionEvidence.externalAttemptId=TRACKING_ID` 且 `artifacts=[]` 的 Schema v2 报告。平台据此立即返回 `registeredArtifacts` 并显示登记文件；只有 External Attempt 文件路径而没有关联 Run 报告，不会凭空生成业务报告入口。终态核对时平台再发布兜底修订并合并、归档启动登记的 HTML。
+6. 适用的 Skill 必须先发布一份 `status=running`、含 `executionEvidence.externalAttemptId=TRACKING_ID` 且 `artifacts=[]` 的 Schema v2 报告。平台据此立即返回 `registeredArtifacts` 并显示登记文件；运行中入口依赖关联 Run 报告；Task 最终结果收集结束、进入待确认时，平台会为仍缺报告且有真实 Skill 归属的已登记 cloud-recording-test 终态执行补齐报告，挂载其显式声明的 HTML。同一 Run 执行链已有后续成功的技术 generation 时，旧失败执行只保留实际产出的 HTML 和已有托管副本；未产出的旧 HTML 不再阻止归档，原始声明保留在执行历史中。旧归档作业重试时也按同一规则处理。兜底不扫描未登记目录、不执行新测试、不推断用例 Pass/Fail 数量。单个登记异常记录工作日志，其他执行继续补齐。终态核对时平台再发布兜底修订并合并、归档启动登记的 HTML。
 7. 运行中登记项可打开请求开始时的只读快照；若文件尚未生成则返回 `404`。HTML 中可见的 `summary__reload__button` 表示 pytest-html 仍认为测试在运行，这不阻止查看快照，但平台会拒绝把它提前归档为终态 artifact。等待源文件完成写入，不要手工删除 reload 元素。
 8. 工作日志中的 `skill.report.artifact.retry_scheduled` 表示终态托管时源文件暂缺、仍变化或依赖资源未就绪；运行中快照与终态托管是不同阶段，快照可打开不表示归档成功。已有的其他 artifact 仍可打开。`skill.report.artifact.failed` 表示重试耗尽，应保留源文件和错误证据后修复并重新运行新的 Run。
-9. Fail 分析 Markdown 通常在终态分析后生成，应由终态报告显式追加 `failure-analysis-markdown` 声明；它和 HTML 都通过同一报告 artifact API 打开。
+9. Fail 分析默认生成独立 HTML，在终态报告显式追加 `failure-analysis-html` 声明；按需使用的 Markdown 保留 `failure-analysis-markdown`。前台分析通过实际终态命令的 `commandExecutionId` 关联，无需伪造后台执行；两种格式均通过同一报告 artifact API 打开。
 
 完整登记命令和报告 Schema 见[用户手册](USER_GUIDE.md#后台任务与定时检查)与[Skill 结构化报告](SKILL_REPORTS.md#发布)。
 

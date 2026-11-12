@@ -45,11 +45,12 @@ const {
   resolveBridgeSessionRuntime,
   releaseBridgeSessionProcess,
   releaseBridgeSessionProcessAndWait,
+  releaseOrphanTaskProcesses,
   sessionDaemonProcesses,
   cleanupBridgeSessionResources,
   secureBridgeRuntimeStorage,
 } = require('../src/bridge-runtime-cleanup');
-const { inspectProcess } = require('../src/process-identity');
+const { inspectProcess, signalVerifiedProcessGroup } = require('../src/process-identity');
 
 function writeProcessFixture(procRoot, pid, argv, environment) {
   const directory = path.join(procRoot, String(pid));
@@ -59,17 +60,20 @@ function writeProcessFixture(procRoot, pid, argv, environment) {
     .map(([key, value]) => `${key}=${value}\0`).join(''));
 }
 
-async function spawnRuntimeComponent(t, artifacts, role, { stubborn = false } = {}) {
+async function spawnRuntimeComponent(t, artifacts, role, { stubborn = false, taskId = '' } = {}) {
   const executable = path.join(artifacts.targets.codexHome,
     role === 'code-mode' ? 'codex-code-mode-host' : 'codex');
   if (!fs.existsSync(executable)) fs.symlinkSync(process.execPath, executable);
   const args = role === 'daemon' ? ['app-server', '--managed-daemon']
-    : role === 'pid-loop' ? ['app-server', 'daemon', 'pid-update-loop'] : [];
+    : role === 'pid-loop' ? ['app-server', 'daemon', 'pid-update-loop']
+      : role === 'cli' ? ['resume', 'fixture-thread'] : [];
   const child = spawn(executable, ['-e',
     `${stubborn ? 'process.on("SIGTERM",()=>{});' : ''}setInterval(()=>{},1000);process.stdout.write("ready");`,
     ...args], {
     detached: true,
-    env: { ...process.env, CODEX_HOME: artifacts.targets.codexHome, WECOM_BRIDGE_SESSION_ID: artifacts.sessionId },
+    env: { ...process.env, CODEX_HOME: artifacts.targets.codexHome, WECOM_BRIDGE_SESSION_ID: artifacts.sessionId,
+      ...(taskId ? taskRuntimeEnvironment(artifacts, taskId) : {}),
+    },
     stdio: ['ignore', 'pipe', 'ignore'],
   });
   t.after(async () => {
@@ -141,7 +145,14 @@ function createBridgeArtifacts(sessionKey, options = {}) {
     recentChat: [],
   };
   fs.writeFileSync(targets.recordFile, JSON.stringify(record, null, 2));
-  return { sessionId, targets, record };
+  return { sessionId, targets, record, sourceDir };
+}
+
+function taskRuntimeEnvironment(artifacts, taskId) {
+  return { CODEX_HOME: artifacts.targets.codexHome, CODEX_TASK_ID: taskId,
+    WECOM_BRIDGE_BOT_ID: 'codex-task-sessions', WECOM_BRIDGE_CHAT_KEY: artifacts.record.chatKey,
+    WECOM_BRIDGE_SESSION_ID: artifacts.sessionId, WECOM_BRIDGE_SOURCE_DIR: artifacts.sourceDir,
+  };
 }
 
 function claimOne(workerId) {
@@ -265,9 +276,12 @@ test('discovers daemon, PID maintenance and code hosts only for the exact Sessio
     [208, [codex, 'resume', 'thread-id'], environment],
     [209, [`${home}-other/codex`, 'app-server', '--managed-daemon'], environment],
     [210, [codex, 'app-server', '--managed-daemon'], { WECOM_BRIDGE_SESSION_ID: artifacts.sessionId }],
+    [211, ['/usr/local/bin/codex', 'resume', 'thread-id'], environment],
   ];
   for (const [pid, argv, env] of fixtures) writeProcessFixture(procRoot, pid, argv, env);
   assert.deepEqual(sessionDaemonProcesses(artifacts.sessionId, home, { procRoot }).map(match => match.pid), [201, 202, 203]);
+  assert.deepEqual(sessionDaemonProcesses(artifacts.sessionId, home, { procRoot, includeCliMain: true }).map(match => match.pid),
+    [201, 202, 203, 207, 208, 211]);
   assert.deepEqual(sessionDaemonProcesses('', home, { procRoot }), []);
   assert.deepEqual(sessionDaemonProcesses(artifacts.sessionId, '', { procRoot }), []);
 });
@@ -406,6 +420,192 @@ test('idle release reports missing identity rather than treating it as a success
   await assert.rejects(releaseBridgeSessionProcessAndWait('single:idle-release-unknown', {
     killProcess() { assert.fail('An unresolved Session must not signal any process'); },
   }), /source directory.*unavailable/i);
+});
+
+test('full deletion reclaims an orphan CLI while idle release preserves CLI processes', async t => {
+  const key = 'single:explicit-delete-orphan-cli';
+  const artifacts = createBridgeArtifacts(key);
+  const other = createBridgeArtifacts('single:explicit-delete-other-cli');
+  const cli = await spawnRuntimeComponent(t, artifacts, 'cli');
+  const unrelated = await spawnRuntimeComponent(t, other, 'cli');
+  const business = await spawnRuntimeComponent(t, artifacts, 'background');
+  assert.deepEqual((await releaseBridgeSessionProcessAndWait(key)).released, []);
+  assert.equal(processRunning(cli.pid), true);
+  const result = await cleanupBridgeSessionResources({ sessionKey: key, sourceDir: projectDir });
+  assert(result.released.includes(cli.pid));
+  assert.equal(processRunning(cli.pid), false);
+  assert.equal(processRunning(unrelated.pid), true);
+  assert.equal(processRunning(business.pid), true);
+});
+
+test('explicit Task cleanup stops an unregistered process group even after its leader exits', async t => {
+  const key = 'single:unregistered-owned-process';
+  const artifacts = createBridgeArtifacts(key);
+  const childCode = 'process.on("SIGTERM",()=>{});process.on("SIGHUP",()=>{});setInterval(()=>{},1000);process.stdout.write("ready");';
+  const parentCode = `const child=require('child_process').spawn(process.execPath,['-e',${JSON.stringify(childCode)}],{env:{},stdio:['ignore','pipe','ignore']});child.stdout.once('data',()=>process.stdout.write(JSON.stringify({pid:child.pid})));`;
+  const parent = spawn(process.execPath, ['-e', parentCode], { detached: true,
+    env: { ...process.env, CODEX_HOME: artifacts.targets.codexHome, WECOM_BRIDGE_SESSION_ID: artifacts.sessionId },
+    stdio: ['ignore', 'pipe', 'ignore'] });
+  const identity = inspectProcess(parent.pid);
+  t.after(() => signalVerifiedProcessGroup(identity, 'SIGKILL'));
+  const childPid = await new Promise((resolve, reject) => {
+    parent.stdout.once('data', data => resolve(JSON.parse(data.toString()).pid)); parent.once('error', reject);
+  });
+  assert.deepEqual((await releaseBridgeSessionProcessAndWait(key)).released, []);
+  assert.equal(processRunning(parent.pid), true); assert.equal(processRunning(childPid), true);
+  const result = await releaseBridgeSessionProcessAndWait(key, { includeTaskProcesses: true, graceMs: 30 });
+  assert.deepEqual(result.errors, []);
+  assert.equal(processRunning(parent.pid), false); assert.equal(processRunning(childPid), false);
+  assertArtifactsExist(artifacts);
+});
+
+test('Task process cleanup binds SDK processes to the original Attempt when their Codex home changed', async () => {
+  const key = 'single:attempt-bound-process'; const artifacts = createBridgeArtifacts(key);
+  const procRoot = path.join(tempDir, 'proc-attempt-bound');
+  for (const [pid, taskId, attemptId] of [[711, 'owned-task', 'old-attempt'], [712, 'owned-task', 'replacement-attempt'], [713, 'other-task', 'old-attempt']]) {
+    writeProcessFixture(procRoot, pid, ['/usr/bin/python3', 'pytest'], { CODEX_TASK_ID: taskId,
+      CODEX_TASK_ATTEMPT_ID: attemptId, CODEX_HOME: '/changed-sdk-home' });
+  }
+  const living = new Set([711, 712, 713]); const signalled = [];
+  const result = await releaseBridgeSessionProcessAndWait(key, { procRoot, includeTaskProcesses: true,
+    taskContext: { taskId: 'owned-task', attemptIds: ['old-attempt'] },
+    inspectProcess: pid => living.has(pid) ? { pid, startTicks: String(pid), state: 'S' } : null,
+    killProcess(pid) { signalled.push(pid); living.delete(pid); },
+  });
+  assert.deepEqual(result.errors, []); assert.deepEqual(signalled, [711]);
+  assert(living.has(712)); assert(living.has(713)); assertArtifactsExist(artifacts);
+});
+
+test('orphan sweep releases deleted Task components without a Session record and retains files and business processes', async t => {
+  const taskId = 'deleted-task-orphan-sweep';
+  const sessionKey = `single:${taskId}`;
+  createTask(taskId, sessionKey);
+  const artifacts = createBridgeArtifacts(sessionKey);
+  const components = [];
+  for (const role of ['daemon', 'pid-loop', 'code-mode']) {
+    components.push(await spawnRuntimeComponent(t, artifacts, role, { taskId, stubborn: true }));
+  }
+  const business = await spawnRuntimeComponent(t, artifacts, 'background', { taskId });
+  const activeId = 'orphan-sweep-active-cli';
+  createTask(activeId, `single:${activeId}`, 'running');
+  t.after(() => setTaskRuntime(activeId, `single:${activeId}`, 'waiting_review'));
+  const active = createBridgeArtifacts(`single:${activeId}`);
+  const activeHost = await spawnRuntimeComponent(t, active, 'code-mode', { taskId: activeId });
+  store.deleteSession(taskId);
+  fs.unlinkSync(artifacts.targets.recordFile);
+  const results = await store.releaseOrphanTaskRuntimes({ graceMs: 30 });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].taskId, taskId);
+  assert.deepEqual(results[0].errors, []);
+  assert.deepEqual(new Set(results[0].released), new Set(components.map(child => child.pid)));
+  assert.equal(processRunning(business.pid), true);
+  assert.equal(processRunning(activeHost.pid), true);
+  assertArtifactsExist(active);
+  for (const directory of [artifacts.targets.codexHome, artifacts.targets.workspaceRoot, artifacts.targets.chatfileDir]) {
+    assert.equal(fs.readFileSync(path.join(directory, 'evidence.txt'), 'utf8'), sessionKey);
+  }
+  const audit = getDatabase().prepare("SELECT * FROM audit_events WHERE kind='runtime.orphan.released' AND entity_id=?")
+    .get(artifacts.sessionId);
+  assert(audit);
+  assert.deepEqual(JSON.parse(audit.payload_json).released, results[0].released);
+  assert.deepEqual(await store.releaseOrphanTaskRuntimes(), []);
+  const job = claimOne('orphan-sweep-delete-worker');
+  assert.equal((await store.processBridgeCleanupJob(job, 'orphan-sweep-delete-worker')).ok, true);
+});
+
+test('orphan sweep validates platform ownership even when all native files are gone', async () => {
+  const artifacts = createBridgeArtifacts('single:orphan-no-files');
+  const procRoot = path.join(tempDir, 'proc-orphan-no-files');
+  const environment = taskRuntimeEnvironment(artifacts, 'absent-task');
+  const codex = path.join(artifacts.targets.codexHome, 'codex');
+  const argv = [codex, 'app-server', 'daemon', 'pid-update-loop'];
+  const fixtures = [
+    [601, argv, environment],
+    [602, argv, { ...environment, CODEX_TASK_ID: '' }],
+    [603, argv, { ...environment, WECOM_BRIDGE_BOT_ID: 'other-bot' }],
+    [604, argv, { ...environment, WECOM_BRIDGE_CHAT_KEY: 'single:other-session' }],
+    [605, argv, { ...environment, WECOM_BRIDGE_SOURCE_DIR: '' }],
+    [606, ['/usr/bin/python3', 'pytest'], environment],
+    [607, [codex, 'resume', 'thread-id'], environment],
+    [608, argv, { ...environment, WECOM_BRIDGE_CHAT_KEY: 'room:other-session' }],
+  ];
+  for (const [pid, args, env] of fixtures) writeProcessFixture(procRoot, pid, args, env);
+  fs.unlinkSync(artifacts.targets.recordFile);
+  fs.rmSync(artifacts.targets.codexHome, { recursive: true });
+  const living = new Set(fixtures.map(([pid]) => pid));
+  const kills = [];
+  const result = await releaseOrphanTaskProcesses({
+    procRoot, isReferenced: () => false,
+    inspectProcess: pid => living.has(pid) ? { pid, startTicks: String(pid), state: 'S' } : null,
+    killProcess(pid, signal) {
+      kills.push({ pid, signal }); living.delete(pid);
+      fs.rmSync(path.join(procRoot, String(pid)), { recursive: true });
+    },
+  });
+  // Discovery rejects the other environments; release must also keep them excluded.
+  assert.deepEqual(kills, [{ pid: 601, signal: 'SIGTERM' }]);
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0].released, [601]);
+  assert.deepEqual(result[0].errors, []);
+});
+
+test('orphan sweep checks both Task ID and Session key references and pauses for maintenance', async () => {
+  const procRoot = path.join(tempDir, 'proc-orphan-references');
+  const artifacts = createBridgeArtifacts('single:orphan-referenced-key');
+  const environment = taskRuntimeEnvironment(artifacts, 'orphan-referenced-id');
+  writeProcessFixture(procRoot, 611, [path.join(artifacts.targets.codexHome, 'codex'), 'app-server', '--managed-daemon'], environment);
+  const options = { procRoot, inspectProcess: pid => ({ pid, startTicks: '1', state: 'S' }),
+    killProcess() { assert.fail('A referenced or maintenance-protected runtime must stay alive'); },
+  };
+  store.saveSession('orphan-referenced-id', { name: 'reference by id', objective: 'fixture', workingDir: projectDir });
+  assert.deepEqual(await store.releaseOrphanTaskRuntimes(options), []);
+  getDatabase().prepare('UPDATE tasks SET persistent_session_key=? WHERE id=?')
+    .run(artifacts.record.chatKey, 'orphan-referenced-id');
+  writeProcessFixture(procRoot, 611, [path.join(artifacts.targets.codexHome, 'codex'), 'app-server', '--managed-daemon'],
+    { ...environment, CODEX_TASK_ID: 'absent-orphan-task-id' });
+  assert.deepEqual(await store.releaseOrphanTaskRuntimes(options), []);
+  getDatabase().prepare("UPDATE tasks SET persistent_session_key='' WHERE id=?").run('orphan-referenced-id');
+  const maintenance = store.acquirePlatformMaintenance('test_maintenance', 'test:orphan-sweep', 30000);
+  try { assert.deepEqual(await store.releaseOrphanTaskRuntimes(options), []); }
+  finally { store.releasePlatformMaintenance(maintenance.owner); }
+});
+
+test('orphan release stops signaling when a Task references the Session during shutdown', async () => {
+  const artifacts = createBridgeArtifacts('single:orphan-new-reference');
+  const procRoot = path.join(tempDir, 'proc-orphan-new-reference');
+  const environment = taskRuntimeEnvironment(artifacts, 'orphan-new-reference');
+  const codex = path.join(artifacts.targets.codexHome, 'codex');
+  writeProcessFixture(procRoot, 621, [codex, 'app-server', '--managed-daemon'], environment);
+  writeProcessFixture(procRoot, 622, [codex, 'app-server', 'daemon', 'pid-update-loop'], environment);
+  let referenced = false;
+  const kills = [];
+  const result = await releaseOrphanTaskProcesses({
+    procRoot, isReferenced: () => referenced,
+    inspectProcess: pid => ({ pid, startTicks: String(pid), state: 'S' }),
+    killProcess(pid, signal) { kills.push({ pid, signal }); referenced = true; },
+    delay: async () => {}, graceMs: 0, killWaitMs: 0,
+  });
+  assert.deepEqual(kills, [{ pid: 621, signal: 'SIGTERM' }]);
+  assert.equal(result[0].skipped, 'runtime_referenced');
+  assert.deepEqual(result[0].errors, []);
+});
+
+test('orphan release skips a reused PID between process discovery and signaling', async () => {
+  const artifacts = createBridgeArtifacts('single:orphan-reused-pid');
+  const procRoot = path.join(tempDir, 'proc-orphan-reused-pid');
+  writeProcessFixture(procRoot, 631, [path.join(artifacts.targets.codexHome, 'codex'), 'app-server', 'daemon', 'pid-update-loop'],
+    taskRuntimeEnvironment(artifacts, 'orphan-reused-pid'));
+  let inspections = 0;
+  const result = await releaseOrphanTaskProcesses({
+    procRoot, isReferenced: () => false,
+    inspectProcess(pid) {
+      inspections++;
+      if (inspections > 2) fs.rmSync(path.join(procRoot, String(pid)), { recursive: true, force: true });
+      return { pid, state: 'S', startTicks: inspections <= 2 ? 'before' : 'after' };
+    },
+    killProcess() { assert.fail('The PID now belongs to another process'); },
+  });
+  assert.deepEqual(result[0].errors, []);
 });
 
 test('cleanup rechecks Session references after asynchronous process release', async t => {

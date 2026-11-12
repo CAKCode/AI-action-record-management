@@ -221,6 +221,7 @@ function registerArtifactExecution(taskId, runtime, workingDirectory, command, o
     runKind: options.runKind || 'initial',
     sourceRunKey: options.sourceRunKey,
     artifacts: options.artifacts,
+    skillInvocationId: options.skillInvocationId,
   });
 }
 
@@ -899,6 +900,157 @@ test('phase report references round-trip without rebinding child execution evide
   assert.deepEqual(phase.artifacts, []);
 });
 
+test('terminal registered reruns get their own missing report even when the Skill published initial results', async () => {
+  ensureCloudRecordingReportSkill();
+  const taskId = 'missing-rerun-report';
+  const runtime = createRunningTask(taskId, `${taskId}-worker`);
+  const initialPath = path.join(projectDir, 'missing-rerun-initial.html');
+  fs.writeFileSync(initialPath, '<!doctype html><title>Initial</title>');
+  const initial = registerArtifactExecution(taskId, runtime, projectDir, `pytest tests --html ${initialPath}`,
+    { stepKey: 'rerun-group', artifacts: [{ key: 'initial-html', kind: 'pytest-html', path: initialPath }] });
+  store.publishSkillReport(taskId, reportFixture({ skillId: 'cloud-recording-test', reportKey: 'initial:already-published',
+    executionEvidence: { externalAttemptId: initial.id } }), { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+  const invocation = store.startSkillInvocation({ taskId, turnId: runtime.turn.id,
+    attemptId: runtime.attemptId, skillIds: ['cloud-recording-test'], commandName: 'run-rerun' });
+  const htmlPath = path.join(projectDir, 'missing-rerun.html');
+  fs.writeFileSync(htmlPath, '<!doctype html><html><body>Rerun result</body></html>');
+  const external = registerArtifactExecution(taskId, runtime, projectDir, `pytest tests --html ${htmlPath}`,
+    { stepKey: 'rerun-group', runKey: 'rerun-1', runKind: 'rerun', sourceRunKey: 'initial',
+      artifacts: [{ key: 'rerun-html', kind: 'pytest-html', path: htmlPath }] });
+  getDatabase().prepare('UPDATE external_attempts SET skill_invocation_id=? WHERE id=?').run(invocation.id, external.id);
+  store.finishSkillInvocation(invocation.id, { exitCode: 1 });
+  store.reconcileExternalAttempts(taskId);
+  store.finalizeSessionTurn({ taskId, turnId: runtime.turn.id, attemptId: runtime.attemptId,
+    commandId: runtime.command.id, workerId: runtime.workerId, exitCode: 0,
+    summary: 'Rerun finished; stage summary published.', finalStatus: 'waiting_review', retryCount: 0 });
+  const reports = store.listSkillReports(taskId);
+  const fallback = reports.find(report => report.executionEvidence?.externalAttemptId === external.id);
+  assert.ok(fallback);
+  assert.equal(fallback.skillId, 'cloud-recording-test');
+  assert.equal(fallback.status, 'failed');
+  assert.equal(fallback.artifactDeclarations[0].path, htmlPath);
+  assert.match(fallback.reportKey, /rerun-1/);
+  assert.equal(reports.length, 2);
+  assert.equal(store.publishMissingRegisteredPytestReports(taskId).length, 0);
+  for (const report of reports) {
+    if (report.artifactDeclarations.length) await store.archiveSkillReportArtifacts(taskId, report.id);
+  }
+});
+
+test('fallback reports accept maximum-length Run keys and continue after a malformed legacy declaration', async () => {
+  ensureCloudRecordingReportSkill();
+  const taskId = 'fallback-run-key-boundaries';
+  const runtime = createRunningTask(taskId, `${taskId}-worker`);
+  const invocation = store.startSkillInvocation({ taskId, turnId: runtime.turn.id,
+    attemptId: runtime.attemptId, skillIds: ['cloud-recording-test'], commandName: 'fixture' });
+  const initial = registerArtifactExecution(taskId, runtime, projectDir, 'pytest tests', { skillInvocationId: invocation.id });
+  store.publishSkillReport(taskId, reportFixture({ skillId: 'cloud-recording-test', reportKey: 'boundary:initial',
+    executionEvidence: { externalAttemptId: initial.id } }), { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+  const ids = [];
+  for (const [index, key] of ['rerun-bad', 'rerun-' + 'x'.repeat(122), 'rerun-good'].entries()) {
+    const reportPath = path.join(projectDir, `${taskId}-${index}.html`);
+    fs.writeFileSync(reportPath, '<!doctype html><html><body>Result</body></html>');
+    const execution = registerArtifactExecution(taskId, runtime, projectDir, `pytest tests --html ${reportPath}`, {
+      runKey: key, runKind: 'rerun', sourceRunKey: 'initial', skillInvocationId: invocation.id,
+      artifacts: [{ key: 'html', kind: 'pytest-html', path: reportPath }],
+    });
+    getDatabase().prepare('UPDATE external_attempts SET started_at=? WHERE id=?')
+      .run(new Date(Date.now() - 10000 + index * 100).toISOString(), execution.id);
+    ids.push(execution.id);
+  }
+  getDatabase().prepare('UPDATE external_attempts SET artifact_declarations_json=? WHERE id=?')
+    .run(JSON.stringify([{ key: 'html', kind: 'pytest-html', path: 'invalid-relative.html' }]), ids[0]);
+  store.reconcileExternalAttempts(taskId);
+  const published = store.publishMissingRegisteredPytestReports(taskId);
+  assert.equal(published.length, 2);
+  assert.ok(published.every(report => report.reportKey.length <= 128));
+  assert.deepEqual(new Set(published.map(report => report.executionEvidence.externalAttemptId)), new Set(ids.slice(1)));
+  assert.ok(store.listSessionWorklogs(taskId).some(event => event.kind === 'skill.report.execution_fallback_failed'));
+  for (const report of published) await store.archiveSkillReportArtifacts(taskId, report.id);
+});
+
+for (const producedOldReport of [false, true]) {
+  test(`a successful technical retry preserves only produced earlier HTML (old output=${producedOldReport})`, async () => {
+    ensureCloudRecordingReportSkill();
+    const taskId = `fallback-technical-retry-${producedOldReport}`;
+    const runtime = createRunningTask(taskId, `${taskId}-worker`);
+    const invocation = store.startSkillInvocation({ taskId, turnId: runtime.turn.id,
+      attemptId: runtime.attemptId, skillIds: ['cloud-recording-test'], commandName: 'fixture' });
+    const firstPath = path.join(projectDir, `${taskId}-first.html`);
+    const secondPath = path.join(projectDir, `${taskId}-second.html`);
+    if (producedOldReport) fs.writeFileSync(firstPath, '<!doctype html><title>Earlier failure</title>');
+    fs.writeFileSync(secondPath, '<!doctype html><title>Successful retry</title>');
+    const first = registerArtifactExecution(taskId, runtime, projectDir, `pytest tests --html ${firstPath}`, {
+      skillInvocationId: invocation.id, artifacts: [{ key: 'html', kind: 'pytest-html', path: firstPath }],
+    });
+    store.reconcileExternalAttempts(taskId);
+    const second = registerArtifactExecution(taskId, runtime, projectDir, `pytest tests --html ${secondPath}`, {
+      skillInvocationId: invocation.id, exitCode: 0, artifacts: [{ key: 'html', kind: 'pytest-html', path: secondPath }],
+    });
+    const current = store.publishSkillReport(taskId, reportFixture({ skillId: 'cloud-recording-test',
+      reportKey: 'technical:current', status: 'succeeded', executionEvidence: { externalAttemptId: second.id } }),
+    { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+    store.reconcileExternalAttempts(taskId);
+    await store.archiveSkillReportArtifacts(taskId, current.id);
+    store.finishSkillInvocation(invocation.id, { exitCode: 0 });
+    store.finalizeSessionTurn({ taskId, turnId: runtime.turn.id, attemptId: runtime.attemptId,
+      commandId: runtime.command.id, workerId: runtime.workerId, exitCode: 0,
+      summary: 'Technical retry succeeded', finalStatus: 'waiting_review', retryCount: 0 });
+    const reports = store.listSkillReports(taskId);
+    assert.equal(reports.some(report => report.executionEvidence?.externalAttemptId === first.id), producedOldReport);
+    for (const report of reports) await store.archiveSkillReportArtifacts(taskId, report.id);
+    assert.equal(store.completeSession(taskId).status, 'completed');
+  });
+}
+
+for (const [publishedBeforeRetry, producedOldOutput] of [[false, true], [true, true], [true, false]]) {
+  test(`successful retry releases missing older HTML while retaining produced output and registration history (published=${publishedBeforeRetry}, produced=${producedOldOutput})`, async () => {
+    ensureCloudRecordingReportSkill();
+    const taskId = `partial-retry-html-${publishedBeforeRetry}-${producedOldOutput}`;
+    const runtime = createRunningTask(taskId, `${taskId}-worker`);
+    const invocation = store.startSkillInvocation({ taskId, turnId: runtime.turn.id,
+      attemptId: runtime.attemptId, skillIds: ['cloud-recording-test'], commandName: 'fixture' });
+    const declarations = ['produced', 'missing', 'empty'].map(key => ({ key, kind: 'pytest-html',
+      path: path.join(projectDir, `${taskId}-${key}.html`) }));
+    if (producedOldOutput) fs.writeFileSync(declarations[0].path, '<!doctype html><title>Earlier output</title>');
+    fs.writeFileSync(declarations[2].path, '');
+    const first = registerArtifactExecution(taskId, runtime, projectDir, `pytest tests --html ${declarations[0].path}`, {
+      skillInvocationId: invocation.id, artifacts: declarations,
+    });
+    store.reconcileExternalAttempts(taskId);
+    let earlier;
+    if (publishedBeforeRetry) {
+      earlier = store.publishSkillReport(taskId, reportFixture({ skillId: 'cloud-recording-test',
+        reportKey: 'technical:earlier', status: 'failed', executionEvidence: { externalAttemptId: first.id } }),
+      { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+      await assert.rejects(store.archiveSkillReportArtifacts(taskId, earlier.id), /Failed to archive/);
+    }
+    const retryPath = path.join(projectDir, `${taskId}-retry.html`);
+    fs.writeFileSync(retryPath, '<!doctype html><title>Successful retry</title>');
+    const second = registerArtifactExecution(taskId, runtime, projectDir, `pytest tests --html ${retryPath}`, {
+      skillInvocationId: invocation.id, exitCode: 0,
+      artifacts: [{ key: 'html', kind: 'pytest-html', path: retryPath }],
+    });
+    store.reconcileExternalAttempts(taskId);
+    const current = store.publishSkillReport(taskId, reportFixture({ skillId: 'cloud-recording-test',
+      reportKey: 'technical:current', status: 'succeeded', executionEvidence: { externalAttemptId: second.id } }),
+    { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+    await store.archiveSkillReportArtifacts(taskId, current.id);
+    store.finishSkillInvocation(invocation.id, { exitCode: 0 });
+    store.finalizeSessionTurn({ taskId, turnId: runtime.turn.id, attemptId: runtime.attemptId,
+      commandId: runtime.command.id, workerId: runtime.workerId, exitCode: 0,
+      summary: 'Retry finished', finalStatus: 'waiting_review', retryCount: 0 });
+    earlier ||= store.listSkillReports(taskId).find(report => report.executionEvidence?.externalAttemptId === first.id);
+    assert.ok(earlier);
+    if (!publishedBeforeRetry) assert.deepEqual(earlier.artifactDeclarations, [declarations[0]]);
+    const archived = await store.archiveSkillReportArtifacts(taskId, earlier.id);
+    assert.deepEqual(archived.artifacts.map(artifact => artifact.key), producedOldOutput ? ['produced'] : []);
+    assert.deepEqual(JSON.parse(getDatabase().prepare('SELECT artifact_declarations_json FROM external_attempts WHERE id=?')
+      .get(first.id).artifact_declarations_json), declarations);
+    assert.equal(store.completeSession(taskId).status, 'completed');
+  });
+}
+
 test('a publishing CLI owner prevents the Worker from archiving the same report concurrently', async () => {
   ensureReportSkill();
   const taskId = 'pytest-html-owned-artifact-job-task';
@@ -934,6 +1086,51 @@ test('a publishing CLI owner prevents the Worker from archiving the same report 
   assert.equal(processed.ok, true);
   assert.equal(processed.report.artifacts.length, 1);
 });
+
+for (const workspaceMode of ['shared', 'session-clone']) {
+  for (const throwFromProgress of [true, false]) {
+    test(`a replaced artifact owner cannot publish resource metadata (${workspaceMode}, progress throws=${throwFromProgress})`, async () => {
+      ensureReportSkill();
+      const taskId = `resource-owner-${workspaceMode}-${throwFromProgress}`;
+      const runtime = createRunningTask(taskId, `${taskId}-worker`, { workspaceMode });
+      const root = store.getSession(taskId).sessionRoot || path.join(projectDir, taskId);
+      const directory = path.join(root, 'report');
+      fs.mkdirSync(path.join(directory, 'logs'), { recursive: true });
+      const reportPath = path.join(directory, 'result.html');
+      const button = '<button onclick="(function(url){frame.src=url;})(\'logs/case.html\')">Log</button>';
+      const blob = JSON.stringify({ tests: { test_case: [{ result: 'Failed', extras: [{ format_type: 'html', content: button }] }] } })
+        .replace(/&/g, '&amp;').replace(/"/g, '&#34;');
+      fs.writeFileSync(reportPath, `<!doctype html><html><body><div data-jsonblob="${blob}"></div></body></html>`);
+      fs.writeFileSync(path.join(directory, 'logs/case.html'), '<!doctype html><pre>Case log</pre>');
+      const { report } = publishArtifactReport(taskId, runtime, reportFixture({
+        reportKey: `${taskId}:report`, primaryExecution: { ...reportFixture().primaryExecution,
+          command: `pytest tests --html ${reportPath}`, workingDirectory: root },
+      }), [{ key: 'html', kind: 'pytest-html', path: reportPath }]);
+      const db = getDatabase();
+      db.prepare("UPDATE skill_report_artifact_jobs SET status='processing',lease_owner='original' WHERE report_id=?").run(report.id);
+      let progressCalls = 0;
+      let replaced = false;
+      await assert.rejects(() => store.archiveSkillReportArtifacts(taskId, report.id, {
+        jobOwner: 'original',
+        renewLease() {
+          progressCalls++;
+          if (replaced || progressCalls < (workspaceMode === 'shared' ? 2 : 1)) return;
+          replaced = true;
+          db.prepare("UPDATE skill_report_artifact_jobs SET lease_owner='replacement' WHERE report_id=?").run(report.id);
+          if (throwFromProgress) throw Object.assign(new Error('Resource progress lost its lease'), { statusCode: 409 });
+        },
+      }), /ownership|lease/);
+      assert.equal(replaced, true);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM skill_report_artifacts WHERE report_id=?').get(report.id).n, 0);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM skill_report_artifact_resources WHERE report_id=?').get(report.id).n, 0);
+      assert.equal(db.prepare('SELECT lease_owner FROM skill_report_artifact_jobs WHERE report_id=?').get(report.id).lease_owner, 'replacement');
+      const retried = await store.processSkillReportArtifactJob(report.id, 'replacement');
+      assert.equal(retried.ok, true, retried.error);
+      assert.equal(retried.report.artifacts.length, 1);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM skill_report_artifact_resources WHERE report_id=?').get(report.id).n, 1);
+    });
+  }
+}
 
 test('a verified Session correction retires an older artifact retry while preserving its error and history', async () => {
   ensureReportSkill();
@@ -1243,13 +1440,16 @@ test('invalid pytest HTML outputs do not block other outputs from the same repor
   }
 });
 
-test('archives a declared failure analysis Markdown report alongside pytest HTML', async () => {
+test('archives declared analysis HTML and Markdown alongside pytest HTML', async () => {
   ensureReportSkill();
   const runtime = createRunningTask('failure-analysis-artifact-task', 'failure-analysis-artifact-worker');
   const htmlPath = path.join(projectDir, 'failure-analysis-result.html');
   const markdownPath = path.join(projectDir, 'failure_analysis_result.md');
+  const analysisHtmlPath = path.join(projectDir, 'failure_analysis_result.html');
+  const analysisHtml = '<!doctype html><html><head><title>Failure analysis</title></head><body><h1>证据与结论</h1></body></html>';
   fs.writeFileSync(htmlPath, '<!doctype html><title>Pytest result</title>', { mode: 0o600 });
   fs.writeFileSync(markdownPath, '# Failure analysis\n\n- BUG: 1\n', { mode: 0o600 });
+  fs.writeFileSync(analysisHtmlPath, analysisHtml, { mode: 0o600 });
   const input = reportFixture({
     reportKey: 'failure-analysis:artifact',
     primaryExecution: {
@@ -1264,22 +1464,37 @@ test('archives a declared failure analysis Markdown report alongside pytest HTML
       fields: [{ label: 'Failure report', value: markdownPath, format: 'code' }],
     }],
   });
-  const { report: published } = publishArtifactReport(
+  const artifacts = [
+    { key: 'pytest', kind: 'pytest-html', path: htmlPath },
+    { key: 'failure-analysis', kind: 'failure-analysis-markdown', path: markdownPath },
+    { key: 'failure-analysis-html', kind: 'failure-analysis-html', path: analysisHtmlPath },
+  ];
+  const { report: published, external } = publishArtifactReport(
     'failure-analysis-artifact-task',
     runtime,
     input,
-    [
-      { key: 'pytest', kind: 'pytest-html', path: htmlPath },
-      { key: 'failure-analysis', kind: 'failure-analysis-markdown', path: markdownPath },
-    ],
+    artifacts,
+    { artifacts },
   );
+  assert.equal(published.registeredArtifacts.find(artifact => artifact.key === 'failure-analysis-html').kind,
+    'failure-analysis-html');
+  const preview = await store.openExternalAttemptArtifactFile('failure-analysis-artifact-task', external.id, 'failure-analysis-html');
+  try { assert.equal(await preview.fileHandle.readFile('utf8'), analysisHtml); }
+  finally { await preview.fileHandle.close(); }
 
   const archived = await store.archiveSkillReportArtifacts(
     'failure-analysis-artifact-task',
     published.id,
   );
 
-  assert.equal(archived.artifacts.length, 2);
+  assert.equal(archived.artifacts.length, 3);
+  const archivedHtml = archived.artifacts.find(artifact => artifact.kind === 'failure-analysis-html');
+  assert.equal(archivedHtml.fileName, 'failure_analysis_result.html');
+  const redirect = await store.openExternalAttemptArtifactFile('failure-analysis-artifact-task', external.id, 'failure-analysis-html');
+  assert.equal(redirect.redirectUrl, archivedHtml.url);
+  const openedHtml = await store.openSkillReportArtifactFile('failure-analysis-artifact-task', published.id, archivedHtml.id);
+  try { assert.equal(await openedHtml.fileHandle.readFile('utf8'), analysisHtml); }
+  finally { await openedHtml.fileHandle.close(); }
   const markdown = archived.artifacts.find((artifact) => artifact.kind === 'failure-analysis-markdown');
   assert.ok(markdown);
   assert.equal(markdown.fileName, 'failure_analysis_result.md');
@@ -1292,6 +1507,74 @@ test('archives a declared failure analysis Markdown report alongside pytest HTML
   } finally {
     await opened.fileHandle.close();
   }
+});
+
+for (const [workspaceMode, format] of [
+  ['shared', 'markdown'], ['shared', 'html'],
+  ['session-clone', 'markdown'], ['session-clone', 'html'],
+]) {
+  test(`foreground analysis commands archive ${format} without a background Attempt (${workspaceMode})`, async () => {
+    ensureReportSkill();
+    const id = `foreground-analysis-${workspaceMode}-${format}`;
+    const runtime = createRunningTask(id, `${id}-worker`, { workspaceMode });
+    const task = store.getSession(id);
+    const directory = workspaceMode === 'session-clone' ? path.join(task.sessionRoot, '.agent') : projectDir;
+    fs.mkdirSync(directory, { recursive: true });
+    const analysisPath = path.join(task.sessionRoot || directory, `${id}.${format === 'html' ? 'html' : 'md'}`);
+    const content = format === 'html'
+      ? '<!doctype html><html lang="zh-CN"><head><title>分析报告</title><style>body{color:#123}</style></head><body><h1>失败分析</h1><details><summary>证据</summary>Expected / actual</details></body></html>'
+      : '# Foreground failure analysis\n\nExpected / actual and evidence.\n';
+    fs.writeFileSync(analysisPath, content);
+    const execution = store.recordCommandExecution({
+      taskId: id, turnId: runtime.turn.id, attemptId: runtime.attemptId,
+      configuredWorkingDirectory: directory,
+      event: { type: 'item.completed', item: { id: `${id}-command`, type: 'command_execution',
+        command: `python3 analyze.py --output ${JSON.stringify(analysisPath)}`, cwd: directory,
+        status: 'completed', exit_code: 0 } },
+    });
+    const input = reportFixture({ reportKey: `${id}:analysis`, reportType: 'failure-analysis', primaryExecution: null,
+      executionEvidence: { commandExecutionId: execution.id },
+      artifacts: [{ key: 'analysis', kind: `failure-analysis-${format}`, path: analysisPath }] });
+    const published = store.publishSkillReport(id, input, { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+    assert.equal(published.stepRunId, '');
+    const archived = await store.archiveSkillReportArtifacts(id, published.id);
+    assert.equal(archived.artifacts.length, 1);
+    assert.equal(archived.executionEvidence.commandExecutionId, execution.id);
+    assert.equal(archived.artifacts[0].kind, `failure-analysis-${format}`);
+    assert.equal(archived.artifacts[0].fileName, path.basename(analysisPath));
+    assert.equal(archived.artifacts[0].mediaType, `text/${format}; charset=utf-8`);
+    fs.writeFileSync(analysisPath, 'Later source edits must not change the published report.');
+    const opened = await store.openSkillReportArtifactFile(id, published.id, archived.artifacts[0].id);
+    try { assert.equal(await opened.fileHandle.readFile('utf8'), content); }
+    finally { await opened.fileHandle.close(); }
+    assert.equal(getDatabase().prepare('SELECT COUNT(*) AS count FROM external_attempts WHERE task_id=?').get(id).count, 0);
+    assert.equal(store.publishSkillReport(id, input, { turnId: runtime.turn.id, attemptId: runtime.attemptId }).idempotent, true);
+    const otherId = `${id}-other`;
+    const other = createRunningTask(otherId, `${otherId}-worker`);
+    assert.throws(() => store.publishSkillReport(otherId, input, { turnId: other.turn.id, attemptId: other.attemptId }),
+      /commandExecutionId does not belong/);
+  });
+}
+
+test('analysis artifact formats accept their own extensions and preserve execution evidence', () => {
+  for (const [kind, extension] of [['failure-analysis-html', 'html'], ['failure-analysis-html', 'htm'],
+    ['failure-analysis-markdown', 'md']]) {
+    const report = reportFixture({ executionEvidence: { commandExecutionId: 'execution-analysis' },
+      artifacts: [{ key: 'analysis', kind, path: `/tmp/analysis.${extension}` }] });
+    assert.equal(normalizeSkillReport(report).artifacts[0].kind, kind);
+    const wrongExtension = kind === 'failure-analysis-html' ? 'md' : 'html';
+    assert.throws(() => normalizeSkillReport({ ...report,
+      artifacts: [{ key: 'analysis', kind, path: `/tmp/analysis.${wrongExtension}` }] }), /unsupported extension/);
+  }
+});
+
+test('execution evidence selects exactly one existing execution identity', () => {
+  const evidence = normalizeSkillReport(reportFixture({ executionEvidence: { commandExecutionId: 'execution-analysis' } })).executionEvidence;
+  assert.deepEqual(evidence, { commandExecutionId: 'execution-analysis' });
+  assert.throws(() => normalizeSkillReport(reportFixture({ executionEvidence: {} })), /exactly one/);
+  assert.throws(() => normalizeSkillReport(reportFixture({ executionEvidence: {
+    commandExecutionId: 'execution-analysis', externalAttemptId: 'external-analysis',
+  } })), /exactly one/);
 });
 
 test('terminal tracked pytest authorizes HTML archival outside task workspace roots', async () => {
@@ -2455,6 +2738,128 @@ test('pytest HTML archival preserves referenced HTML logs as managed resources',
   assert.equal(fs.readFileSync(path.join(logDirectory, logName), 'utf8'), logContent);
 });
 
+test('in-place log repair restores missing resource links without changing reports or media', async () => {
+  ensureReportSkill();
+  const taskId = 'repair-in-place-log-index';
+  const runtime = createRunningTask(taskId, `${taskId}-worker`, { workspaceMode: 'session-clone' });
+  const root = store.getSession(taskId).sessionRoot;
+  const directory = path.join(root, 'task/report');
+  fs.mkdirSync(path.join(directory, 'logs'), { recursive: true });
+  fs.mkdirSync(path.join(directory, 'videos'), { recursive: true });
+  const reportPath = path.join(directory, 'result.html');
+  const reportHtml = '<!doctype html><html><body><button onclick="openLog(\'logs/case.html\')">Log</button><video src="videos/sample.mp4"></video></body></html>';
+  fs.writeFileSync(reportPath, reportHtml);
+  fs.writeFileSync(path.join(directory, 'logs/case.html'), '<!doctype html><pre>Exact case log</pre>');
+  fs.writeFileSync(path.join(directory, 'videos/sample.mp4'), 'existing media');
+  const { report } = publishArtifactReport(taskId, runtime, reportFixture({ reportKey: 'repair:logs',
+    primaryExecution: { ...reportFixture().primaryExecution, command: `pytest tests --html ${reportPath}`, workingDirectory: root },
+  }), [{ key: 'html', kind: 'pytest-html', path: reportPath }]);
+  const archived = await store.archiveSkillReportArtifacts(taskId, report.id);
+  const artifact = archived.artifacts[0];
+  const db = getDatabase();
+  const original = db.prepare('SELECT * FROM skill_report_artifacts WHERE id=?').get(artifact.id);
+  const mediaBefore = db.prepare("SELECT * FROM skill_report_artifact_resources WHERE artifact_id=? AND media_type='video/mp4'").get(artifact.id);
+  const view = JSON.parse(original.view_json);
+  view.replacements = view.replacements.filter(([reference]) => !reference.startsWith('logs/'));
+  db.prepare("DELETE FROM skill_report_artifact_resources WHERE artifact_id=? AND file_name='case.html'").run(artifact.id);
+  db.prepare('UPDATE skill_report_artifacts SET view_json=? WHERE id=?').run(JSON.stringify(view), artifact.id);
+  const repaired = await store.repairInPlaceSkillReportArtifactLogs(taskId, artifact.id);
+  assert.equal(repaired.addedResources, 1);
+  const after = db.prepare('SELECT * FROM skill_report_artifacts WHERE id=?').get(artifact.id);
+  assert.equal(after.sha256, original.sha256);
+  assert.equal(after.managed_path, original.managed_path);
+  assert.equal(after.bytes, original.bytes);
+  assert.equal(fs.readFileSync(reportPath, 'utf8'), reportHtml);
+  assert.deepEqual(db.prepare('SELECT * FROM skill_report_artifact_resources WHERE id=?').get(mediaBefore.id), mediaBefore);
+  const opened = await store.openSkillReportArtifactFile(taskId, report.id, artifact.id);
+  assert.match(opened.content.toString(), /\/resources\/report-resource-/);
+  assert.doesNotMatch(opened.content.toString(), /logs\/case\.html/);
+  const resource = db.prepare("SELECT * FROM skill_report_artifact_resources WHERE artifact_id=? AND file_name='case.html'").get(artifact.id);
+  const log = await store.openSkillReportArtifactResourceFile(taskId, report.id, artifact.id, resource.id);
+  try { assert.equal(await log.fileHandle.readFile('utf8'), '<!doctype html><pre>Exact case log</pre>'); }
+  finally { await log.fileHandle.close(); }
+  assert.equal((await store.repairInPlaceSkillReportArtifactLogs(taskId, artifact.id)).addedResources, 0);
+});
+
+test('in-place archive and reuse heal media graphs from retained metadata without copying videos', async () => {
+  ensureReportSkill();
+  const taskId = 'repair-in-place-media-graph';
+  const runtime = createRunningTask(taskId, `${taskId}-worker`, { workspaceMode: 'session-clone' });
+  const root = store.getSession(taskId).sessionRoot;
+  const directory = path.join(root, 'task/report');
+  for (const name of ['logs', 'videos']) fs.mkdirSync(path.join(directory, name), { recursive: true });
+  const reportPath = path.join(directory, 'result.html');
+  const html = '<!doctype html><html><body><button onclick="openLog(\'logs/case.html\')">Log</button><video src="videos/sample(a)+.mp4"></video><a href="videos/sample.m3u8">HLS</a><a href="videos/sample.mpd">DASH</a></body></html>';
+  fs.writeFileSync(reportPath, html);
+  fs.writeFileSync(path.join(directory, 'logs/case.html'), '<!doctype html><pre>Case log</pre>');
+  fs.writeFileSync(path.join(directory, 'videos/sample(a)+.mp4'), 'retained MP4');
+  fs.writeFileSync(path.join(directory, 'videos/sample.m3u8'), '#EXTM3U\n#EXTINF:1,\npart.ts\n#EXT-X-ENDLIST\n');
+  fs.writeFileSync(path.join(directory, 'videos/part.ts'), 'retained TS');
+  fs.writeFileSync(path.join(directory, 'videos/sample.mpd'), '<MPD><Period><Representation><SegmentList><Initialization sourceURL="init.webm"/><SegmentURL media="audio.webm"/></SegmentList></Representation></Period></MPD>');
+  fs.writeFileSync(path.join(directory, 'videos/init.webm'), 'retained DASH init');
+  fs.writeFileSync(path.join(directory, 'videos/audio.webm'), 'retained DASH audio');
+  const input = reportFixture({ reportKey: 'repair:media', primaryExecution: {
+    ...reportFixture().primaryExecution, command: `pytest tests --html ${reportPath}`, workingDirectory: root,
+  } });
+  const { report, external } = publishArtifactReport(taskId, runtime, input,
+    [{ key: 'html', kind: 'pytest-html', path: reportPath }]);
+  const complete = await store.archiveSkillReportArtifacts(taskId, report.id);
+  const good = complete.artifacts[0];
+  const db = getDatabase();
+  const goodRow = db.prepare('SELECT * FROM skill_report_artifacts WHERE id=?').get(good.id);
+  const sourceResources = db.prepare('SELECT * FROM skill_report_artifact_resources WHERE artifact_id=?').all(good.id);
+  assert.equal(sourceResources.length, 7);
+  const next = store.publishSkillReport(taskId, { ...input, summary: 'A newer presentation',
+    executionEvidence: { externalAttemptId: external.id },
+    artifacts: [{ key: 'html', kind: 'pytest-html', path: reportPath }],
+  }, { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+  const badId = 'report-artifact-' + require('node:crypto').createHash('sha256').update(next.id + '\0html').digest('hex').slice(0, 32);
+  db.prepare(`INSERT INTO skill_report_artifacts
+    (id,task_id,report_id,artifact_key,label,kind,file_name,media_type,managed_path,bytes,sha256,source_sha256,created_at,storage_mode,view_json)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'in-place',?)`).run(badId, taskId, next.id, 'html', goodRow.label,
+    goodRow.kind, goodRow.file_name, goodRow.media_type, goodRow.managed_path, goodRow.bytes, goodRow.sha256,
+    goodRow.source_sha256, new Date().toISOString(), JSON.stringify({ containmentRoot: root, replacements: [], check: null }));
+  db.prepare("UPDATE skill_report_artifact_jobs SET status='completed' WHERE report_id=?").run(next.id);
+  await store.repairInPlaceSkillReportArtifactLogs(taskId, badId);
+  store.markSkillReportArtifactMediaViewed(taskId, next.id, badId, 'existing-viewed-key');
+  const healed = await store.archiveSkillReportArtifacts(taskId, next.id);
+  assert.equal(healed.artifacts[0].id, badId);
+  let resources = db.prepare('SELECT * FROM skill_report_artifact_resources WHERE artifact_id=?').all(badId);
+  assert.equal(resources.length, 7);
+  for (const row of resources) {
+    const source = sourceResources.find(item => item.resource_key === row.resource_key);
+    assert.equal(row.managed_path, source.managed_path);
+    assert.equal(row.sha256, source.sha256);
+    assert.equal(row.storage_mode, 'in-place');
+    const view = JSON.parse(row.view_json);
+    if (view.content) {
+      assert.match(view.content, new RegExp(badId));
+      assert.doesNotMatch(view.content, new RegExp(good.id));
+    }
+  }
+  assert.equal(db.prepare('SELECT sha256 FROM skill_report_artifacts WHERE id=?').get(badId).sha256, goodRow.sha256);
+  assert.equal(fs.readFileSync(reportPath, 'utf8'), html);
+  assert.equal((await store.repairInPlaceSkillReportArtifactResources(taskId, badId)).addedResources, 0);
+  db.prepare('DELETE FROM skill_report_artifact_resources WHERE artifact_id=?').run(badId);
+  const third = store.publishSkillReport(taskId, { ...input, summary: 'Reuse must validate the resource graph',
+    executionEvidence: { externalAttemptId: external.id },
+    artifacts: [{ key: 'html', kind: 'pytest-html', path: reportPath }],
+  }, { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+  const reused = await store.archiveSkillReportArtifacts(taskId, third.id);
+  assert.equal(reused.artifacts[0].id, badId);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM skill_report_artifact_resources WHERE artifact_id=?').get(badId).n, 7);
+  assert.equal(store.listSkillReportArtifactMediaViews(taskId, next.id, badId).length, 1);
+  db.prepare("DELETE FROM skill_report_artifact_resources WHERE artifact_id=? AND file_name='part.ts'").run(badId);
+  assert.equal((await store.repairInPlaceSkillReportArtifactResources(taskId, badId)).addedResources, 1);
+  db.prepare('DELETE FROM skill_report_artifact_resources WHERE artifact_id IN (?,?)').run(badId, good.id);
+  const rebuilt = await store.repairInPlaceSkillReportArtifactResources(taskId, badId);
+  assert.equal(rebuilt.reusedFrom, '');
+  assert.equal(rebuilt.unresolvedReferences, 0);
+  assert.equal(rebuilt.mediaCopiedBytes, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM skill_report_artifact_resources WHERE artifact_id=?').get(badId).n, 7);
+  assert.equal(fs.readFileSync(path.join(directory, 'videos/sample(a)+.mp4'), 'utf8'), 'retained MP4');
+});
+
 test('pytest HTML log resources remain complete when media reaches its resource limit', async () => {
   ensureReportSkill();
   const taskId = 'pytest-html-log-media-budget-task';
@@ -3448,6 +3853,32 @@ test('the Skill command wrapper records invocations and background tracking inhe
   assert.equal(usage.invocationCount, 1);
   assert.equal(usage.skills.find((skill) => skill.id === 'cloud-recording-test').invocationCount, 1);
   assert.equal(usage.skills.find((skill) => skill.id === 'run-in-background').invocationCount, 1);
+});
+
+test('session-clone tracking accepts sibling report output when called from the source checkout', () => {
+  ensureCloudRecordingReportSkill();
+  const taskId = 'clone-tracker-sibling-report';
+  const runtime = createRunningTask(taskId, 'clone-tracker-worker', { workspaceMode: 'session-clone' });
+  const task = store.getSession(taskId);
+  fs.mkdirSync(task.sourceRoot, { recursive: true });
+  const output = path.join(task.sessionRoot, 'task', 'sample');
+  fs.mkdirSync(output, { recursive: true });
+  const log = path.join(output, 'sample.log');
+  const html = path.join(output, 'sample.html');
+  fs.writeFileSync(log, 'sample log'); fs.writeFileSync(html, '<html>Sample report</html>');
+  const result = spawnSync(path.join(ROOT_DIR, 'bin/full-access/codex-background-track'), [
+    'register', '--pid', '999999983', '--log', log,
+    '--step-key', 'sample', '--run-key', 'initial', '--run-kind', 'initial',
+    '--artifact', `pytest-html:sample-initial:${html}`,
+  ], { cwd: task.sourceRoot, encoding: 'utf8', env: { ...process.env,
+    CODEX_TASK_ID: taskId, CODEX_TASK_TURN_ID: runtime.turn.id, CODEX_TASK_ATTEMPT_ID: runtime.attemptId,
+    CODEX_TASK_WORKSPACE_MODE: 'session-clone', CODEX_TASK_SESSION_ROOT: task.sessionRoot,
+  } });
+  assert.equal(result.status, 0, result.stderr);
+  const id = result.stdout.match(/^TRACKING_ID=(.+)$/m)?.[1];
+  const attempt = store.getExternalAttempt(taskId, id);
+  assert.equal(attempt.sessionId, taskId);
+  assert.equal(attempt.artifactDeclarations[0].path, html);
 });
 
 test('automatic deployment invocations drive terminal fallback reports without command parsing', () => {

@@ -26,6 +26,12 @@ Skill 结构化报告把业务结论与终端原始输出分开。Skill 负责�
 
 ## 固定登记卡片
 
+固定内容、生成命令、重跑/最终汇总预设和七份完整数据示例统一见
+[固定上报卡片规范](REPORT_CARD_TEMPLATES.md)（Card Templates v1）。
+`codex-skill-report cards` 可读取同一目录；`template --data` 从真实结果文件填充固定指标与明细。
+
+模板生成器对 `pending`、`running` 统一输出 `artifacts=[]`，即使输入数据中带有附件也留待终态发布；执行证据和原输入数据保持不变。
+
 各业务共用五类卡片，类型使用现有 `reportType`，不用新增上报协议：
 
 | 卡片 | `reportType` | 主要内容 |
@@ -90,7 +96,7 @@ codex-skill-use cloud-recording-test -- \
 
 同一任务内，`reportKey` 是一个 Step Run 的逻辑报告稳定标识，不能跨 Run 复用。一个任务执行多个相互独立的 pytest 时，每个 Run 使用不同且稳定的 `reportKey`；同一 Run 产生多份 HTML 时，可以由一份报告统一声明。紧邻的相同内容重试返回原报告并标记幂等；内容变化会追加修订，A -> B -> A 对应修订 `1`、`2`、`3`。任务完成后报告不可再发布。
 
-每份报告都必须显式包含 `artifacts` 数组；没有文件时使用 `[]`。运行中和终态 Run 报告都把 `codex-background-track register` 返回的 `TRACKING_ID` 写入 `executionEvidence.externalAttemptId`；平台由此写入并返回 `stepRunId`。启动时已经知道的每份 HTML 应同时通过可重复的 `--artifact pytest-html:<stable-key>:<absolute-path>` 登记到 External Attempt。若运行中报告遗漏了这一步，平台会在 `primaryExecution.command` 含有具体 pytest `--html` 输出、且报告工作目录与 External Attempt 的 META 工作目录一致时安全补登记；不满足这些条件不会猜测文件。运行中报告发布后，平台立即以 `registeredArtifacts` 返回登记项的安全展示字段和受控快照 URL，不返回源路径；平台再把登记项自动合并进每一版终态报告并归档。终态才生成的 Fail Markdown 由终态报告显式追加。报告 revision、后台执行和 artifact 必须属于同一 Step Run。
+每份报告都必须显式包含 `artifacts` 数组；没有文件时使用 `[]`。运行中和终态 Run 报告都把 `codex-background-track register` 返回的 `TRACKING_ID` 写入 `executionEvidence.externalAttemptId`；平台由此写入并返回 `stepRunId`。启动时已经知道的每份 HTML 应同时通过可重复的 `--artifact pytest-html:<stable-key>:<absolute-path>` 登记到 External Attempt。若运行中报告遗漏了这一步，平台会在 `primaryExecution.command` 含有具体 pytest `--html` 输出、且报告工作目录与 External Attempt 的 META 工作目录一致时安全补登记；不满足这些条件不会猜测文件。运行中报告发布后，平台立即以 `registeredArtifacts` 返回登记项的安全展示字段和受控快照 URL，不返回源路径；平台再把登记项自动合并进每一版终态报告并归档。终态才生成的分析 HTML / Markdown 由终态报告显式追加。后台报告 revision、后台执行和 artifact 必须属于同一 Step Run；前台分析使用下文的 commandExecutionId。
 
 `cloud-recording-test`、`cloud-recording-gw-deploy` 和 `rtsc-cicd-deploy` 在 Task 进入待审核状态时，如已有 `codex-skill-use` 自动 invocation 或旧命令归因、但最新报告仍是 `pending`、`running` 或 `unknown`，平台会生成一份 `platform-fallback:*` 终态报告，避免业务轨迹缺少结论。测试兜底使用关联的 External Attempt 状态；部署兜底优先使用该 Skill 最后的非 `codex-skill-report` invocation，旧数据再使用命令归因，避免后续 pytest 的退出码覆盖部署结果。该报告明确标注为兜底，只包含平台已经持久化的状态与退出码。CICD/GW 每个 `reportKey` 只要求开始和结束两个 revision；业务轨迹只投影首条开始和最后一条终态结束，历史中间 revision 仍保留用于审计但不再显示为业务节点。其他报告仍只投影最新 revision。
 
@@ -98,10 +104,24 @@ codex-skill-use cloud-recording-test -- \
 
 1. 为每个独立 Run 分配稳定 `reportKey`，登记时重复传入每份已知 HTML 的 `--artifact`，保存返回的 `STEP_RUN_ID` 和 `TRACKING_ID`。
 2. 启动后发布 Schema v2 的 `running` 修订，使用 `artifacts=[]`，并把 `TRACKING_ID` 写入 `executionEvidence.externalAttemptId`。`registeredArtifacts` 由平台返回，Skill 不提交该字段；在运行中报告顶层声明 HTML 会得到 `pending or running reports cannot declare artifacts`。
-3. 终态结果收集后发布同 Run 的最终修订。平台合并该 External Attempt 已登记的 HTML；后生成的 Fail Markdown 等文件由 Skill 显式追加。
+3. 终态结果收集后发布同 Run 的最终修订。平台合并该 External Attempt 已登记的 HTML；后生成的分析 HTML / Markdown 等文件由 Skill 显式追加。
 4. 多份报告必须都关联同一真实 Run，不能用另一个 Run 的登记、文件或退出码凑齐。Task 摘要汇总同 Run 多份报告的 artifact，身份按 `reportKey + kind + key` 区分，托管入口优先于同身份的登记入口。
 
 源 Skill 仍使用 Schema v1 示例，或要求 `running.artifacts` 列出文件时，应同步为上述契约；只重启平台不能修正 Skill 的旧模板。任务首轮冻结 Skill，更新源 Skill 只影响后续新快照，不能改写已创建任务的不可变快照。
+
+Codex 来源的 Skill 从实际 `SOURCE_CODEX_HOME/skills`（默认 `/home/jenkins/.codex/skills`）读取；
+仓库的 `skills/task-reporting` 是维护副本，修改后还需同步实际源目录。平台读取 Skill 列表时刷新源版本，
+后续新 Task 冻结更新后的版本，无需重启。失败分析直接把 `failure-analysis-html` 放入分析卡的
+`artifacts`，关联生成 HTML 的前台 `commandExecutionId`；跨多个测试 Run 的输入不需要绑定为单个后台执行。
+完整查询、模板和发布示例见 [前台分析 HTML 挂载](../skills/task-reporting/references/cards.md#foreground-analysis-html)。
+
+已登记的 `cloud-recording-test` 后台执行到达终态后，如果在 Task 最终进入待确认时仍没有关联的 Run 报告，平台会按原 Skill、External Attempt、Step Run 和显式 HTML 声明生成每个执行的兜底报告。初始轮已有报告不代表后续 rerun 的报告齐全；父阶段通过 `relatedReportKeys` 引用子报告。兜底直接使用已记录的执行终态，详细用例统计以 HTML 为准，不增加模型轮次或测试执行。
+
+同一 Step Run、同一执行链中，失败的技术 generation 已被后续成功 generation 替代时，按文件保留实际生成的非空 HTML 和已有的托管副本，未产出的旧 HTML 不再加入归档作业。旧执行原始声明和已发布修订保持不变；已经排队的旧作业再次处理时也会跳过这些未产出文件，并记录 `skill.report.artifacts.superseded_missing`。最新执行或没有成功后继的失败执行仍按原声明归档，不忽略缺文件错误。兜底报告键采用有界 Run 名称和执行摘要，支持 128 字符的 Run 名称；单个历史执行的登记异常记入 `skill.report.execution_fallback_failed`，其他执行继续补齐。
+
+归档期间失去作业归属时立即中止，提交文件和资源索引前再次核验归属；该异常不会降级成缺媒体警告后继续发布。历史原地归档若遗漏日志索引，可按 Task 与 artifact 调用 `repairInPlaceSkillReportArtifactLogs` 补建日志资源和链接映射，保留 HTML 原字节、摘要及现有视频资源。
+
+原地 HTML 摘要正确不代表媒体索引完整。归档重试和跨修订复用会核对 HTML 引用、HLS/DASH 分片及 Video Check 的资源映射。历史缺失可按 Task 与 artifact 调用 `repairInPlaceSkillReportArtifactResources`：优先复用同 Task、同源 HTML 路径和摘要下已保留的完整索引，并改写资源归属；没有可用索引时从原文件重建。修复不复制视频、不改 HTML 原字节或 viewed 状态，返回新增资源数及未解决引用数，并记录 `skill.report.artifact.resources_repaired`。报告 GET 不触发修复。
 
 ## Schema v2
 
@@ -117,7 +137,7 @@ codex-skill-use cloud-recording-test -- \
 | `status` | 枚举 | `pending`、`running`、`succeeded`、`failed`、`partial`、`blocked`、`cancelled`、`unknown` |
 | `summary` | 1..2000 字符 | 可独立理解的业务结论 |
 | `observedAt` | 可选 ISO 时间 | 业务结果观察时间 |
-| `executionEvidence` | 有 artifact 时必填 | 本次后台执行的 `externalAttemptId` |
+| `executionEvidence` | 有 artifact 时必填 | 后台执行的 `externalAttemptId`，或前台命令的 `commandExecutionId`，二选一 |
 | `primaryExecution` | 可选对象 | 生成本报告的主业务执行，前端醒目展示 |
 | `artifacts` | 必填数组，最多 32 项 | 需要托管的文件声明；没有文件时为 `[]` |
 | `relatedReportKeys` | 可选报告 key 数组 | 同 Task、同阶段内归入本卡的执行报告；不改变文件归档归属 |
@@ -131,8 +151,8 @@ codex-skill-use cloud-recording-test -- \
 `primaryExecution` 不授权或发现任意 artifact。
 
 `artifacts` 每项包含唯一 `key`、`kind` 和绝对 `path`。当前 `kind` 支持
-`pytest-html` 和 `failure-analysis-markdown`；前者必须使用 `.html`/`.htm`，后者必须使用
-`.md`。同一报告不能重复 key 或规范化路径，`pending`/`running` 报告不能声明文件。
+`pytest-html`、`failure-analysis-html` 和 `failure-analysis-markdown`；两个 HTML 类型使用
+`.html`/`.htm`，Markdown 使用 `.md`。同一报告不能重复 key 或规范化路径，`pending`/`running` 报告不能声明文件。
 运行中的报告仍使用 `artifacts=[]`；其 `registeredArtifacts` 是平台根据同一 External Attempt
 的显式登记或严格的 pytest `--html` 补登记生成的只读响应字段，不是 Skill 上报字段。每项包含 `key`、`kind`、`fileName`、
 `executionStatus` 和受认证 `url`；终态 HTML 源文件不可用时还返回 `available=false` 和
@@ -146,11 +166,26 @@ External 已终态、归档排队、处理中或重试时，预览仍可打开�
 非普通文件和超过 64 MiB 的源文件。运行中快照依赖业务工作目录，不具备终态托管副本的
 持久性或完整性摘要保证。
 
+前台分析、构建等命令可使用 `executionEvidence: {"commandExecutionId":"execution-..."}`，关联当前
+Task 命令审计中实际存在的终态记录。平台核对其 Task、Turn、Attempt 归属，并使用记录的工作目录；
+Session 模式允许产物位于自有 Session 目录内，不必把前台命令登记成后台 pytest。该关联不会创建
+External Attempt 或绑定无关 Step Run。`template --data` 保留该前台执行关联；显式传入
+`--external-attempt` 时以该后台执行为准。完整分析 HTML 使用 `kind: "failure-analysis-html"`，
+用户选择 Markdown 时使用 `kind: "failure-analysis-markdown"`。
+
+失败分析 HTML 和 Markdown 都会在任务摘要顶部和结构化报告卡片顶部提供“查看完整分析”入口；最终汇总
+通过 `relatedReportKeys` 引用分析卡时同样提供入口。这里只加载文件元数据，点击后才读取完整正文。
+
+分析 HTML 按问题提供可展开的完整 NodeID 列表，保留参数化和 profile/组对应。
+Jira 创建预填与外部链接在独立标签页打开；报告查看器兼容旧 HTML 的链接写法，
+并允许新标签页使用正常的 Jira 登录与表单流程。页内问题索引继续在当前报告跳转。
+
 平台按 `executionEvidence.externalAttemptId` 精确查询当前 Task 已登记的后台执行，校验其原始
 Turn/Attempt 归属、终态和 META 中的绝对工作目录。新 External Attempt 的每个 `pytest-html`
 必须精确匹配启动登记时保存的 kind、key 和绝对路径，并位于 META 工作目录内；因此直接 pytest
 和通过 `--report` 等参数传递路径的 wrapper 使用同一套证据格式。
-`failure-analysis-markdown` 不要求出现在 pytest 命令中，但必须位于同一工作目录内。普通
+`failure-analysis-html` 和 `failure-analysis-markdown` 不要求出现在 pytest 命令中，沿用对应执行的
+目录归属规则。分析 HTML 按独立文档归档和打开，不执行 pytest 资源改写或视频 viewed 状态适配。普通
 Section 仍可展示路径，但不参与归档。每个不超过 64 MiB 的普通 HTML 或 Markdown 文件独立复制到任务
 托管存储，`artifacts` 会为每份文件返回不同的 ID、稳定 key、文件名、大小、SHA-256 和
 受控打开 URL，前端逐份显示打开入口。路径必须留在该执行目录内，不能使用环境变量、

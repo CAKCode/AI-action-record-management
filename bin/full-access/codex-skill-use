@@ -47,6 +47,7 @@ const runtimeContext = {
 };
 const managedInvocation = Object.values(runtimeContext).every(Boolean);
 let invocationId = '';
+let invocationFinished = false;
 
 function invocationWarning(action, error) {
   process.stderr.write(`codex-skill-use: could not record invocation ${action}: ${error.message}\n`);
@@ -72,16 +73,19 @@ if (managedInvocation) {
   }
 }
 
+let childEnvironment = {
+  ...process.env,
+  CODEX_ACTIVE_SKILL_IDS: skillIds.join(','),
+  ...(invocationId ? { CODEX_SKILL_INVOCATION_ID: invocationId } : {}),
+};
+if (managedInvocation && skillIds.includes('codex-task-platform-api')) {
+  try { childEnvironment = require('../../src/task-api-auth').taskApiEnvironment(childEnvironment, args); }
+  catch (error) { finishInvocation(78); fail(error.message, 78); }
+}
 const child = spawn(executable, args, {
   stdio: 'inherit',
-  env: {
-    ...process.env,
-    CODEX_ACTIVE_SKILL_IDS: skillIds.join(','),
-    ...(invocationId ? { CODEX_SKILL_INVOCATION_ID: invocationId } : {}),
-  },
+  env: childEnvironment,
 });
-let invocationFinished = false;
-
 function finishInvocation(exitCode, signal = '') {
   if (!invocationId || invocationFinished) return;
   invocationFinished = true;

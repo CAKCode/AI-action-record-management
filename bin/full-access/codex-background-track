@@ -68,7 +68,8 @@ try {
     turnId: process.env.CODEX_TASK_TURN_ID,
     attemptId: process.env.CODEX_TASK_ATTEMPT_ID,
     skillInvocationId: process.env.CODEX_SKILL_INVOCATION_ID,
-    workingDirectory: process.cwd(),
+    workingDirectory: process.env.CODEX_TASK_WORKSPACE_MODE === 'session-clone' && process.env.CODEX_TASK_SESSION_ROOT
+      ? process.env.CODEX_TASK_SESSION_ROOT : process.cwd(),
     pid,
     logPath: options['--log'],
     donePath: options['--done'],

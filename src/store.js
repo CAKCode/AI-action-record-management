@@ -63,6 +63,9 @@ const {
 const {
   cleanupBridgeSessionResources,
   listBridgeSessionRecords,
+  releaseOrphanTaskProcesses,
+  releaseBridgeSessionProcessAndWait,
+  resolveBridgeSessionRuntime,
 } = require('./bridge-runtime-cleanup');
 const {
   archiveFileAtomically,
@@ -106,6 +109,11 @@ const MAX_EXTERNAL_CHECK_SECONDS = 7 * 24 * 60 * 60;
 const ACTIVE_EXTERNAL_STATUSES = ['running'];
 const ACTIVE_SCHEDULE_STATUSES = ['pending', 'leased', 'dispatched'];
 const ACTIVE_STATUSES = ['queued', 'running', 'recovering', 'stopping', 'waiting_scheduled'];
+const TASK_CYCLE_DELETION_SQL = `EXISTS (
+  SELECT 1 FROM release_cycle_deletion_tasks target
+  JOIN release_cycle_deletions deletion ON deletion.id=target.deletion_id
+  WHERE target.task_id=tasks.id AND target.task_created_at=tasks.created_at
+    AND deletion.status<>'completed')`;
 const PLATFORM_MAINTENANCE_KEY = 'platform_maintenance';
 const RUNTIME_RELEASE_KEY_PREFIX = 'task_runtime_release:';
 const SERIES_QUEUE_BLOCKED_SQL = `EXISTS (
@@ -701,7 +709,10 @@ function enrichSessionsWithScheduling(db, sessions) {
   const seriesRuns = new Map(db.prepare(`
     SELECT r.task_id, r.id AS series_run_id, r.release_cycle_id, r.schedule_id,
            r.scheduled_for, r.trigger_type, r.run_sequence,
-           c.name AS release_cycle_name, c.release_key, c.status AS release_cycle_status
+           c.name AS release_cycle_name, c.release_key,
+           CASE WHEN EXISTS(SELECT 1 FROM release_cycle_deletions deletion
+             WHERE deletion.cycle_id=c.id AND deletion.cycle_created_at=c.created_at AND deletion.status<>'completed')
+             THEN 'deleting' ELSE c.status END AS release_cycle_status
     FROM task_series_runs r
     JOIN release_cycles c ON c.id=r.release_cycle_id
     WHERE r.task_id IN (${placeholders})
@@ -933,14 +944,22 @@ function reconcileStagedTaskFiles(db) {
       const stagedGeneration = match[2] || '';
       const tombstone = path.join(parent, entry.name);
       const target = path.join(parent, taskId);
-      const current = getTaskGeneration.get(taskId);
-      const sameGeneration = current && (!stagedGeneration
-        || hashContent(current.created_at).slice(0, 16) === stagedGeneration.toLowerCase());
-      if (sameGeneration && !fileExists(target)) {
-        fs.renameSync(tombstone, target);
-      } else {
-        removeTree(tombstone);
-      }
+      // A helper process must not restore files while another process has
+      // staged them inside an uncommitted Task deletion transaction.
+      const remove = db.transaction(() => {
+        if (db.prepare(`SELECT 1 FROM release_cycle_deletion_tasks target
+          JOIN release_cycle_deletions deletion ON deletion.id=target.deletion_id,
+            json_each(target.staged_files_json) file
+          WHERE deletion.status<>'completed' AND json_extract(file.value,'$.tombstone')=? LIMIT 1`).get(tombstone)) return false;
+        const current = getTaskGeneration.get(taskId);
+        const sameGeneration = current && (!stagedGeneration
+          || hashContent(current.created_at).slice(0, 16) === stagedGeneration.toLowerCase()
+          || hashContent(`${taskId}\0${current.created_at}`).slice(0, 16) === stagedGeneration.toLowerCase());
+        if (!sameGeneration) return true;
+        if (!fileExists(target) && fileExists(tombstone)) fs.renameSync(tombstone, target);
+        return false;
+      }).immediate();
+      if (remove) removeTree(tombstone);
     }
   }
 }
@@ -1464,12 +1483,20 @@ function listReleaseCycles(options = {}) {
     clauses.push('c.project=?');
     params.push(normalizeTaskProject(options.project));
   }
-  if (options.status) {
-    const statuses = String(options.status).split(',').map((item) => item.trim()).filter(Boolean);
-    if (statuses.length) {
-      clauses.push(`c.status IN (${statuses.map(() => '?').join(',')})`);
-      params.push(...statuses);
+  const statuses = String(options.status || '').split(',').map(item => item.trim()).filter(Boolean);
+  if (statuses.length) {
+    const deleting = `EXISTS(SELECT 1 FROM release_cycle_deletions deletion
+      WHERE deletion.cycle_id=c.id AND deletion.cycle_created_at=c.created_at AND deletion.status<>'completed')`;
+    const regular = statuses.filter(status => status !== 'deleting');
+    const filters = [];
+    if (regular.length) {
+      filters.push(`(c.status IN (${regular.map(() => '?').join(',')}) AND NOT ${deleting})`);
+      params.push(...regular);
     }
+    if (statuses.includes('deleting')) filters.push(deleting);
+    clauses.push(`(${filters.join(' OR ')})`);
+  } else {
+    clauses.push("c.status<>'archived'");
   }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const rows = db.prepare(`SELECT c.*, COUNT(DISTINCT r.task_id) AS task_count,
@@ -1488,6 +1515,7 @@ function listReleaseCycles(options = {}) {
   }
   return rows.map((row) => ({
     ...rowToReleaseCycle(row, byCycle.get(row.id) || []),
+    ...releaseCycleDeletionFields(db, row),
     taskCount: Number(row.task_count || 0),
     lastTaskAt: row.last_task_at || '',
   }));
@@ -1496,7 +1524,7 @@ function listReleaseCycles(options = {}) {
 function getReleaseCycle(id) {
   const db = ensureStorage();
   const cycle = db.prepare('SELECT * FROM release_cycles WHERE id=?').get(normalizeSeriesId(id));
-  return cycle ? listReleaseCycles().find((item) => item.id === cycle.id) : null;
+  return cycle ? listReleaseCycles().find((item) => item.id === cycle.id) || null : null;
 }
 
 function createReleaseCycle(data = {}, context = {}) {
@@ -1505,9 +1533,34 @@ function createReleaseCycle(data = {}, context = {}) {
   if (!releaseKey || releaseKey.length > 200) throw statusError('releaseKey must be a non-empty string of at most 200 characters', 400);
   const workflow = String(data.workflow || 'full-release-regression').trim();
   const taskTemplate = releaseCycleTaskTemplate(data, data.project);
+  const project = normalizeTaskProject(data.project);
+  const name = String(data.name || releaseKey).trim();
+  if (data.schedule != null && (typeof data.schedule !== 'object' || Array.isArray(data.schedule))) {
+    throw statusError('schedule must be an object', 400);
+  }
+  const schedule = data.schedule == null ? null : {
+    id: String(data.schedule.id || ''), cron: String(data.schedule.cron || data.schedule.cronExpr || '').trim(),
+    timezone: data.schedule.timezone || 'Asia/Shanghai', enabled: data.schedule.enabled !== false,
+    misfirePolicy: data.schedule.misfirePolicy || 'once', overlapPolicy: data.schedule.overlapPolicy || 'queue',
+  };
+  const key = String(context.idempotencyKey || '').trim();
+  if (key.length > 256) throw statusError('Idempotency key exceeds the 256-character limit', 400);
+  const receiptKey = key ? `release-cycle-create:${crypto.createHash('sha256').update(key).digest('hex')}` : '';
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify({ id, name, project, releaseKey, workflow, taskTemplate, schedule })).digest('hex');
   const now = nowIso();
   const db = ensureStorage();
-  db.transaction(() => {
+  return db.transaction(() => {
+    if (receiptKey) {
+      const stored = db.prepare('SELECT value FROM metadata WHERE key=?').get(receiptKey);
+      if (stored) {
+        const receipt = parseJson(stored.value, null);
+        if (!receipt?.response || typeof receipt.response !== 'object' || Array.isArray(receipt.response)) {
+          throw statusError('Stored release cycle creation receipt is invalid', 500);
+        }
+        if (receipt.fingerprint !== fingerprint) throw statusError('Idempotency key is already bound to a different release cycle creation', 409);
+        return receipt.response;
+      }
+    }
     assertNoPlatformMaintenance(db);
     if (db.prepare('SELECT 1 FROM release_cycles WHERE id=? OR release_key=?').get(id, releaseKey)) {
       throw statusError(`Release cycle ${id} or release key ${releaseKey} already exists`, 409);
@@ -1515,7 +1568,7 @@ function createReleaseCycle(data = {}, context = {}) {
     db.prepare(`INSERT INTO release_cycles
       (id, name, project, release_key, workflow, status, config_json, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`)
-      .run(id, String(data.name || releaseKey).trim(), normalizeTaskProject(data.project), releaseKey,
+      .run(id, name, project, releaseKey,
         workflow, JSON.stringify({ taskTemplate }), now, now);
     appendAuditEvent({
       scope: 'config', entityType: 'release_cycle', entityId: id,
@@ -1523,8 +1576,12 @@ function createReleaseCycle(data = {}, context = {}) {
       payload: { id, releaseKey, project: normalizeTaskProject(data.project), workflow },
       actor: context.actor || 'operator', requestId: context.requestId || '',
     }, db);
+    if (schedule) createTaskSeriesSchedule(id, { ...schedule, id: schedule.id || `schedule-${crypto.randomUUID()}` }, context);
+    const result = getReleaseCycle(id);
+    if (receiptKey) db.prepare('INSERT INTO metadata(key,value) VALUES (?,?)').run(receiptKey,
+      JSON.stringify({ fingerprint, response: result, createdAt: now }));
+    return result;
   }).immediate();
-  return getReleaseCycle(id);
 }
 
 function createTaskSeriesSchedule(cycleId, data = {}, context = {}) {
@@ -1575,6 +1632,7 @@ function closeReleaseCycle(cycleId, context = {}) {
     assertNoPlatformMaintenance(db);
     const cycle = db.prepare('SELECT * FROM release_cycles WHERE id=?').get(id);
     if (!cycle) throw statusError(`Release cycle ${id} not found`, 404);
+    if (releaseCycleDeletionFields(db, cycle).deletion) throw statusError('Release cycle is being deleted', 409);
     if (cycle.status === 'closed') return;
     if (cycle.status === 'archived') throw statusError('Archived release cycles cannot be closed', 409);
     db.prepare(`UPDATE release_cycles SET status='closed', closed_at=?, updated_at=? WHERE id=?`)
@@ -1589,6 +1647,245 @@ function closeReleaseCycle(cycleId, context = {}) {
     }, db);
   }).immediate();
   return getReleaseCycle(id);
+}
+
+function normalizeRetainedReleaseCycles() {
+  const db = ensureStorage();
+  return db.transaction(() => {
+    const rows = db.prepare("SELECT id FROM release_cycles WHERE status='archived'").all();
+    for (const row of rows) {
+      db.prepare("UPDATE release_cycles SET status='closed',closed_at=CASE WHEN closed_at='' THEN updated_at ELSE closed_at END WHERE id=?").run(row.id);
+      db.prepare('UPDATE task_series_schedules SET enabled=0 WHERE release_cycle_id=?').run(row.id);
+      appendAuditEvent({ scope: 'config', entityType: 'release_cycle', entityId: row.id,
+        kind: 'release_cycle.retained_history.normalized', message: 'Legacy retained cycle is now an ended cycle; Tasks and artifacts preserved.',
+        actor: 'system' }, db);
+    }
+    return rows.length;
+  }).immediate();
+}
+
+function deleteReleaseCycle(cycleId, context = {}) {
+  const id = normalizeSeriesId(cycleId);
+  const idempotencyKey = String(context.idempotencyKey || '').trim();
+  const expectedCreatedAt = String(context.expectedCreatedAt || '').trim();
+  if (idempotencyKey.length > 256 || expectedCreatedAt.length > 128) {
+    throw statusError('Release cycle deletion identity is too long', 400);
+  }
+  const receiptKey = idempotencyKey
+    ? `release-cycle-delete:${crypto.createHash('sha256').update(idempotencyKey).digest('hex')}` : '';
+  const db = ensureStorage();
+  return db.transaction(() => {
+    if (receiptKey) {
+      const stored = db.prepare('SELECT value FROM metadata WHERE key=?').get(receiptKey);
+      if (stored) {
+        const receipt = parseJson(stored.value, null);
+        if (!receipt?.response || typeof receipt.response !== 'object' || Array.isArray(receipt.response)) {
+          throw statusError('Stored release cycle deletion receipt is invalid', 500);
+        }
+        if (receipt.id !== id || receipt.expectedCreatedAt !== expectedCreatedAt) {
+          throw statusError('Idempotency key is already bound to a different release cycle deletion', 409);
+        }
+        if (receipt.response.deletionId) return getReleaseCycleDeletion(receipt.response.deletionId);
+        return receipt.response;
+      }
+    }
+    assertNoPlatformMaintenance(db);
+    const cycle = db.prepare('SELECT * FROM release_cycles WHERE id=?').get(id);
+    if (cycle && expectedCreatedAt && cycle.created_at !== expectedCreatedAt) {
+      throw statusError('Release cycle was replaced after this deletion was prepared', 409);
+    }
+    const targets = cycle ? db.prepare(`SELECT tasks.id,tasks.created_at FROM tasks
+      JOIN task_series_runs run ON run.task_id=tasks.id WHERE run.release_cycle_id=?`).all(id) : [];
+    let response = { ok: true, id, deleted: true, status: 'completed', totalTasks: 0,
+      deletedTasks: 0, remainingTasks: 0, retainedTasks: 0, historyRetained: false };
+    const now = nowIso();
+    if (cycle) {
+      const existing = db.prepare('SELECT id FROM release_cycle_deletions WHERE cycle_id=? AND cycle_created_at=?')
+        .get(id, cycle.created_at);
+      if (existing) {
+        response = getReleaseCycleDeletion(existing.id);
+      } else if (targets.length) {
+        const deletionId = eventId('cycle-deletion');
+        db.prepare(`INSERT INTO release_cycle_deletions
+          (id,cycle_id,cycle_created_at,context_json,next_attempt_at,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?)`).run(deletionId, id, cycle.created_at,
+          JSON.stringify({ actor: context.actor || 'operator', requestId: context.requestId || '' }), now, now, now);
+        const insert = db.prepare(`INSERT INTO release_cycle_deletion_tasks(deletion_id,task_id,task_created_at) VALUES (?,?,?)`);
+        for (const task of targets) insert.run(deletionId, task.id, task.created_at);
+        db.prepare(`UPDATE release_cycles SET status='closed',
+          closed_at=CASE WHEN closed_at='' THEN ? ELSE closed_at END, updated_at=? WHERE id=?`).run(now, now, id);
+        db.prepare(`UPDATE task_series_schedules SET enabled=0,next_run_at='',next_attempt_at='',updated_at=?
+          WHERE release_cycle_id=?`).run(now, id);
+        appendAuditEvent({ scope: 'config', entityType: 'release_cycle', entityId: id,
+          kind: 'release_cycle.deletion.requested', message: `Deleting release cycle ${id} and its Tasks and artifacts`,
+          payload: { deletionId, totalTasks: targets.length }, actor: context.actor || 'operator', requestId: context.requestId || '',
+        }, db);
+        response = getReleaseCycleDeletion(deletionId);
+      } else {
+        db.prepare('DELETE FROM release_cycles WHERE id=?').run(id);
+        appendAuditEvent({ scope: 'config', entityType: 'release_cycle', entityId: id,
+          kind: 'release_cycle.deleted', message: `Deleted release cycle ${id}`,
+          payload: response, actor: context.actor || 'operator', requestId: context.requestId || '',
+        }, db);
+      }
+    }
+    if (receiptKey) db.prepare('INSERT INTO metadata(key,value) VALUES (?,?)').run(receiptKey,
+      JSON.stringify({ id, expectedCreatedAt, response, createdAt: now }));
+    return response;
+  }).immediate();
+}
+
+function getReleaseCycleDeletion(deletionId) {
+  const db = ensureStorage();
+  const row = db.prepare('SELECT * FROM release_cycle_deletions WHERE id=?').get(deletionId);
+  if (!row) return null;
+  const counts = db.prepare(`SELECT COUNT(*) AS total,
+    SUM(state='pending') AS remaining, SUM(state='deleted') AS deleted, SUM(state='skipped') AS skipped,
+    COALESCE(SUM(json_array_length(staged_files_json)),0) AS files
+    FROM release_cycle_deletion_tasks WHERE deletion_id=?`).get(row.id);
+  const runtime = db.prepare(`SELECT COUNT(*) AS count FROM bridge_cleanup_jobs cleanup
+    JOIN release_cycle_deletion_tasks target ON target.task_id=cleanup.task_id AND target.task_created_at=cleanup.task_created_at
+    WHERE target.deletion_id=? AND cleanup.status<>'completed'`).get(row.id).count;
+  return { ok: true, id: row.cycle_id, deletionId: row.id, status: row.status === 'completed' ? 'completed' : 'deleting',
+    state: row.status, deleted: row.status === 'completed', totalTasks: counts.total,
+    remainingTasks: Number(counts.remaining || 0), deletedTasks: Number(counts.deleted || 0), skippedTasks: Number(counts.skipped || 0),
+    pendingFileCleanup: counts.files, pendingRuntimeCleanup: runtime, lastError: row.last_error,
+    nextAttemptAt: row.next_attempt_at, createdAt: row.created_at, completedAt: row.completed_at,
+    retainedTasks: 0, historyRetained: false };
+}
+
+function releaseCycleDeletionFields(db, cycle) {
+  const row = db.prepare(`SELECT id FROM release_cycle_deletions
+    WHERE cycle_id=? AND cycle_created_at=? AND status<>'completed'`).get(cycle.id, cycle.created_at);
+  return row ? { status: 'deleting', deletion: getReleaseCycleDeletion(row.id) } : {};
+}
+
+function assertTaskNotInCycleDeletion(db, taskId) {
+  if (db.prepare(`SELECT 1 FROM tasks WHERE id=? AND ${TASK_CYCLE_DELETION_SQL}`).get(taskId)) {
+    throw statusError('Task is being deleted with its release cycle', 409);
+  }
+}
+
+function claimReleaseCycleDeletions(owner) {
+  const db = ensureStorage();
+  return db.transaction(() => {
+    if (platformMaintenanceFromDatabase(db)) return [];
+    const now = nowIso();
+    const row = db.prepare(`SELECT * FROM release_cycle_deletions WHERE status<>'completed'
+      AND next_attempt_at<=? AND (lease_owner='' OR lease_expires_at<?) ORDER BY created_at LIMIT 1`).get(now, now);
+    if (!row) return [];
+    db.prepare(`UPDATE release_cycle_deletions SET status='processing',lease_owner=?,lease_expires_at=?,updated_at=? WHERE id=?`)
+      .run(owner, new Date(Date.now() + 30000).toISOString(), now, row.id);
+    return [db.prepare('SELECT * FROM release_cycle_deletions WHERE id=?').get(row.id)];
+  }).immediate();
+}
+
+async function processReleaseCycleDeletion(job, owner, options = {}) {
+  const db = ensureStorage();
+  const context = parseJson(job.context_json, {});
+  const renew = () => {
+    const changed = db.prepare(`UPDATE release_cycle_deletions SET lease_expires_at=?,updated_at=?
+      WHERE id=? AND status='processing' AND lease_owner=?`)
+      .run(new Date(Date.now() + 30000).toISOString(), nowIso(), job.id, owner).changes;
+    if (!changed) throw new Error('Release cycle deletion ownership changed');
+  };
+  const targets = db.prepare('SELECT * FROM release_cycle_deletion_tasks WHERE deletion_id=?').all(job.id);
+  const errors = [];
+  try {
+    renew();
+    // Stop all owned work before waiting for any one CLI or archive to finish.
+    for (const target of targets) {
+      renew();
+      const task = db.prepare('SELECT * FROM tasks WHERE id=? AND created_at=?').get(target.task_id, target.task_created_at);
+      if (task && task.status !== 'stopping' && (ACTIVE_STATUSES.includes(task.status) || taskRuntimeActivity(db, task.id).active)) {
+        requestSessionStop(task.id, { ...context, idempotencyKey: `${job.id}:${task.id}:stop`, expectedTaskCreatedAt: target.task_created_at });
+      }
+    }
+    for (const target of targets) {
+      try {
+        renew();
+        if (target.state === 'pending') {
+          const task = getSession(target.task_id);
+          if (!task || task.createdAt !== target.task_created_at) {
+            db.prepare("UPDATE release_cycle_deletion_tasks SET state=? WHERE deletion_id=? AND task_id=?")
+              .run(task ? 'skipped' : 'deleted', job.id, target.task_id);
+          } else {
+            await options.terminateInteractive?.(target.task_id, target.task_created_at);
+            renew();
+            const current = getSession(target.task_id);
+            if (current && current.createdAt === target.task_created_at && !ACTIVE_STATUSES.includes(current.status)) {
+              try {
+                const raw = db.prepare('SELECT * FROM tasks WHERE id=?').get(current.id);
+                db.transaction(() => {
+                  const original = db.prepare('SELECT * FROM tasks WHERE id=? AND created_at=?').get(current.id, target.task_created_at);
+                  if (original) recoverTaskDeletionStaging(db, original);
+                }).immediate();
+                const plans = new Map(db.prepare(`SELECT session_key,source_dir,session_id FROM bridge_cleanup_jobs
+                  WHERE task_id=? AND task_created_at=?`).all(current.id, target.task_created_at)
+                  .map(row => [row.session_key, { sourceDir: row.source_dir, sessionId: row.session_id }]));
+                if (current.persistentSessionKey) plans.set(current.persistentSessionKey, taskBridgeCleanupIdentity(db, raw));
+                for (const key of plans.keys()) {
+                  if (db.prepare(`SELECT 1 FROM tasks owner WHERE owner.persistent_session_key=? AND NOT EXISTS
+                    (SELECT 1 FROM release_cycle_deletion_tasks member WHERE member.deletion_id=?
+                     AND member.task_id=owner.id AND member.task_created_at=owner.created_at)`).get(key, job.id)) {
+                    throw new Error('Task runtime is still referenced outside this cycle deletion');
+                  }
+                }
+                const taskContext = { taskId: current.id,
+                  attemptIds: db.prepare('SELECT id FROM attempts WHERE task_id=?').all(current.id).map(row => row.id) };
+                for (const [key, plan] of plans) {
+                  const released = await releaseBridgeSessionProcessAndWait(key, {
+                    ...plan, includeCliMain: true, includeTaskProcesses: true, taskContext,
+                  });
+                  if (released.errors.length) throw new Error('Task runtime processes are still stopping');
+                  renew();
+                }
+                deleteSession(current.id, { ...context, idempotencyKey: `${job.id}:${current.id}:delete`,
+                  expectedTaskCreatedAt: target.task_created_at });
+              } catch (error) { if (error.statusCode !== 409) throw error; }
+            }
+          }
+        }
+        const pending = db.prepare('SELECT staged_files_json FROM release_cycle_deletion_tasks WHERE deletion_id=? AND task_id=?')
+          .get(job.id, target.task_id);
+        const staged = parseJson(pending.staged_files_json, []);
+        discardStagedTaskFiles(staged, target.task_id);
+        const remaining = staged.filter(file => pathEntryExists(file.tombstone));
+        db.prepare('UPDATE release_cycle_deletion_tasks SET staged_files_json=? WHERE deletion_id=? AND task_id=?')
+          .run(JSON.stringify(remaining), job.id, target.task_id);
+        if (remaining.length) errors.push('Task file cleanup needs retry');
+        const cleanup = claimBridgeCleanupJobs(owner, 1, { taskId: target.task_id, taskCreatedAt: target.task_created_at });
+        for (const item of cleanup) {
+          const result = await processBridgeCleanupJob(item, owner);
+          if (!result.ok) errors.push(result.error);
+        }
+      } catch (error) { errors.push(error.message); }
+    }
+    renew();
+    const progress = getReleaseCycleDeletion(job.id);
+    if (!progress.remainingTasks && !progress.pendingFileCleanup && !progress.pendingRuntimeCleanup) {
+      db.transaction(() => {
+        renew();
+        db.prepare('DELETE FROM release_cycles WHERE id=? AND created_at=?').run(job.cycle_id, job.cycle_created_at);
+        const now = nowIso();
+        appendAuditEvent({ scope: 'config', entityType: 'release_cycle', entityId: job.cycle_id,
+          kind: 'release_cycle.deleted', message: `Deleted release cycle ${job.cycle_id}, its Tasks and artifacts`,
+          payload: { deletionId: job.id, deletedTasks: progress.deletedTasks, skippedTasks: progress.skippedTasks }, ...context }, db);
+        db.prepare(`UPDATE release_cycle_deletions SET status='completed',lease_owner='',lease_expires_at='',
+          last_error='',next_attempt_at='',completed_at=?,updated_at=? WHERE id=?`).run(now, now, job.id);
+      }).immediate();
+    } else {
+      db.prepare(`UPDATE release_cycle_deletions SET status=?,lease_owner='',lease_expires_at='',last_error=?,
+        next_attempt_at=?,updated_at=? WHERE id=? AND lease_owner=?`)
+        .run(errors.length ? 'retry' : 'pending', errors.join('; ').slice(0, 2000),
+          new Date(Date.now() + (errors.length ? 5000 : 1000)).toISOString(), nowIso(), job.id, owner);
+    }
+  } catch (error) {
+    db.prepare(`UPDATE release_cycle_deletions SET status='retry',lease_owner='',lease_expires_at='',last_error=?,
+      next_attempt_at=?,updated_at=? WHERE id=? AND lease_owner=?`)
+      .run(error.message.slice(0, 2000), new Date(Date.now() + 5000).toISOString(), nowIso(), job.id, owner);
+  }
+  return getReleaseCycleDeletion(job.id);
 }
 
 function releaseCycleTaskId(scheduleId, scheduledFor) {
@@ -1950,6 +2247,7 @@ function saveSessionInTransaction(db, id, data, context = {}) {
   const normalizedId = canonicalTaskId(id);
   const existing = db.prepare('SELECT * FROM tasks WHERE id = ?').get(normalizedId);
   if (existing && context.createOnly) throw statusError(`Session ${normalizedId} already exists`, 409);
+  if (existing) assertTaskNotInCycleDeletion(db, normalizedId);
   const workspaceMode = normalizeWorkspaceMode(data.workspaceMode ?? existing?.workspace_mode);
   validateTaskBody({ ...data, id: normalizedId }, { creating: !existing, requireId: true });
   if (existing?.status === 'completed') throw statusError('Completed sessions are immutable history records', 409);
@@ -2124,13 +2422,15 @@ function updateTaskSourceMetadata(taskId, data = {}, context = {}) {
   }).immediate();
 }
 
-async function sealPendingSessionWorkspace(taskId = '') {
+async function sealPendingSessionWorkspace(taskId = '', context = {}) {
   const db = ensureStorage();
   if (platformMaintenanceFromDatabase(db)) return;
   const task = db.prepare(`SELECT * FROM tasks WHERE workspace_mode='session-clone'
     AND archive_state='pending' AND status='waiting_review' AND source_commit<>''
     AND NOT EXISTS (SELECT 1 FROM skill_report_artifact_jobs j WHERE j.task_id=tasks.id
-    AND j.status IN ('pending','processing','retry')) AND (?='' OR id=?) LIMIT 1`).get(taskId, taskId);
+    AND j.status IN ('pending','processing','retry')) AND (?='' OR id=?)
+    AND (?='' OR created_at=?) LIMIT 1`).get(taskId, taskId,
+    context.expectedTaskCreatedAt || '', context.expectedTaskCreatedAt || '');
   if (!task || trackingCounts(db, task.id).external || taskRuntimeActivity(db, task.id).active) return;
   try {
     const inventory = await inventorySessionWorkspace(task.id);
@@ -2149,10 +2449,13 @@ async function sealPendingSessionWorkspace(taskId = '') {
         payload: { files: inventory.entries.filter(e => e.kind === 'file').length, inventoryHash, copiedBytes: 0 } });
     }).immediate();
   } catch (error) {
-    db.prepare("UPDATE tasks SET archive_state='failed', version=version+1 WHERE id=? AND created_at=? AND archive_state='pending'")
-      .run(task.id, task.created_at);
-    if (db.prepare('SELECT 1 FROM tasks WHERE id=?').get(task.id)) insertSessionWorklog(db, task.id, {
-      kind: 'task.workspace.archive_failed', level: 'warn', message: `Session archive: ${error.message}` });
+    db.transaction(() => {
+      if (!db.prepare('SELECT 1 FROM tasks WHERE id=? AND created_at=?').get(task.id, task.created_at)) return;
+      db.prepare("UPDATE tasks SET archive_state='failed', version=version+1 WHERE id=? AND created_at=? AND archive_state='pending'")
+        .run(task.id, task.created_at);
+      insertSessionWorklog(db, task.id, {
+        kind: 'task.workspace.archive_failed', level: 'warn', message: `Session archive: ${error.message}` });
+    }).immediate();
   }
 }
 
@@ -2274,6 +2577,9 @@ function deleteSession(id, context = {}) {
       if (ACTIVE_STATUSES.includes(latest.status)) {
         throw statusError('Session state changed before deletion', 409);
       }
+      if (taskRuntimeActivity(db, normalizedId).active) {
+        throw statusError('Session background processes are still stopping', 409);
+      }
       if (db.prepare(`
         SELECT 1 FROM external_attempts
         WHERE task_id=? AND (archive_status='archiving' OR archive_verify_status='verifying') LIMIT 1
@@ -2284,12 +2590,23 @@ function deleteSession(id, context = {}) {
         .get(normalizedId)) {
         throw statusError('Session report artifact archival is still in progress', 409);
       }
-      stagedFiles = stageTaskFilesForDeletion(normalizedId, latest.created_at, latest.workspace_mode);
-      enqueueBridgeCleanupJob(db, latest, 'deleted', context);
+      const recovered = recoverTaskDeletionStaging(db, latest);
+      const cleanupIdentity = latest.persistent_session_key ? taskBridgeCleanupIdentity(db, latest) : { sourceDir: '' };
+      stagedFiles = [...recovered, ...stageTaskFilesForDeletion(normalizedId, latest.created_at, latest.workspace_mode,
+        taskOwnedSharedOutputs(db, latest))];
+      enqueueBridgeCleanupJob(db, latest, 'deleted', context, cleanupIdentity);
       db.prepare(`
-        UPDATE bridge_cleanup_jobs SET reason='deleted', updated_at=?
+        UPDATE bridge_cleanup_jobs SET reason='deleted', updated_at=?,
+          session_id=CASE WHEN ?<>'' THEN ? ELSE session_id END,
+          source_dir=CASE WHEN ?<>'' THEN '' ELSE source_dir END
         WHERE task_id=? AND task_created_at=? AND session_key=? AND status IN ('pending','retry','processing')
-      `).run(nowIso(), latest.id, latest.created_at, latest.persistent_session_key);
+      `).run(nowIso(), cleanupIdentity.sessionId || '', cleanupIdentity.sessionId || '', cleanupIdentity.sessionId || '',
+        latest.id, latest.created_at, latest.persistent_session_key);
+      // Keep exact tombstones after the Task and its foreign-key rows disappear.
+      db.prepare(`UPDATE release_cycle_deletion_tasks SET state='deleted',staged_files_json=?
+        WHERE task_id=? AND task_created_at=? AND deletion_id IN
+          (SELECT id FROM release_cycle_deletions WHERE status<>'completed')`)
+        .run(JSON.stringify(stagedFiles), latest.id, latest.created_at);
       db.prepare('DELETE FROM tasks WHERE id = ?').run(normalizedId);
       appendAuditEvent({
         scope: 'config', taskId: normalizedId, entityType: 'session', entityId: normalizedId,
@@ -2338,6 +2655,7 @@ function dueRetentionTaskCount(db, cutoff) {
   return Number(db.prepare(`
     SELECT COUNT(*) AS count FROM tasks
     WHERE status='completed' AND archived_at<>'' AND archived_at<=?
+      AND NOT ${TASK_CYCLE_DELETION_SQL}
   `).get(cutoff).count);
 }
 
@@ -2464,6 +2782,7 @@ function retentionWorkCounts(db, cutoff) {
     tasks: scalar(`
       SELECT COUNT(*) AS count FROM tasks
       WHERE status='completed' AND archived_at<>'' AND archived_at<=?
+        AND NOT ${TASK_CYCLE_DELETION_SQL}
     `),
     detachedOperationReceipts: scalar(`
       SELECT COUNT(*) AS count FROM session_operation_receipts
@@ -2559,6 +2878,7 @@ function performTaskRetentionCleanup(options = {}) {
     const candidates = db.prepare(`
       SELECT id, created_at, archived_at FROM tasks
       WHERE status='completed' AND archived_at<>'' AND archived_at<=?
+        AND NOT ${TASK_CYCLE_DELETION_SQL}
       ORDER BY archived_at, id LIMIT ?
     `).all(cutoff, limit);
     for (const candidate of candidates) {
@@ -2608,6 +2928,17 @@ function performTaskRetentionCleanup(options = {}) {
     releaseConfirmed,
     ...detached,
   };
+}
+
+function taskBridgeCleanupIdentity(db, task) {
+  let runtime;
+  try { runtime = resolveBridgeSessionRuntime(task.persistent_session_key); }
+  catch (error) { if (error.code !== 'UNSAFE_BRIDGE_CLEANUP') throw error; }
+  if (runtime) return { sessionId: runtime.sessionId, sourceDir: '' };
+  const known = db.prepare('SELECT session_id,source_dir FROM bridge_cleanup_jobs WHERE task_id=? AND task_created_at=? AND session_key=?')
+    .get(task.id, task.created_at, task.persistent_session_key);
+  if (known?.session_id) return { sessionId: known.session_id, sourceDir: known.source_dir };
+  return { sourceDir: bridgeCleanupSourceDir(db, task) };
 }
 
 function bridgeCleanupSourceDir(db, task) {
@@ -2697,7 +3028,7 @@ function rowToBridgeCleanupJob(row) {
   };
 }
 
-function claimBridgeCleanupJobs(workerId, limit = 2) {
+function claimBridgeCleanupJobs(workerId, limit = 2, taskGeneration = null) {
   const owner = String(workerId || '').trim();
   if (!owner) throw new Error('Bridge cleanup worker id is required');
   const db = ensureStorage();
@@ -2711,11 +3042,14 @@ function claimBridgeCleanupJobs(workerId, limit = 2) {
         updated_at=?
       WHERE status='processing' AND (lease_expires_at='' OR lease_expires_at<?)
     `).run(now, now, now);
+    const filter = taskGeneration ? 'AND task_id=? AND task_created_at=?' : '';
     const rows = db.prepare(`
       SELECT * FROM bridge_cleanup_jobs
       WHERE status IN ('pending','retry') AND (next_attempt_at='' OR next_attempt_at<=?)
+        ${filter}
       ORDER BY created_at, id LIMIT ?
-    `).all(now, Math.min(20, Math.max(1, Number(limit || 2))));
+    `).all(now, ...(taskGeneration ? [taskGeneration.taskId, taskGeneration.taskCreatedAt] : []),
+      Math.min(20, Math.max(1, Number(limit || 2))));
     const claimed = [];
     const expiresAt = new Date(Date.now() + BRIDGE_CLEANUP_LEASE_MS).toISOString();
     const claim = db.prepare(`
@@ -3089,15 +3423,117 @@ function cleanupTaskFiles(taskId, workspaceMode = 'shared') {
   }
 }
 
-function stageTaskFilesForDeletion(taskId, taskCreatedAt = '', workspaceMode = 'shared') {
+function recoverTaskDeletionStaging(db, task) {
+  const generation = hashContent(`${task.id}\0${task.created_at}`).slice(0, 16);
+  const legacy = hashContent(task.created_at).slice(0, 16);
+  const roots = [sessionDir(task.id), path.join(SKILL_SNAPSHOTS_DIR, task.id)];
+  if (task.workspace_mode === 'session-clone') roots.push(taskSessionRoot(task.id));
+  const directories = new Set(roots.map(root => path.dirname(root)));
+  const paths = db.prepare(`SELECT log_path AS path FROM external_attempts WHERE task_id=?
+    UNION ALL SELECT meta_path FROM external_attempts WHERE task_id=?
+    UNION ALL SELECT json_extract(a.value,'$.path') FROM external_attempts e,json_each(e.artifact_declarations_json) a WHERE e.task_id=?
+    UNION ALL SELECT json_extract(a.value,'$.path') FROM skill_reports r,json_each(r.payload_json,'$.artifacts') a WHERE r.task_id=?`)
+    .all(task.id, task.id, task.id, task.id);
+  for (const { path: file } of paths) {
+    if (typeof file !== 'string' || !path.isAbsolute(file)) continue;
+    let offset = file.indexOf(`${path.sep}task${path.sep}`);
+    while (offset >= 0) {
+      const directory = file.slice(0, offset + '/task'.length);
+      if (fileExists(directory) && !pathContains('/data/jenkins', fs.realpathSync(directory))) directories.add(directory);
+      offset = file.indexOf(`${path.sep}task${path.sep}`, offset + 1);
+    }
+  }
+  const staged = [];
+  for (const directory of directories) {
+    if (!fileExists(directory)) continue;
+    for (const name of fs.readdirSync(directory)) {
+      const match = name.match(/^(.+)\.deleting-(?:([a-f0-9]{16})-)?[a-f0-9-]{36}$/);
+      if (!match) continue;
+      const target = path.join(directory, match[1]);
+      const knownRoot = roots.includes(target);
+      if (match[2] !== generation && !(knownRoot && (!match[2] || match[2] === legacy))) continue;
+      staged.push({ target, tombstone: path.join(directory, name) });
+    }
+  }
+  restoreStagedTaskFiles(staged);
+  return staged.filter(file => pathEntryExists(file.tombstone));
+}
+
+function taskOwnedSharedOutputs(db, task) {
+  if (task.workspace_mode === 'session-clone') return [];
+  const executions = db.prepare('SELECT log_path,done_path,state_path,meta_path FROM external_attempts WHERE task_id=?').all(task.id);
+  const roots = new Set();
+  try { roots.add(resolveWorkingDir(task.working_dir || '.')); }
+  catch (error) { if (!error.statusCode && !['ENOENT', 'EACCES'].includes(error.code)) throw error; }
+  for (const execution of executions) {
+    let meta = {};
+    try { meta = parseTrackedMeta(readSmallTrackedArtifact(execution.meta_path).content); }
+    catch (error) { if (!['ENOENT', 'EACCES', 'EPERM'].includes(error.code)) throw error; }
+    const directory = meta.work_dir || meta.working_directory || meta.workingDirectory;
+    if (directory && path.isAbsolute(directory) && isRegularDirectory(directory)) roots.add(fs.realpathSync(directory));
+  }
+  for (const row of db.prepare("SELECT json_extract(payload_json,'$.primaryExecution.workingDirectory') AS directory FROM skill_reports WHERE task_id=?").all(task.id)) {
+    if (row.directory && path.isAbsolute(row.directory) && isRegularDirectory(row.directory)) roots.add(fs.realpathSync(row.directory));
+  }
+  const references = db.prepare(`
+    SELECT e.task_id,json_extract(a.value,'$.path') AS path FROM external_attempts e,json_each(e.artifact_declarations_json) a
+    UNION ALL SELECT r.task_id,json_extract(a.value,'$.path') FROM skill_reports r,json_each(r.payload_json,'$.artifacts') a
+    UNION ALL SELECT task_id,log_path FROM external_attempts
+    UNION ALL SELECT task_id,done_path FROM external_attempts
+    UNION ALL SELECT task_id,state_path FROM external_attempts
+    UNION ALL SELECT task_id,meta_path FROM external_attempts
+  `).all().filter(row => typeof row.path === 'string' && path.isAbsolute(row.path));
+  const own = references.filter(row => row.task_id === task.id).map(row => row.path);
+  const otherPaths = references.filter(row => row.task_id !== task.id).map(row => row.path);
+  const others = [...new Set(otherPaths.flatMap(file => {
+    try { return [file, fs.realpathSync(file)]; }
+    catch (error) { if (!['ENOENT', 'EACCES', 'ENOTDIR'].includes(error.code)) throw error; return [file]; }
+  }))];
+  const candidates = new Set();
+  for (const directory of roots) {
+    const outputRoot = path.join(directory, 'task');
+    for (const file of own) {
+      if (!pathContains(outputRoot, file) || file === outputRoot) continue;
+      const parts = path.relative(outputRoot, file).split(path.sep);
+      const candidate = parts.length > 1 ? path.join(outputRoot, parts[0]) : file;
+      if (!fileExists(candidate)) continue;
+      try { assertArtifactWorkingDirectory(candidate); }
+      catch (error) { if (error.statusCode === 409) continue; throw error; }
+      if (fileExists(path.join(candidate, '.git'))) continue;
+      const stat = fs.lstatSync(candidate);
+      const real = stat.isSymbolicLink() ? candidate : fs.realpathSync(candidate);
+      // Original /data media and directories referenced by another Task stay shared.
+      if (!pathContains(directory, real) || pathContains('/data/jenkins', real)
+        || others.some(other => pathContains(candidate, other) || pathContains(other, candidate)
+          || pathContains(real, other) || pathContains(other, real))) continue;
+      candidates.add(candidate);
+    }
+    for (const execution of executions) {
+      if (!execution.log_path.endsWith('.log') || !pathContains(outputRoot, execution.log_path)) continue;
+      const base = execution.log_path.slice(0, -4);
+      for (const suffix of ['.cmd', '.pid']) {
+        const file = base + suffix;
+        if (fileExists(file) && !others.includes(file)) {
+          try { assertArtifactWorkingDirectory(file); }
+          catch (error) { if (error.statusCode === 409) continue; throw error; }
+          const real = fs.realpathSync(file);
+          if (pathContains(directory, real) && !pathContains('/data/jenkins', real) && !others.includes(real)) candidates.add(file);
+        }
+      }
+    }
+  }
+  return [...candidates].filter(file => ![...candidates].some(parent => parent !== file && pathContains(parent, file)));
+}
+
+function stageTaskFilesForDeletion(taskId, taskCreatedAt = '', workspaceMode = 'shared', extraTargets = []) {
   const normalizedId = safeId(taskId);
-  const generation = hashContent(taskCreatedAt).slice(0, 16);
+  const generation = hashContent(`${normalizedId}\0${taskCreatedAt}`).slice(0, 16);
   const staged = [];
   try {
-    const targets = [sessionDir(normalizedId), path.join(SKILL_SNAPSHOTS_DIR, normalizedId)];
+    const targets = [sessionDir(normalizedId), path.join(SKILL_SNAPSHOTS_DIR, normalizedId), ...extraTargets];
     if (workspaceMode === 'session-clone') targets.push(taskSessionRoot(normalizedId));
     for (const target of targets) {
-      if (!fileExists(target)) continue;
+      if (!pathEntryExists(target)) continue;
       const tombstone = `${target}.deleting-${generation}-${crypto.randomUUID()}`;
       fs.renameSync(target, tombstone);
       staged.push({ target, tombstone });
@@ -3111,7 +3547,7 @@ function stageTaskFilesForDeletion(taskId, taskCreatedAt = '', workspaceMode = '
 
 function restoreStagedTaskFiles(staged) {
   for (const { target, tombstone } of [...staged].reverse()) {
-    if (fileExists(tombstone) && !fileExists(target)) fs.renameSync(tombstone, target);
+    if (pathEntryExists(tombstone) && !pathEntryExists(target)) fs.renameSync(tombstone, target);
   }
 }
 
@@ -3120,10 +3556,11 @@ function discardStagedTaskFiles(staged, taskId) {
     try {
       removeTree(tombstone);
     } catch (error) {
+      if (!pathEntryExists(tombstone)) continue;
       appendAuditEvent({
         scope: 'storage', taskId, entityType: 'session', entityId: taskId,
         kind: 'session.cleanup.failed', level: 'error',
-        message: `Session metadata was deleted but staged files require manual cleanup: ${error.message}`,
+        message: `Session metadata was deleted but staged files still need cleanup: ${error.message}`,
       });
     }
   }
@@ -3374,7 +3811,7 @@ function reusableSkillReportArtifacts(
   return { artifactsByKey, sourceReportIds: [...sourceReportIds] };
 }
 
-async function verifiedReusableSkillReportArtifacts(db, row, report, evidence) {
+async function verifiedReusableSkillReportArtifacts(db, row, report, evidence, context = {}) {
   const reusable = reusableSkillReportArtifacts(db, row, report, { allowCurrentJob: true });
   const verifiedArtifactsByKey = new Map();
   const sourceReportIds = new Set();
@@ -3386,6 +3823,12 @@ async function verifiedReusableSkillReportArtifacts(db, row, report, evidence) {
       label: `${candidate.label} source`,
     });
     if (hashBuffer(source) !== artifact.source_sha256) continue;
+    if (artifact.kind === 'pytest-html' && artifact.storage_mode === 'in-place') {
+      const repaired = await repairInPlaceSkillReportArtifactResources(row.task_id, artifact.id, {
+        onProgress: context.renewLease,
+      });
+      if (repaired.unresolvedReferences) continue;
+    }
     verifiedArtifactsByKey.set(declaration.key, artifact);
     sourceReportIds.add(artifact.report_id);
   }
@@ -3413,13 +3856,15 @@ function registeredSkillReportArtifacts(db, row, report) {
   const externalAttemptId = String(report.executionEvidence?.externalAttemptId || '');
   if (!externalAttemptId) return [];
   const external = db.prepare(`
-    SELECT step_run_id, status, artifact_declarations_json
+    SELECT *
     FROM external_attempts WHERE id=? AND task_id=?
   `).get(externalAttemptId, row.task_id);
   if (!external || (row.step_run_id && external.step_run_id !== row.step_run_id)) return [];
-  return parseJson(external.artifact_declarations_json, [])
+  const declarations = parseJson(external.artifact_declarations_json, []);
+  return (['pending', 'running'].includes(report.status)
+    ? declarations : retainedTerminalArtifacts(db, external, declarations))
     .filter((artifact) => artifact && typeof artifact === 'object'
-      && ['pytest-html', 'failure-analysis-markdown'].includes(artifact.kind))
+      && ['pytest-html', 'failure-analysis-html', 'failure-analysis-markdown'].includes(artifact.kind))
     .map((artifact) => {
       const registered = {
         key: String(artifact.key || ''),
@@ -3518,15 +3963,16 @@ function pytestHtmlArtifact(declaration, sourcePath, artifactCount) {
   };
 }
 
-function failureAnalysisMarkdownArtifact(declaration, sourcePath) {
+function failureAnalysisArtifact(declaration, sourcePath) {
+  const html = declaration.kind === 'failure-analysis-html';
   return {
     key: declaration.key,
     label: 'Failure analysis report',
-    kind: 'failure-analysis-markdown',
+    kind: declaration.kind,
     fileName: /^[A-Za-z0-9._-]+$/.test(path.basename(sourcePath))
       ? path.basename(sourcePath)
-      : 'failure-analysis.md',
-    mediaType: 'text/markdown; charset=utf-8',
+      : `failure-analysis.${html ? 'html' : 'md'}`,
+    mediaType: html ? 'text/html; charset=utf-8' : 'text/markdown; charset=utf-8',
     sourcePath: path.normalize(sourcePath),
   };
 }
@@ -3571,7 +4017,56 @@ function skillReportExternalAttempt(db, taskId, report) {
   return row;
 }
 
-function mergeRegisteredTerminalArtifacts(report, externalAttempt) {
+function skillReportCommandExecution(db, taskId, report) {
+  const id = report.executionEvidence?.commandExecutionId;
+  if (!id) return null;
+  const row = db.prepare('SELECT * FROM command_executions WHERE id=? AND task_id=?').get(id, taskId);
+  if (!row) throw statusError('Skill report commandExecutionId does not belong to this task', 409);
+  return row;
+}
+
+function commandArtifactExecutionEvidence(db, taskId, report) {
+  const row = skillReportCommandExecution(db, taskId, report);
+  const attempt = db.prepare('SELECT turn_id FROM attempts WHERE id=? AND task_id=?').get(row.attempt_id, taskId);
+  if (!row.turn_id || !attempt || attempt.turn_id !== row.turn_id) {
+    throw statusError('Artifact commandExecutionId has an invalid Task, Turn, or Attempt lineage', 409);
+  }
+  if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(row.status) || !row.finished_at) {
+    throw statusError('Artifact commandExecutionId must identify a terminal foreground execution', 409);
+  }
+  const commandWorkingDirectory = resolvedRegularDirectory(row.working_directory || row.configured_working_directory,
+    'Artifact execution working directory');
+  const task = db.prepare('SELECT workspace_mode,session_root FROM tasks WHERE id=?').get(taskId);
+  // Session commands can deliberately write reports next to their source and
+  // output trees. Shared checkouts keep the recorded command directory scope.
+  const workingDirectory = task.workspace_mode === 'session-clone'
+    ? resolvedRegularDirectory(task.session_root, 'Task Session directory') : commandWorkingDirectory;
+  assertArtifactWorkingDirectory(workingDirectory);
+  return { commandExecutionId: row.id, workingDirectory, commandWorkingDirectory,
+    command: row.command, registeredArtifacts: [] };
+}
+
+function retainedTerminalArtifacts(db, externalAttempt, declarations) {
+  if (!externalAttempt || externalAttempt.status !== 'failed'
+    || !db.prepare(`SELECT 1 FROM external_attempts
+      WHERE task_id=? AND step_run_id=? AND chain_key=? AND generation>? AND status='succeeded' LIMIT 1`)
+      .get(externalAttempt.task_id, externalAttempt.step_run_id, externalAttempt.chain_key, externalAttempt.generation)) {
+    return declarations;
+  }
+  return declarations.filter(artifact => {
+    if (artifact?.kind !== 'pytest-html' || typeof artifact.path !== 'string' || !path.isAbsolute(artifact.path)) return true;
+    try {
+      const stat = fs.lstatSync(artifact.path);
+      if (stat.isFile() && stat.size > 0) return true;
+    } catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes(error.code)) return true;
+    }
+    // A shared-mode source may be gone after archival. Keep its published copy.
+    return Boolean(publishedExternalAttemptArtifact(db, externalAttempt.task_id, externalAttempt.id, artifact));
+  });
+}
+
+function mergeRegisteredTerminalArtifacts(db, report, externalAttempt) {
   if (!externalAttempt || ['pending', 'running'].includes(report.status)) return report;
   const registered = parseJson(externalAttempt.artifact_declarations_json, []);
   if (!registered.length) return report;
@@ -3587,12 +4082,13 @@ function mergeRegisteredTerminalArtifacts(report, externalAttempt) {
     }
     if (!sameKey) artifacts.push(declaration);
   }
-  return normalizeSkillReport({ ...report, artifacts });
+  return normalizeSkillReport({ ...report, artifacts: retainedTerminalArtifacts(db, externalAttempt, artifacts) });
 }
 
 function declaredArtifactExecutionEvidence(db, taskId, report, reportStepRunId) {
   const declarations = Array.isArray(report?.artifacts) ? report.artifacts : [];
   if (!declarations.length) return null;
+  if (report.executionEvidence?.commandExecutionId) return commandArtifactExecutionEvidence(db, taskId, report);
   const row = skillReportExternalAttempt(db, taskId, report);
   const externalAttemptId = row.id;
   if (row.step_run_id !== reportStepRunId) {
@@ -3744,7 +4240,7 @@ function declaredArtifactCandidate(declaration, evidence, artifactCount) {
       }
     } else {
       const evidencedPaths = pytestHtmlCommandPaths(evidence.command).map((reportPath) => (
-        path.resolve(evidence.workingDirectory, reportPath)
+        path.resolve(evidence.commandWorkingDirectory || evidence.workingDirectory, reportPath)
       ));
       if (!evidencedPaths.includes(sourcePath)) {
         throw statusError(`pytest-html artifact ${declaration.key} is not an exact --html output of its executionEvidence`, 409);
@@ -3757,7 +4253,7 @@ function declaredArtifactCandidate(declaration, evidence, artifactCount) {
     };
   }
   return {
-    ...failureAnalysisMarkdownArtifact(declaration, sourcePath),
+    ...failureAnalysisArtifact(declaration, sourcePath),
     workingDirectory: evidence.workingDirectory,
     externalAttemptId: evidence.externalAttemptId,
   };
@@ -4440,6 +4936,7 @@ async function rewriteDashManifest(
           await archiveDescriptor(initializationDescriptor);
         }
       } catch (error) {
+        if (error.artifactArchiveControlError) throw error;
         warnings.push(`${media || initialization}: ${String(error.message || error)}`);
         continue;
       }
@@ -4494,12 +4991,10 @@ async function rewriteDashManifest(
 }
 
 function replaceLiteralReferences(content, replacements) {
-  let transformed = content;
-  for (const [reference, replacement] of [...replacements.entries()]
-    .sort(([left], [right]) => right.length - left.length)) {
-    transformed = transformed.split(reference).join(replacement);
-  }
-  return transformed;
+  const references = [...replacements.keys()].filter(Boolean).sort((a, b) => b.length - a.length);
+  if (!references.length) return content;
+  return content.replace(new RegExp(references.map(escapeRegexPattern).join('|'), 'g'),
+    reference => replacements.get(reference));
 }
 
 async function archivePytestMediaResources(htmlContent, options) {
@@ -4510,6 +5005,13 @@ async function archivePytestMediaResources(htmlContent, options) {
   const descriptors = new Map();
   const countedMediaPaths = new Set();
   const warnings = [];
+  const resourceProgress = async () => {
+    try { await options.onProgress?.(); }
+    catch (error) {
+      error.artifactArchiveControlError = true;
+      throw error;
+    }
+  };
   let lastProgressAt = 0;
   const mediaResourceLimit = Number.isInteger(options.mediaResourceLimit)
     ? Math.max(0, options.mediaResourceLimit)
@@ -4564,7 +5066,7 @@ async function archivePytestMediaResources(htmlContent, options) {
   async function archiveDescriptor(descriptor) {
     if (descriptor.status === 'done' || descriptor.status === 'archiving') return descriptor;
     if (Date.now() - lastProgressAt >= 1000) {
-      await options.onProgress?.();
+      await resourceProgress();
       lastProgressAt = Date.now();
     }
     descriptor.status = 'archiving';
@@ -4582,6 +5084,7 @@ async function archivePytestMediaResources(htmlContent, options) {
           await archiveDescriptor(dependency);
           replacements.set(reference, dependency.url);
         } catch (error) {
+          if (error.artifactArchiveControlError) throw error;
           warnings.push(`${reference}: ${String(error.message || error)}`);
         }
       }
@@ -4604,15 +5107,15 @@ async function archivePytestMediaResources(htmlContent, options) {
       if (options.inPlace) {
         archived = { bytes: manifest.length, sha256: hashBuffer(manifest), viewContent: transformed.toString('utf8') };
       } else {
-        archived = await archiveBufferAtomically(transformed, descriptor.managedPath, { onProgress: options.onProgress });
+        archived = await archiveBufferAtomically(transformed, descriptor.managedPath, { onProgress: resourceProgress });
       }
     } else {
       archived = options.inPlace
-        ? await digestRegularFile(descriptor.resolvedPath, { onProgress: options.onProgress })
+        ? await digestRegularFile(descriptor.resolvedPath, { onProgress: resourceProgress })
         : await archiveFileAtomically({
         sourcePath: descriptor.resolvedPath,
         destinationPath: descriptor.managedPath,
-        onProgress: options.onProgress,
+        onProgress: resourceProgress,
       });
     }
     if (options.inPlace && IN_PLACE_TEXT_EXTENSIONS.has(descriptor.extension)) {
@@ -4652,6 +5155,7 @@ async function archivePytestMediaResources(htmlContent, options) {
         await archiveDescriptor(descriptor);
         replacements.set(reference, descriptor.url);
       } catch (error) {
+        if (error.artifactArchiveControlError) throw error;
         warnings.push(`${reference}: ${String(error.message || error)}`);
       }
     }
@@ -4693,6 +5197,7 @@ async function archivePytestMediaResources(htmlContent, options) {
           );
           await archiveDescriptor(json);
         } catch (error) {
+          if (error.artifactArchiveControlError) throw error;
           if (!error.pytestResourceMissing) warnings.push(`Video Check JSON: ${String(error.message || error)}`);
         }
       };
@@ -4707,6 +5212,7 @@ async function archivePytestMediaResources(htmlContent, options) {
           // pytest-html prepends the summary URL's directory to detail_source.
           detailReplacements.set(source, detail.id);
         } catch (error) {
+          if (error.artifactArchiveControlError) throw error;
           warnings.push(`Video Check ${source}: ${String(error.message || error)}`);
         }
       }
@@ -4716,7 +5222,7 @@ async function archivePytestMediaResources(htmlContent, options) {
       const summaryView = videoCheckSummaryScript(rewriteDetails(summary));
       const archivedSummary = options.inPlace
         ? { bytes: summaryContent.length, sha256: hashBuffer(summaryContent), viewContent: summaryView }
-        : await archiveBufferAtomically(Buffer.from(summaryView, 'utf8'), summaryResource.managedPath, { onProgress: options.onProgress });
+        : await archiveBufferAtomically(Buffer.from(summaryView, 'utf8'), summaryResource.managedPath, { onProgress: resourceProgress });
       Object.assign(summaryResource, archivedSummary, { status: 'done' });
       await archiveJsonCompanion(summaryResource);
       archivedHtml = rewriteVideoCheckReport(archivedHtml, (settings) => (
@@ -4726,6 +5232,7 @@ async function archivePytestMediaResources(htmlContent, options) {
       ), rewriteDetails);
       checkView = { runId: descriptor.run_id, source: summaryResource.url, details: [...detailReplacements] };
     } catch (error) {
+      if (error.artifactArchiveControlError) throw error;
       warnings.push(`Video Check ${descriptor.source}: ${String(error.message || error)}`);
     }
   }
@@ -5083,9 +5590,10 @@ function publishSkillReport(sessionId, input, context = {}) {
       throw statusError('Completed sessions are immutable history records', 409);
     }
     assertSkillReportRuntimeContext(db, taskId, turnId, attemptId);
+    skillReportCommandExecution(db, taskId, report);
     let externalAttempt = skillReportExternalAttempt(db, taskId, report);
     externalAttempt = autoRegisterPytestHtmlArtifacts(db, taskId, report, externalAttempt);
-    report = mergeRegisteredTerminalArtifacts(report, externalAttempt);
+    report = mergeRegisteredTerminalArtifacts(db, report, externalAttempt);
     const stepRunId = externalAttempt?.step_run_id || null;
     const skill = taskSnapshotSkillMap(db, taskId).get(report.skillId);
     if (!skill) {
@@ -5280,6 +5788,66 @@ function deploymentFallbackOutcome(execution, data) {
   };
 }
 
+function publishMissingRegisteredPytestReports(taskId) {
+  const db = ensureStorage();
+  assertNoPlatformMaintenance(db);
+  const task = db.prepare('SELECT status FROM tasks WHERE id=?').get(taskId);
+  if (!task || task.status === 'completed') return [];
+  const candidates = db.prepare(`SELECT external.*,invocation.skills_json,runs.run_key
+    FROM external_attempts external
+    JOIN skill_invocations invocation ON invocation.id=external.skill_invocation_id
+    JOIN step_runs runs ON runs.id=external.step_run_id
+    WHERE external.task_id=? AND external.status IN ('succeeded','failed')
+      AND NOT EXISTS (SELECT 1 FROM skill_reports report WHERE report.task_id=external.task_id
+        AND json_extract(report.payload_json,'$.executionEvidence.externalAttemptId')=external.id)
+    ORDER BY external.started_at,external.id`).all(taskId);
+  const published = [];
+  for (const external of candidates) {
+    try {
+      const declarations = retainedTerminalArtifacts(db, external, parseJson(external.artifact_declarations_json, [])
+        .filter(artifact => artifact.kind === 'pytest-html'));
+      const skills = parseJson(external.skills_json, []);
+      if (!declarations.length || !skills.some(skill => skill.skillId === 'cloud-recording-test')) continue;
+      if (!external.origin_turn_id || !external.origin_attempt_id) continue;
+      const report = db.transaction(() => {
+        if (db.prepare(`SELECT 1 FROM skill_reports WHERE task_id=?
+          AND json_extract(payload_json,'$.executionEvidence.externalAttemptId')=? LIMIT 1`).get(taskId, external.id)) return null;
+        const result = publishSkillReport(taskId, {
+          schemaVersion: 2,
+          reportKey: `platform-fallback:cloud-recording-test:${external.run_key.slice(0, 40)}:${hashContent(external.id).slice(0, 32)}`,
+          skillId: 'cloud-recording-test', reportType: 'test-result',
+          title: `${external.run_key} · ${external.label}`.slice(0, 160),
+          status: external.status,
+          summary: `后台执行已结束（${external.status}）。平台根据已登记的执行和 HTML 补齐报告；用例结果以原始 HTML 为准。`,
+          observedAt: external.finished_at || external.updated_at,
+          executionEvidence: { externalAttemptId: external.id }, artifacts: declarations, metrics: [],
+          sections: [{ id: 'registered-execution', title: '执行与报告登记', kind: 'fields', priority: 'supporting',
+            defaultExpanded: false, fields: [
+              { label: '登记方式', value: '平台兜底：该执行此前未发布关联的测试报告。' },
+              { label: 'External Attempt', value: external.id, format: 'code' },
+              { label: 'Step Run', value: external.step_run_id, format: 'code' },
+              { label: 'Run', value: external.run_key, format: 'code' },
+              { label: 'HTML 数量', value: declarations.length },
+            ] }],
+        }, { turnId: external.origin_turn_id, attemptId: external.origin_attempt_id });
+        insertSessionWorklog(db, taskId, { kind: 'skill.report.execution_fallback_published',
+          turnId: external.origin_turn_id, actor: 'platform',
+          message: `Registered missing ${external.run_key} HTML report for ${external.label}`,
+          payload: { externalAttemptId: external.id, reportId: result.id, artifactCount: declarations.length } });
+        return result;
+      }).immediate();
+      if (report) published.push(report);
+    } catch (error) {
+      if (error.statusCode === 503) throw error;
+      insertSessionWorklog(db, taskId, { kind: 'skill.report.execution_fallback_failed', level: 'warn', actor: 'platform',
+        message: `Could not register ${external.run_key}: ${String(error.message || error)}`,
+        payload: { externalAttemptId: external.id, runKey: external.run_key } });
+    }
+  }
+  return published;
+}
+
+
 function publishMissingPlatformReports(taskId, data, skillIds) {
   if (!skillIds.length) return;
   const db = ensureStorage();
@@ -5415,10 +5983,7 @@ async function snapshotInPlaceArtifactText(taskId, sourcePath, content) {
 
 function applyInPlaceHtmlView(html, view) {
   const replacements = new Map(view.replacements || []);
-  const references = [...replacements.keys()].filter(Boolean).sort((a, b) => b.length - a.length);
-  const rewritten = references.length
-    ? html.replace(new RegExp(references.map(escapeRegexPattern).join('|'), 'g'), reference => replacements.get(reference))
-    : html;
+  const rewritten = replaceLiteralReferences(html, replacements);
   if (!view.check) return rewritten;
   const details = new Map(view.check.details || []);
   return rewriteVideoCheckReport(rewritten, descriptor => descriptor.run_id === view.check.runId
@@ -5440,6 +6005,12 @@ async function archiveInPlaceArtifact(db, taskId, row, candidate, context) {
         throw statusError('An archived in-place artifact failed integrity verification', 409);
       }
     } finally { await archived.handle.close(); }
+    if (candidate.kind === 'pytest-html') {
+      const repaired = await repairInPlaceSkillReportArtifactResources(taskId, existing.id, {
+        jobOwner: context.jobOwner, onProgress: context.renewLease,
+      });
+      return { mediaWarningCount: repaired.unresolvedReferences };
+    }
     return { mediaWarningCount: 0 };
   }
   // Pytest and later report-processing steps can still update the source file.
@@ -5472,6 +6043,7 @@ async function archiveInPlaceArtifact(db, taskId, row, candidate, context) {
   }
   const now = nowIso();
   db.transaction(() => {
+    assertSkillReportArtifactJobOwnership(db, row.id, context?.jobOwner);
     const latest = db.prepare('SELECT created_at FROM tasks WHERE id=?').get(taskId);
     if (!latest) throw statusError('Task was deleted during in-place archival', 409);
     db.prepare(`INSERT INTO skill_report_artifacts
@@ -5603,6 +6175,14 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
     let repairSourceContent = managedContent;
     let repairReferenceContent = managedContent;
     let sourceVerifiedForRepair = false;
+    if (!registeredArtifact && sourceContentSnapshot) {
+      // A previous owner may have written the file before losing its lease.
+      // No published record owns it yet; rebuild its index from the source.
+      repairSourceContent = sourceContentSnapshot;
+      repairReferenceContent = sourceContentSnapshot;
+      sourceVerifiedForRepair = true;
+      sourceSha256 = hashBuffer(sourceContentSnapshot);
+    }
     const hasOmittedLogs = managedContent.includes(
       'data:text/plain;charset=utf-8,Log%20omitted%3A%20artifact%20size%20limit',
     );
@@ -5669,6 +6249,7 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
   }
   const createdAt = nowIso();
   db.transaction(() => {
+    assertSkillReportArtifactJobOwnership(db, row.id, context?.jobOwner);
     const existing = db.prepare(`
       SELECT * FROM skill_report_artifacts WHERE report_id=? AND artifact_key=?
     `).get(row.id, candidate.key);
@@ -5932,6 +6513,7 @@ async function archiveSkillReportArtifacts(sessionId, reportId, context = {}) {
   const row = db.prepare('SELECT * FROM skill_reports WHERE task_id=? AND id=?')
     .get(taskId, String(reportId || ''));
   if (!row) throw statusError('Skill report not found', 404);
+  assertSkillReportArtifactJobOwnership(db, row.id, context.jobOwner);
   const task = db.prepare('SELECT status, archive_mode FROM tasks WHERE id=?').get(taskId);
   if (!task) throw statusError(`Session ${taskId} not found`, 404);
   if (task.status === 'completed') {
@@ -5939,15 +6521,25 @@ async function archiveSkillReportArtifacts(sessionId, reportId, context = {}) {
   }
   const report = parseJson(row.payload_json, {});
   const allDeclarations = Array.isArray(report.artifacts) ? report.artifacts : [];
-  const declarations = Array.isArray(context.artifactKeys)
+  const selectedDeclarations = Array.isArray(context.artifactKeys)
     ? allDeclarations.filter((artifact) => context.artifactKeys.includes(artifact.key))
     : allDeclarations;
+  const declarations = selectedDeclarations.length
+    ? retainedTerminalArtifacts(db, skillReportExternalAttempt(db, taskId, report), selectedDeclarations)
+    : selectedDeclarations;
+  if (declarations.length !== selectedDeclarations.length) {
+    insertSessionWorklog(db, taskId, { kind: 'skill.report.artifacts.superseded_missing',
+      actor: context.actor || 'artifact-worker',
+      message: 'Skipped unproduced HTML from an older failed technical attempt after a successful retry.',
+      payload: { reportId: row.id, externalAttemptId: report.executionEvidence.externalAttemptId,
+        skippedKeys: selectedDeclarations.filter(artifact => !declarations.includes(artifact)).map(artifact => artifact.key) } });
+  }
   if (!declarations.length) {
     completeSkillReportArtifactJob(db, row.id, context.jobOwner);
     return rowToSkillReport(row, db);
   }
   const evidence = declaredArtifactExecutionEvidence(db, taskId, report, row.step_run_id || '');
-  const reusable = await verifiedReusableSkillReportArtifacts(db, row, { ...report, artifacts: declarations }, evidence);
+  const reusable = await verifiedReusableSkillReportArtifacts(db, row, { ...report, artifacts: declarations }, evidence, context);
   if (reusable.artifactsByKey.size) {
     insertSessionWorklog(db, taskId, {
       turnId: row.turn_id || null,
@@ -5979,9 +6571,10 @@ async function archiveSkillReportArtifacts(sessionId, reportId, context = {}) {
         const result = await archivePytestHtmlArtifact(db, taskId, row, candidate, context);
         mediaWarningCount += Number(result?.mediaWarningCount || 0);
       } else {
-        await archiveFailureAnalysisMarkdownArtifact(db, taskId, row, candidate, context);
+        await archiveFailureAnalysisArtifact(db, taskId, row, candidate, context);
       }
     } catch (error) {
+      if (error.artifactArchiveControlError) throw error;
       failures.push({ declaration, error });
     }
   }
@@ -6018,6 +6611,18 @@ function queueSkillReportArtifactJob(db, taskId, reportId, createdAt = nowIso(),
   );
 }
 
+function assertSkillReportArtifactJobOwnership(db, reportId, ownerInput = '') {
+  const owner = String(ownerInput || '').trim();
+  const job = db.prepare('SELECT status,lease_owner FROM skill_report_artifact_jobs WHERE report_id=?').get(reportId);
+  const changed = owner
+    ? job?.status !== 'processing' || job.lease_owner !== owner
+    : job?.status === 'processing';
+  if (changed) {
+    throw Object.assign(statusError('Skill report artifact job ownership changed before metadata publication', 409),
+      { artifactArchiveControlError: true });
+  }
+}
+
 function completeSkillReportArtifactJob(db, reportId, ownerInput = '') {
   const owner = String(ownerInput || '').trim();
   const now = nowIso();
@@ -6029,7 +6634,7 @@ function completeSkillReportArtifactJob(db, reportId, ownerInput = '') {
       AND (?='' OR (status='processing' AND lease_owner=?))
   `).run(now, now, reportId, owner, owner);
   if (owner && changed.changes !== 1) {
-    throw statusError('Skill report artifact job ownership changed before completion', 409);
+    throw Object.assign(statusError('Skill report artifact job ownership changed before completion', 409), { artifactArchiveControlError: true });
   }
 }
 
@@ -6044,7 +6649,7 @@ function renewSkillReportArtifactJobLease(reportId, ownerInput) {
     WHERE report_id=? AND status='processing' AND lease_owner=?
   `).run(leaseExpiresAt, now, String(reportId || ''), owner);
   if (changed.changes !== 1) {
-    throw statusError('Skill report artifact job ownership changed during archival', 409);
+    throw Object.assign(statusError('Skill report artifact job ownership changed during archival', 409), { artifactArchiveControlError: true });
   }
 }
 
@@ -6165,7 +6770,7 @@ async function processSkillReportArtifactJob(reportId, workerId) {
   }
 }
 
-async function archiveFailureAnalysisMarkdownArtifact(db, taskId, row, candidate, context) {
+async function archiveFailureAnalysisArtifact(db, taskId, row, candidate, context) {
   if (db.prepare('SELECT archive_mode FROM tasks WHERE id=?').get(taskId)?.archive_mode === 'in-place') {
     return archiveInPlaceArtifact(db, taskId, row, candidate, context || {});
   }
@@ -6220,6 +6825,7 @@ async function archiveFailureAnalysisMarkdownArtifact(db, taskId, row, candidate
   }
   const createdAt = nowIso();
   db.transaction(() => {
+    assertSkillReportArtifactJobOwnership(db, row.id, context?.jobOwner);
     const existing = db.prepare(`
       SELECT * FROM skill_report_artifacts WHERE report_id=? AND artifact_key=?
     `).get(row.id, candidate.key);
@@ -6263,6 +6869,220 @@ async function archiveFailureAnalysisMarkdownArtifact(db, taskId, row, candidate
     });
   }).immediate();
   await context?.renewLease?.();
+}
+
+function inPlaceArtifactResourceIndex(db, artifact, content) {
+  const view = parseJson(artifact.view_json, {});
+  const resources = db.prepare('SELECT * FROM skill_report_artifact_resources WHERE artifact_id=?').all(artifact.id);
+  const urls = new Set(resources.map(resource => pytestMediaResourceUrl(
+    artifact.task_id, artifact.report_id, artifact.id, resource.id)));
+  const ids = new Set(resources.map(resource => resource.id));
+  const replacements = new Map(view.replacements || []);
+  const html = content.toString('utf8');
+  const references = new Set([
+    ...mediaReferencesInHtml(html),
+    ...[...html.matchAll(PYTEST_LOG_REFERENCE)].map(match => match[0]).filter(reference => /\.html?$/i.test(reference)),
+    ...[...html.matchAll(PYTEST_CASE_SOURCE_REFERENCE)].map(match => match[1]),
+  ]);
+  const missing = [...references].filter(reference => !urls.has(replacements.get(reference)?.split(/[?#]/, 1)[0]));
+  let dangling = 0;
+  const check = readVideoCheckReport(html);
+  if (check && !/^(?:\/|[A-Za-z][A-Za-z0-9+.-]*:)/.test(check.descriptor.source)
+    && !urls.has(view.check?.source)) dangling++;
+  for (const [, id] of view.check?.details || []) if (!ids.has(id)) dangling++;
+  for (const resource of resources) {
+    const extension = path.extname(resource.file_name).toLowerCase();
+    if (!['.m3u8', '.mpd'].includes(extension)) continue;
+    const manifest = parseJson(resource.view_json, {}).content;
+    if (typeof manifest !== 'string') { dangling++; continue; }
+    for (const reference of manifestReferences(manifest, extension)) {
+      if (reference.endsWith('/')) continue;
+      if (reference.startsWith('/api/sessions/')) {
+        if (!urls.has(reference.split(/[?#]/, 1)[0])) dangling++;
+      } else if (!/^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/\/)/.test(reference)) dangling++;
+    }
+  }
+  return { view, resources, missing, dangling, complete: !missing.length && !dangling };
+}
+
+async function repairInPlaceSkillReportArtifactResources(sessionId, artifactId, context = {}) {
+  const db = ensureStorage();
+  const taskId = canonicalTaskId(sessionId);
+  assertNoPlatformMaintenance(db);
+  const artifact = db.prepare(`SELECT artifact.*,report.payload_json AS report_payload_json
+    FROM skill_report_artifacts artifact JOIN skill_reports report ON report.id=artifact.report_id
+    WHERE artifact.task_id=? AND artifact.id=?`).get(taskId, artifactId);
+  if (!artifact || artifact.kind !== 'pytest-html' || artifact.storage_mode !== 'in-place') {
+    throw statusError('In-place pytest HTML artifact not found', 404);
+  }
+  assertSkillReportArtifactJobOwnership(db, artifact.report_id, context.jobOwner);
+  const snapshotPath = inPlaceArtifactPath(db, taskId, artifact.managed_path);
+  const content = await readStablePytestArtifactFile(snapshotPath);
+  if (content.length !== Number(artifact.bytes) || hashBuffer(content) !== artifact.sha256) {
+    throw statusError('Managed Skill report artifact failed integrity verification', 409);
+  }
+  const state = inPlaceArtifactResourceIndex(db, artifact, content);
+  if (state.complete) return { artifactId, addedResources: 0, unresolvedReferences: 0, mediaCopiedBytes: 0 };
+  const declaration = (parseJson(artifact.report_payload_json, {}).artifacts || [])
+    .find(item => item.key === artifact.artifact_key);
+  const task = db.prepare('SELECT session_root FROM tasks WHERE id=?').get(taskId);
+  const containmentRoot = state.view.containmentRoot || task.session_root;
+  let indexed;
+  let reusedFrom = '';
+  const candidates = db.prepare(`SELECT artifact.*,report.payload_json AS report_payload_json
+    FROM skill_report_artifacts artifact JOIN skill_reports report ON report.id=artifact.report_id
+    WHERE artifact.task_id=? AND artifact.kind='pytest-html' AND artifact.storage_mode='in-place'
+      AND artifact.id<>? AND artifact.source_sha256=? ORDER BY artifact.created_at DESC`)
+    .all(taskId, artifact.id, artifact.source_sha256 || artifact.sha256);
+  for (const candidate of candidates) {
+    const source = (parseJson(candidate.report_payload_json, {}).artifacts || [])
+      .find(item => item.key === candidate.artifact_key);
+    if (!declaration || source?.path !== declaration.path) continue;
+    const retained = inPlaceArtifactResourceIndex(db, candidate, content);
+    if (!retained.complete || retained.view.containmentRoot !== containmentRoot) continue;
+    let available = true;
+    for (let offset = 0; offset < retained.resources.length && available; offset += 64) {
+      await context.onProgress?.();
+      const valid = await Promise.all(retained.resources.slice(offset, offset + 64).map(async resource => {
+        if (resource.storage_mode !== 'in-place') return false;
+        try {
+          const stat = await fs.promises.lstat(inPlaceArtifactPath(db, taskId, resource.managed_path));
+          return stat.isFile() && Number(stat.size) === Number(resource.bytes);
+        } catch (error) { if (['ENOENT', 'ENOTDIR'].includes(error.code)) return false; throw error; }
+      }));
+      available = valid.every(Boolean);
+    }
+    if (!available) continue;
+    const ids = new Map(retained.resources.map(resource => [resource.id,
+      `report-resource-${hashContent(`${artifact.id}\0${path.resolve(containmentRoot, resource.resource_key)}`).slice(0, 32)}`]));
+    const oldScope = pytestMediaResourceUrl(taskId, candidate.report_id, candidate.id, '');
+    const newScope = pytestMediaResourceUrl(taskId, artifact.report_id, artifact.id, '');
+    const rewrite = value => String(value).split(oldScope).join(newScope)
+      .replace(/report-resource-[a-f0-9]{32}/g, id => ids.get(id) || id);
+    indexed = { view: JSON.parse(rewrite(candidate.view_json)), warnings: [],
+      resources: retained.resources.map(resource => ({ id: ids.get(resource.id),
+        resourceKey: resource.resource_key, fileName: resource.file_name, mediaType: resource.media_type,
+        managedPath: resource.managed_path, bytes: Number(resource.bytes), sha256: resource.sha256,
+        viewJson: rewrite(resource.view_json || '{}') })) };
+    reusedFrom = candidate.id;
+    break;
+  }
+  if (!indexed) {
+    const sourcePath = declaration?.path || snapshotPath;
+    const prepared = await selfContainedPytestHtml(content, sourcePath, containmentRoot);
+    indexed = await archivePytestMediaResources(prepared.content, {
+      taskId, reportId: artifact.report_id, artifactId: artifact.id, sourcePath, containmentRoot,
+      referenceContent: content, logReferences: prepared.externalLogReferences,
+      inPlace: true, onProgress: context.onProgress,
+    });
+  }
+  await context.onProgress?.();
+  let addedResources = 0;
+  db.transaction(() => {
+    assertNoPlatformMaintenance(db);
+    assertSkillReportArtifactJobOwnership(db, artifact.report_id, context.jobOwner);
+    const current = db.prepare('SELECT * FROM skill_report_artifacts WHERE task_id=? AND id=?').get(taskId, artifact.id);
+    if (!current || current.sha256 !== artifact.sha256) throw statusError('Report changed during resource index repair', 409);
+    for (const resource of indexed.resources) {
+      inPlaceArtifactPath(db, taskId, resource.managedPath);
+      const existing = db.prepare('SELECT bytes,sha256 FROM skill_report_artifact_resources WHERE id=?').get(resource.id);
+      if (existing && (Number(existing.bytes) !== resource.bytes || existing.sha256 !== resource.sha256)) {
+        throw statusError('Existing media resource differs from its retained index', 409);
+      }
+      const viewJson = resource.viewJson || JSON.stringify(resource.viewContent == null ? {} : { content: resource.viewContent });
+      if (!existing) {
+        db.prepare(`INSERT INTO skill_report_artifact_resources
+          (id,task_id,report_id,artifact_id,resource_key,file_name,media_type,managed_path,bytes,sha256,created_at,storage_mode,view_json)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,'in-place',?)`).run(resource.id, taskId, artifact.report_id, artifact.id,
+            resource.resourceKey, resource.fileName, resource.mediaType, resource.managedPath,
+            resource.bytes, resource.sha256, nowIso(), viewJson);
+        addedResources++;
+      } else db.prepare('UPDATE skill_report_artifact_resources SET view_json=? WHERE id=?').run(viewJson, resource.id);
+    }
+    const currentView = parseJson(current.view_json, {});
+    const replacements = new Map([...(currentView.replacements || []), ...(indexed.view.replacements || [])]);
+    db.prepare('UPDATE skill_report_artifacts SET view_json=? WHERE id=?')
+      .run(JSON.stringify({ ...currentView, ...indexed.view, containmentRoot, replacements: [...replacements] }), artifact.id);
+    insertSessionWorklog(db, taskId, { kind: 'skill.report.artifact.resources_repaired',
+      actor: context.actor || 'operator:resource-index-repair',
+      message: `Repaired retained resource index for ${artifact.file_name}`,
+      payload: { artifactId, addedResources, reusedFrom, mediaCopiedBytes: 0, warnings: indexed.warnings.slice(0, 20) } });
+  }).immediate();
+  const after = inPlaceArtifactResourceIndex(db,
+    db.prepare('SELECT * FROM skill_report_artifacts WHERE id=?').get(artifact.id), content);
+  return { artifactId, addedResources, reusedFrom, mediaCopiedBytes: 0,
+    unresolvedReferences: after.missing.length + after.dangling, warnings: indexed.warnings };
+}
+
+async function repairInPlaceSkillReportArtifactLogs(sessionId, artifactId, context = {}) {
+  const db = ensureStorage();
+  const taskId = canonicalTaskId(sessionId);
+  assertNoPlatformMaintenance(db);
+  const artifact = db.prepare(`SELECT artifact.*,report.payload_json AS report_payload_json
+    FROM skill_report_artifacts artifact JOIN skill_reports report ON report.id=artifact.report_id
+    WHERE artifact.task_id=? AND artifact.id=?`).get(taskId, artifactId);
+  if (!artifact || artifact.kind !== 'pytest-html' || artifact.storage_mode !== 'in-place') {
+    throw statusError('In-place pytest HTML artifact not found', 404);
+  }
+  assertSkillReportArtifactJobOwnership(db, artifact.report_id);
+  const snapshotPath = inPlaceArtifactPath(db, taskId, artifact.managed_path);
+  const content = await readStablePytestArtifactFile(snapshotPath);
+  if (content.length !== Number(artifact.bytes) || hashBuffer(content) !== artifact.sha256) {
+    throw statusError('Managed Skill report artifact failed integrity verification', 409);
+  }
+  const view = parseJson(artifact.view_json, {});
+  const replacements = new Map(view.replacements || []);
+  const resourceUrls = new Set(db.prepare('SELECT id FROM skill_report_artifact_resources WHERE artifact_id=?')
+    .all(artifact.id).map(row => pytestMediaResourceUrl(taskId, artifact.report_id, artifact.id, row.id)));
+  const references = [...new Set([...content.toString('utf8').matchAll(PYTEST_LOG_REFERENCE)].map(match => match[0]))]
+    .filter(reference => !resourceUrls.has(replacements.get(reference)));
+  if (!references.length) return { artifactId, addedResources: 0, unresolvedReferences: 0 };
+  const declaration = (parseJson(artifact.report_payload_json, {}).artifacts || [])
+    .find(item => item.key === artifact.artifact_key);
+  const task = db.prepare('SELECT session_root FROM tasks WHERE id=?').get(taskId);
+  // Empty HTML limits this pass to the explicit log list: videos and other
+  // already archived resources are neither copied nor indexed again.
+  const indexed = await archivePytestMediaResources(Buffer.alloc(0), {
+    taskId, reportId: artifact.report_id, artifactId: artifact.id,
+    sourcePath: declaration?.path || snapshotPath,
+    containmentRoot: view.containmentRoot || task.session_root,
+    logReferences: references, inPlace: true, onProgress: context.onProgress,
+  });
+  const now = nowIso();
+  let addedResources = 0;
+  db.transaction(() => {
+    assertNoPlatformMaintenance(db);
+    assertSkillReportArtifactJobOwnership(db, artifact.report_id);
+    const current = db.prepare('SELECT sha256,view_json FROM skill_report_artifacts WHERE id=? AND task_id=?')
+      .get(artifact.id, taskId);
+    if (!current || current.sha256 !== artifact.sha256) throw statusError('Report changed during log index repair', 409);
+    const currentView = parseJson(current.view_json, {});
+    const merged = new Map(currentView.replacements || []);
+    for (const resource of indexed.resources) {
+      inPlaceArtifactPath(db, taskId, resource.managedPath);
+      const existing = db.prepare('SELECT sha256,bytes FROM skill_report_artifact_resources WHERE id=?').get(resource.id);
+      if (existing && (existing.sha256 !== resource.sha256 || Number(existing.bytes) !== resource.bytes)) {
+        throw statusError('Existing log resource differs from its retained source', 409);
+      }
+      if (!existing) {
+        db.prepare(`INSERT INTO skill_report_artifact_resources
+          (id,task_id,report_id,artifact_id,resource_key,file_name,media_type,managed_path,bytes,sha256,created_at,storage_mode,view_json)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,'in-place','{}')`)
+          .run(resource.id, taskId, artifact.report_id, artifact.id, resource.resourceKey, resource.fileName,
+            resource.mediaType, resource.managedPath, resource.bytes, resource.sha256, now);
+        addedResources++;
+      }
+    }
+    for (const [reference, url] of indexed.view.replacements) merged.set(reference, url);
+    db.prepare('UPDATE skill_report_artifacts SET view_json=? WHERE id=?')
+      .run(JSON.stringify({ ...currentView, replacements: [...merged] }), artifact.id);
+    insertSessionWorklog(db, taskId, { kind: 'skill.report.artifact.logs_repaired',
+      message: `Repaired ${indexed.view.replacements.length} retained log link(s) in ${artifact.file_name}`,
+      actor: context.actor || 'operator:log-resource-repair',
+      payload: { reportId: artifact.report_id, artifactId: artifact.id, addedResources,
+        unresolvedReferences: indexed.warnings.length, mediaCopiedBytes: 0 } });
+  }).immediate();
+  return { artifactId, addedResources, unresolvedReferences: indexed.warnings.length, warnings: indexed.warnings };
 }
 
 async function redactSkillReportArtifacts() {
@@ -6344,7 +7164,10 @@ async function openSkillReportArtifactFile(sessionId, reportId, artifactId, opti
       const view = parseJson(row.view_json, {});
       const selfContained = await selfContainedPytestHtml(Buffer.from(content), expectedPath, view.containmentRoot);
       const rendered = Buffer.from(applyInPlaceHtmlView(selfContained.content.toString('utf8'), view));
-      return { content: rendered, bytes: rendered.length, fileName: skillReportArtifactFileName(row), mediaType: row.media_type };
+      return {
+        content: rendered, bytes: rendered.length,
+        fileName: skillReportArtifactFileName(row), mediaType: row.media_type, kind: row.kind,
+      };
     } finally { await opened.handle.close(); }
   }
   return {
@@ -6352,6 +7175,7 @@ async function openSkillReportArtifactFile(sessionId, reportId, artifactId, opti
     bytes: opened.bytes,
     fileName: skillReportArtifactFileName(row),
     mediaType: row.media_type,
+    kind: row.kind,
   };
 }
 
@@ -6722,6 +7546,7 @@ function beginSessionTurn(data) {
   db.transaction(() => {
     const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
     if (!task) throw statusError(`Session ${taskId} not found`, 404);
+    assertTaskNotInCycleDeletion(db, taskId);
     if (!task.enabled) throw statusError('Disabled sessions cannot be run', 409);
     if (task.status !== 'queued') throw statusError(`Session ${taskId} is no longer queued`, 409);
     if (task.lease_owner !== data.workerId) throw statusError(`Session ${taskId} lease is not owned by this worker`, 409);
@@ -7560,11 +8385,9 @@ async function openExternalAttemptArtifactFile(taskId, attemptId, artifactKey, o
   if (!declaration) return null;
   const published = publishedExternalAttemptArtifact(db, normalizedTaskId, attemptId, declaration);
   if (published) return { redirectUrl: rowToSkillReportArtifact(published).url };
-  const mediaType = declaration.kind === 'pytest-html'
+  const mediaType = ['pytest-html', 'failure-analysis-html'].includes(declaration.kind)
     ? 'text/html; charset=utf-8'
-    : declaration.kind === 'failure-analysis-markdown'
-      ? 'text/markdown; charset=utf-8'
-      : '';
+    : declaration.kind === 'failure-analysis-markdown' ? 'text/markdown; charset=utf-8' : '';
   if (!mediaType) return null;
   let opened;
   try {
@@ -7580,7 +8403,7 @@ async function openExternalAttemptArtifactFile(taskId, attemptId, artifactKey, o
     if (opened.bytes > MAX_SKILL_REPORT_ARTIFACT_BYTES) {
       throw statusError(`Registered artifact exceeds ${MAX_SKILL_REPORT_ARTIFACT_BYTES} bytes`, 413);
     }
-    if (mediaType === 'text/html; charset=utf-8') {
+    if (declaration.kind === 'pytest-html') {
       const snapshot = await readExternalArtifactSnapshot(opened);
       // A terminal process does not mean report post-processing/archival is done.
       // Preview remains available; the archive still requires a complete document.
@@ -7623,6 +8446,7 @@ async function openExternalAttemptArtifactFile(taskId, attemptId, artifactKey, o
       bytes: opened.bytes,
       fileName: path.basename(declaration.path),
       mediaType,
+      kind: declaration.kind,
     };
   } catch (error) {
     try { await opened?.handle.close(); } catch {}
@@ -9686,6 +10510,7 @@ function claimDueScheduledJobs(workerId, limit = 20) {
       SELECT j.* FROM scheduled_jobs j
       JOIN tasks t ON t.id=j.task_id
       WHERE j.status='pending' AND j.due_at<=? AND t.status='waiting_scheduled'
+        AND NOT ${TASK_CYCLE_DELETION_SQL.replaceAll('tasks.', 't.')}
       ORDER BY j.due_at, j.created_at LIMIT ?
     `).all(now, Math.max(1, Math.min(100, Number(limit || 20))));
     const expires = new Date(Date.now() + SCHEDULE_CLAIM_TTL_MS).toISOString();
@@ -9841,7 +10666,8 @@ function finalizeStoppedTaskIfRuntimeEmpty(taskId, context = {}) {
   let finalized = false;
   db.transaction(() => {
     const task = db.prepare("SELECT * FROM tasks WHERE id=? AND status='stopping'").get(taskId);
-    if (!task || taskRuntimeActivity(db, taskId).active) return;
+    if (!task || (context.expectedTaskCreatedAt && task.created_at !== context.expectedTaskCreatedAt)
+      || taskRuntimeActivity(db, taskId).active) return;
     const now = nowIso();
     const changed = db.prepare(`
       UPDATE tasks SET status='stopped', recovery_state='stopped', current_pid=NULL,
@@ -9891,7 +10717,21 @@ function cancelTaskScheduledWork(db, taskId, reason, context = {}) {
 }
 
 function terminateTrackedExternalProcesses(taskId, externalProcesses, context = {}) {
-  for (const external of externalProcesses) {
+  const taskCreatedAt = context.expectedTaskCreatedAt
+    || ensureStorage().prepare('SELECT created_at FROM tasks WHERE id=?').get(taskId)?.created_at;
+  if (!taskCreatedAt) return;
+  // Stop timers can outlive deletion and reuse of the Task ID. Bind every
+  // delayed signal, worklog and final state update to the original generation.
+  const forCurrentTask = operation => {
+    const db = ensureStorage();
+    return db.transaction(() => {
+      if (!db.prepare('SELECT 1 FROM tasks WHERE id=? AND created_at=?').get(taskId, taskCreatedAt)) return;
+      return operation(db);
+    }).immediate();
+  };
+  const settle = () => forCurrentTask(() => finalizeStoppedTaskIfRuntimeEmpty(taskId,
+    { ...context, expectedTaskCreatedAt: taskCreatedAt }));
+  for (const external of externalProcesses) forCurrentTask(db => {
     const cgroupResult = external.cgroupPath && external.cgroupInode
       ? killVerifiedTaskCgroup({
         taskId,
@@ -9900,13 +10740,13 @@ function terminateTrackedExternalProcesses(taskId, externalProcesses, context = 
       })
       : null;
     if (cgroupResult?.killed) {
-      appendSessionWorklog(taskId, {
+      insertSessionWorklog(db, taskId, {
         kind: 'external.attempt.stop.cgroup_killed', level: 'warn',
         message: `Killed ${cgroupResult.members} process(es) in task cgroup for ${external.externalAttemptId}`,
         payload: { externalAttemptId: external.externalAttemptId, backend: 'cgroup.kill', ...cgroupResult },
         actor: context.actor || 'operator', requestId: context.requestId || '',
       });
-      continue;
+      return;
     }
     const identity = {
       pid: external.pid,
@@ -9919,7 +10759,7 @@ function terminateTrackedExternalProcesses(taskId, externalProcesses, context = 
     } catch (error) {
       result = { signalled: false, reason: String(error?.code || error?.message || 'signal_failed') };
     }
-    appendSessionWorklog(taskId, {
+    insertSessionWorklog(db, taskId, {
       kind: 'external.attempt.stop.signalled',
       level: result.signalled ? 'warn' : 'info',
       message: result.signalled
@@ -9928,15 +10768,15 @@ function terminateTrackedExternalProcesses(taskId, externalProcesses, context = 
       payload: { externalAttemptId: external.externalAttemptId, signal: 'SIGTERM', ...result },
       actor: context.actor || 'operator', requestId: context.requestId || '',
     });
-    if (!result.signalled) continue;
-    const timer = setTimeout(() => {
+    if (!result.signalled) return;
+    const timer = setTimeout(() => forCurrentTask(currentDb => {
       let forced;
       try {
         forced = signalVerifiedProcessGroup(identity, 'SIGKILL');
       } catch (error) {
         forced = { signalled: false, reason: String(error?.code || error?.message || 'signal_failed') };
       }
-      appendSessionWorklog(taskId, {
+      insertSessionWorklog(currentDb, taskId, {
         kind: 'external.attempt.stop.forced',
         level: forced.signalled ? 'warn' : 'info',
         message: forced.signalled
@@ -9945,12 +10785,12 @@ function terminateTrackedExternalProcesses(taskId, externalProcesses, context = 
         payload: { externalAttemptId: external.externalAttemptId, signal: 'SIGKILL', ...forced },
         actor: context.actor || 'operator', requestId: context.requestId || '',
       });
-      const settleTimer = setTimeout(() => finalizeStoppedTaskIfRuntimeEmpty(taskId, context), 50);
+      const settleTimer = setTimeout(settle, 50);
       settleTimer.unref();
-    }, EXTERNAL_STOP_GRACE_MS);
+    }), EXTERNAL_STOP_GRACE_MS);
     timer.unref();
-  }
-  const settleTimer = setTimeout(() => finalizeStoppedTaskIfRuntimeEmpty(taskId, context), 50);
+  });
+  const settleTimer = setTimeout(settle, 50);
   settleTimer.unref();
 }
 
@@ -9982,6 +10822,7 @@ function queueSessionRunInTransaction(
   if (task.status === 'completed') throw statusError('Completed sessions are immutable history records', 409);
   if (!allowEnqueue) return null;
   assertNoPlatformMaintenance(db);
+  assertTaskNotInCycleDeletion(db, taskId);
   if (ACTIVE_STATUSES.includes(task.status)) {
     throw statusError('Session already has an active run command', 409);
   }
@@ -10098,6 +10939,7 @@ function claimPendingCommands(workerId, limit = 10) {
       JOIN tasks ON tasks.id=commands.task_id
       WHERE commands.status='pending' AND tasks.status='queued'
         AND NOT ${SERIES_QUEUE_BLOCKED_SQL}
+        AND NOT ${TASK_CYCLE_DELETION_SQL}
         AND NOT EXISTS (SELECT 1 FROM metadata m
           WHERE m.key='${RUNTIME_RELEASE_KEY_PREFIX}' || tasks.id
             AND json_extract(m.value, '$.expiresAt')>?)
@@ -10294,6 +11136,7 @@ function acquireTaskLease(taskId, workerId, ttlMs = 15000) {
     WHERE id=? AND status='queued'
       AND (lease_owner IS NULL OR lease_owner=? OR lease_expires_at IS NULL OR lease_expires_at < ?)
       AND NOT ${SERIES_QUEUE_BLOCKED_SQL}
+      AND NOT ${TASK_CYCLE_DELETION_SQL}
       AND NOT EXISTS (SELECT 1 FROM metadata m
         WHERE m.key='${RUNTIME_RELEASE_KEY_PREFIX}' || tasks.id
           AND json_extract(m.value, '$.expiresAt')>?)
@@ -10315,26 +11158,50 @@ function releaseTaskLease(taskId, workerId) {
   `).run(safeId(taskId), workerId);
 }
 
+function prepareSessionStop(sessionId, context = {}) {
+  const db = ensureStorage();
+  const taskId = safeId(sessionId);
+  const identity = sessionOperationIdentity('stop', taskId, context);
+  return db.transaction(() => {
+    const receipt = readSessionOperationReceipt(db, identity);
+    if (receipt) return { replayed: true, ok: Boolean(receipt.ok) };
+    assertNoPlatformMaintenance(db);
+    const task = db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId);
+    if (!task) throw statusError(`Session ${taskId} not found`, 404);
+    assertExpectedTaskGeneration(task, identity);
+    if (context.preparedTaskCreatedAt && context.preparedTaskCreatedAt !== task.created_at) {
+      throw statusError('Task was replaced after this stop was prepared', 409);
+    }
+    return { replayed: false, taskCreatedAt: task.created_at };
+  }).immediate();
+}
+
 function requestSessionStop(sessionId, context = {}) {
   const db = ensureStorage();
   const taskId = safeId(sessionId);
-  reconcileExternalAttempts(taskId, { preserveTerminalSchedule: false });
   const identity = sessionOperationIdentity('stop', taskId, context);
   let stopped = false;
   let externalProcesses = [];
+  let taskCreatedAt = '';
   db.transaction(() => {
-    const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
-    if (!task) throw statusError(`Session ${taskId} not found`, 404);
-    const receipt = readSessionOperationReceipt(db, identity);
-    if (receipt) {
-      stopped = Boolean(receipt.ok);
+    const plan = prepareSessionStop(taskId, context);
+    let task = db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId);
+    if (plan.replayed) {
+      stopped = plan.ok;
+      const original = db.prepare('SELECT task_created_at FROM session_operation_receipts WHERE idempotency_key=?')
+        .get(identity.idempotencyKey);
+      if (!task || original.task_created_at !== task.created_at) return;
+      taskCreatedAt = task.created_at;
       if (['stopping', 'stopped'].includes(task.status)) {
         externalProcesses = taskRuntimeActivity(db, taskId).externalProcesses;
       }
       return;
     }
-    assertNoPlatformMaintenance(db);
-    assertExpectedTaskGeneration(task, identity);
+    taskCreatedAt = plan.taskCreatedAt;
+    // Validation and reconciliation share the write transaction so another
+    // caller cannot replace the Task between checking identity and changing it.
+    reconcileExternalAttempts(taskId, { preserveTerminalSchedule: false });
+    task = db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId);
     if (task.status === 'waiting_scheduled') {
       cancelTaskScheduledWork(db, taskId, 'Task monitoring stopped by operator', context);
       externalProcesses = taskRuntimeActivity(db, taskId).externalProcesses;
@@ -10382,13 +11249,14 @@ function requestSessionStop(sessionId, context = {}) {
         message: `Stop requested for task session ${taskId}`,
         actor: context.actor || 'operator', requestId: context.requestId || '',
       });
-    } else if (task.status === 'stopped') {
+    } else if (task.status === 'stopped' || taskRuntimeActivity(db, taskId).active) {
+      cancelTaskScheduledWork(db, taskId, 'Task residual execution stopped by operator', context);
       externalProcesses = taskRuntimeActivity(db, taskId).externalProcesses;
       stopped = externalProcesses.length > 0;
       if (stopped) {
         db.prepare(`
           UPDATE tasks SET status='stopping', recovery_state='stopping', cancel_requested=1,
-            version=version+1, updated_at=? WHERE id=? AND status='stopped'
+            version=version+1, updated_at=? WHERE id=?
         `).run(nowIso(), taskId);
         insertSessionWorklog(db, taskId, {
           kind: 'session.stop.residual_cleanup', level: 'warn',
@@ -10399,10 +11267,12 @@ function requestSessionStop(sessionId, context = {}) {
     }
     writeSessionOperationReceipt(db, identity, task.created_at, { ok: stopped }, context);
   }).immediate();
+  if (!taskCreatedAt) return stopped;
+  const stopContext = { ...context, expectedTaskCreatedAt: taskCreatedAt };
   if (externalProcesses.length) {
-    terminateTrackedExternalProcesses(taskId, externalProcesses, context);
+    terminateTrackedExternalProcesses(taskId, externalProcesses, stopContext);
   } else {
-    finalizeStoppedTaskIfRuntimeEmpty(taskId, context);
+    finalizeStoppedTaskIfRuntimeEmpty(taskId, stopContext);
   }
   return stopped;
 }
@@ -10416,6 +11286,25 @@ const IDLE_RUNTIME_TASK_SQL = `
 function listIdleTaskRuntimes(cutoff = new Date(Date.now() - 60000).toISOString()) {
   return ensureStorage().prepare(`SELECT id FROM tasks WHERE ${IDLE_RUNTIME_TASK_SQL} ORDER BY updated_at,id`)
     .all(cutoff).map(row => row.id);
+}
+
+async function releaseOrphanTaskRuntimes(options = {}) {
+  const db = ensureStorage();
+  const reference = db.prepare('SELECT 1 FROM tasks WHERE id=? OR persistent_session_key=? LIMIT 1');
+  const results = await releaseOrphanTaskProcesses({ ...options,
+    isReferenced: (taskId, sessionKey) => Boolean(platformMaintenanceFromDatabase(db) || reference.get(taskId, sessionKey)),
+  });
+  for (const result of results) {
+    if (!result.released.length && !result.errors.length) continue;
+    appendAuditEvent({
+      scope: 'runtime', entityType: 'bridge_session', entityId: result.sessionId,
+      kind: result.errors.length ? 'runtime.orphan.release.failed' : 'runtime.orphan.released',
+      level: result.errors.length ? 'warn' : 'info',
+      message: `Released ${result.released.length} orphan Codex process(es); Session files retained.`,
+      payload: { taskId: result.taskId, released: result.released, errors: result.errors, skipped: result.skipped || '' },
+    }, db);
+  }
+  return results;
 }
 
 function getTaskRuntimeRelease(taskId) {
@@ -10608,6 +11497,16 @@ function finalizeSessionTurn(data) {
     if (taskChanged.changes !== 1) throw statusError(`Session ${taskId} could not be finalized`, 409);
     if (finalStatus === 'waiting_review') {
       missingPlatformReportSkills = missingTerminalPlatformReportSkillsForTask(db, taskId);
+      // Publish the declared Run jobs before committing waiting_review, so
+      // Session sealing cannot observe an empty archive queue in between.
+      try {
+        const registered = publishMissingRegisteredPytestReports(taskId);
+        const covered = new Set(registered.map(report => report.skillId));
+        missingPlatformReportSkills = missingPlatformReportSkills.filter(skillId => !covered.has(skillId));
+      } catch (error) {
+        insertSessionWorklog(db, taskId, { kind: 'skill.report.execution_fallback_failed', level: 'warn', actor: 'platform',
+          message: `Could not register a missing execution report: ${String(error.message || error)}` });
+      }
     }
     if (data.resultText) {
       insertSessionWorklog(db, taskId, {
@@ -10660,24 +11559,24 @@ function finalizeSessionTurn(data) {
   return session;
 }
 
-function completeSession(sessionId, context = {}) {
+function prepareSessionCompletion(sessionId, context = {}) {
   const db = ensureStorage();
   const taskId = safeId(sessionId);
   const identity = sessionOperationIdentity('complete', taskId, context);
-  let session;
-  db.transaction(() => {
+  return db.transaction(() => {
     const receipt = readSessionOperationReceipt(db, identity);
-    if (receipt) {
-      session = receipt;
-      return;
-    }
+    if (receipt) return { replayed: true, session: receipt };
     assertNoPlatformMaintenance(db);
     const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
     if (!task) throw statusError(`Session ${taskId} not found`, 404);
     assertExpectedTaskGeneration(task, identity);
+    if (context.preparedTaskCreatedAt && task.created_at !== context.preparedTaskCreatedAt) {
+      throw statusError('Task was replaced after this completion was prepared', 409);
+    }
     if (task.status === 'completed') {
-      session = rowToSession(task);
-      return;
+      const session = rowToSession(task);
+      writeSessionOperationReceipt(db, identity, task.created_at, session, context);
+      return { replayed: true, session };
     }
     if (!['waiting_review', 'waiting_input'].includes(task.status)) {
       throw statusError('Only a reviewed task can be completed', 409);
@@ -10695,7 +11594,18 @@ function completeSession(sessionId, context = {}) {
     if (taskRuntimeActivity(db, taskId).active) {
       throw statusError('Task still has owned runtime processes or threads', 409);
     }
-    if (task.workspace_mode === 'session-clone' && task.archive_state !== 'archived') {
+    return { replayed: false, session: rowToSession(task), taskCreatedAt: task.created_at };
+  }).immediate();
+}
+
+function completeSession(sessionId, context = {}) {
+  const db = ensureStorage();
+  const taskId = safeId(sessionId);
+  const identity = sessionOperationIdentity('complete', taskId, context);
+  return db.transaction(() => {
+    const plan = prepareSessionCompletion(taskId, context);
+    if (plan.replayed) return plan.session;
+    if (plan.session.workspaceMode === 'session-clone' && plan.session.archiveState !== 'archived') {
       throw statusError('Session files are awaiting in-place archive verification', 409);
     }
     const now = nowIso();
@@ -10710,10 +11620,10 @@ function completeSession(sessionId, context = {}) {
       actor: context.actor || 'operator', requestId: context.requestId || '',
     });
     db.prepare("DELETE FROM session_operation_receipts WHERE task_id=? AND operation='restore'").run(taskId);
-    session = rowToSession(db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId));
-    writeSessionOperationReceipt(db, identity, task.created_at, session, context);
+    const session = rowToSession(db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId));
+    writeSessionOperationReceipt(db, identity, plan.taskCreatedAt, session, context);
+    return session;
   }).immediate();
-  return session;
 }
 
 function resetSession(sessionId, context = {}) {
@@ -10730,6 +11640,7 @@ function resetSession(sessionId, context = {}) {
     assertNoPlatformMaintenance(db);
     const task = db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId);
     if (!task) throw statusError(`Session ${taskId} not found`, 404);
+    assertTaskNotInCycleDeletion(db, taskId);
     assertExpectedTaskGeneration(task, identity);
     if (ACTIVE_STATUSES.includes(task.status)) {
       throw statusError('Stop the active task before resetting its Session', 409);
@@ -10804,6 +11715,7 @@ function restoreCompletedSession(sessionId, context = {}) {
     assertNoPlatformMaintenance(db);
     const task = db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId);
     if (!task) throw statusError(`Session ${taskId} not found`, 404);
+    assertTaskNotInCycleDeletion(db, taskId);
     assertExpectedTaskGeneration(task, identity);
     if (task.status !== 'completed') throw statusError('Only a completed task can be restored', 409);
     if (!String(task.persistent_session_key || '').trim()) {
@@ -10903,7 +11815,7 @@ function recoverExpiredTasks() {
               lease_owner=NULL, lease_expires_at=NULL, cancel_requested=1,
               version=version+1, updated_at=? WHERE id=? AND status='stopping'
           `).run(now, task.id);
-          stoppingCleanup.push({ taskId: task.id, externalProcesses: runtime.externalProcesses });
+          stoppingCleanup.push({ taskId: task.id, taskCreatedAt: task.created_at, externalProcesses: runtime.externalProcesses });
           recovered.push({ id: task.id, resumed: false, status: 'stopping' });
           continue;
         }
@@ -11067,7 +11979,8 @@ function recoverExpiredTasks() {
     }
   }).immediate();
   for (const cleanup of stoppingCleanup) {
-    terminateTrackedExternalProcesses(cleanup.taskId, cleanup.externalProcesses, { actor: 'system' });
+    terminateTrackedExternalProcesses(cleanup.taskId, cleanup.externalProcesses,
+      { actor: 'system', expectedTaskCreatedAt: cleanup.taskCreatedAt });
   }
   return recovered;
 }
@@ -11485,6 +12398,7 @@ function platformActivityCountsFromDatabase(db) {
     `).get().count),
     reportArtifactArchives: countStatuses('skill_report_artifact_jobs', ['processing']),
     bridgeCleanups: countStatuses('bridge_cleanup_jobs', ['processing']),
+    releaseCycleDeletions: countStatuses('release_cycle_deletions', ['processing']),
   };
 }
 
@@ -11576,6 +12490,11 @@ module.exports = {
   createReleaseCycle,
   createTaskSeriesSchedule,
   closeReleaseCycle,
+  deleteReleaseCycle,
+  normalizeRetainedReleaseCycles,
+  getReleaseCycleDeletion,
+  claimReleaseCycleDeletions,
+  processReleaseCycleDeletion,
   createReleaseCycleTask,
   listReleaseCycleTasks,
   linkTaskToReleaseCycle,
@@ -11600,6 +12519,7 @@ module.exports = {
   listBridgeRuntimeInventory,
   requestBridgeSessionReclaim,
   listIdleTaskRuntimes,
+  releaseOrphanTaskRuntimes,
   getTaskRuntimeRelease,
   claimIdleTaskRuntime,
   finishIdleTaskRuntimeRelease,
@@ -11607,7 +12527,10 @@ module.exports = {
   appendSessionWorklog,
   listSessionWorklogs,
   publishSkillReport,
+  publishMissingRegisteredPytestReports,
   archiveSkillReportArtifacts,
+  repairInPlaceSkillReportArtifactLogs,
+  repairInPlaceSkillReportArtifactResources,
   claimSkillReportArtifactJobs,
   processSkillReportArtifactJob,
   redactSkillReportArtifacts,
@@ -11682,7 +12605,9 @@ module.exports = {
   renewTaskLease,
   releaseTaskLease,
   requestSessionStop,
+  prepareSessionStop,
   completeSession,
+  prepareSessionCompletion,
   resetSession,
   restoreCompletedSession,
   recoverExpiredTasks,

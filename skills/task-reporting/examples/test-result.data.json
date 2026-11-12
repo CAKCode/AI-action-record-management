@@ -1,0 +1,38 @@
+{
+  "title": "示例：首轮回归",
+  "status": "failed",
+  "summary": "首轮统计 200 项：Pass 190、Fail 5、Skip 5。",
+  "metrics": {
+    "total": 200,
+    "passed": 190,
+    "failed": 5,
+    "skipped": 5,
+    "error": 0
+  },
+  "rows": [
+    {
+      "case": "tests/test_example.py::test_service",
+      "outcome": "failed",
+      "detail": "预期响应 200，实际 503。完整结果见登记的 HTML。"
+    }
+  ],
+  "context": [
+    {
+      "label": "测试目标",
+      "value": "example-target"
+    },
+    {
+      "label": "测试代码",
+      "value": "example-commit",
+      "format": "code"
+    }
+  ],
+  "primaryExecution": {
+    "label": "首轮 pytest",
+    "command": "python3 -m pytest tests --html task/demo/report/initial.html",
+    "workingDirectory": "/workspace/project",
+    "startedAt": "2026-01-01T10:00:00Z",
+    "finishedAt": "2026-01-01T10:05:00Z",
+    "exitCode": 1
+  }
+}

@@ -169,10 +169,14 @@ const dateTimeFormatters = new Map();
 const RUN_INTENT_STORAGE_KEY = 'codex-task-run-intents-v1';
 const RUN_INTENT_STORAGE_LIMIT = 100;
 const runIntents = loadRunIntents();
+const pendingTaskRecoveries = new Set();
 const TASK_OPERATION_INTENT_STORAGE_KEY = 'codex-task-operation-intents-v1';
 const TASK_OPERATION_INTENT_STORAGE_LIMIT = 100;
 const TASK_OPERATIONS = new Set(['stop', 'complete', 'restore', 'reset', 'delete']);
 const taskOperationIntents = loadTaskOperationIntents();
+const releaseCycleDeleteIntents = new Map();
+let releaseCyclesRequestVersion = 0;
+let releaseCycleTasksRequestVersion = 0;
 let dashboardPollTimer = null;
 let bridgeInventoryPollTimer = null;
 let protectionPollTimer = null;
@@ -220,6 +224,17 @@ const RUNTIME_REASON_KEYS = Object.freeze({
 
 const messages = {
   zh: {
+    sessionCloneWorkspace: '独立 Session 目录', sharedWorkspace: '共享工作目录',
+    newReleaseCycle: '新建版本周期', releaseCycleCreated: '版本周期已创建。', cycleCreateRefreshFailed: '版本周期已创建，刷新列表失败，请刷新页面。', cycleName: '周期名称', cycleTaskName: 'Task 名称', cycleTaskNameDefault: '版本回归', cycleTaskObjective: '每次执行的任务指令', cycleFormNote: '创建周期用于组织独立 Task。代码拉取、部署和测试由每次 Task 按指令执行；可按需启用定时创建。', enableCycleSchedule: '启用定时创建 Task', cycleCron: 'Cron 表达式', cycleTimezone: '时区', cycleOverlap: '前一任务未结束时', cycleOverlapQueue: '排队等待', cycleOverlapSkip: '跳过本次', cycleOverlapParallel: '并行创建', cycleAdvanced: '高级设置', cycleId: '周期 ID', cycleWorkflow: '工作流标识', cycleSavedOnly: '创建周期',
+    viewFullAnalysis: '查看完整分析', analysisReportHint: '逐条分类、预期与实际、证据和下一步',
+    collapseReleaseCycle: '收起', deleteReleaseCycle: '删除周期及任务产物', releaseCycleDeleted: '版本周期及其关联 Task、产物已删除。', cycleDeletedRefreshFailed: '版本周期已删除，但刷新列表失败，请稍后刷新页面。',
+    confirmDeleteReleaseCycle: '删除版本周期「{name}」及其所有关联 Task、报告、日志和音视频产物？运行中的关联 Task 会自动停止。',
+    confirmCloseReleaseCycle: '结束版本周期「{name}」？只停止新 Task 创建，已有 Task 可继续运行，报告和产物保留。',
+    cycleDeletionStarted: '已开始删除版本周期、关联 Task 和产物。', cycleDeleting: '删除中',
+    cycleDeletionCompleted: '版本周期「{name}」及其关联 Task、产物已删除。',
+    cycleDeletionProgress: '已删除 {deleted}/{total} 个 Task，正在清理剩余产物和运行环境。',
+    cycleDeletionRetry: '清理正在重试，进度会自动更新。', cycleDeletionRefreshFailed: '删除已受理，刷新进度失败，请稍后查看。',
+    cycleDeletionLegacy: '当前服务仍使用保留 Task 的旧删除逻辑，任务和产物尚未删除；请应用新版服务后继续清理。',
     cumulativeResults: '累计统计', includingReruns: '含重跑', finalCaseResults: '最终结果', rerunsReplaceEarlier: '重跑覆盖原结果', resultTotal: '总数', fullResultDetail: '展开完整结论', caseCountNotes: '总数包含 Skip 和 XFail；实际执行（不含 Skip）{count} 次。', resultCountsIncomplete: '部分报告尚不可统计，以下为当前已读取的结果。',
     expandInstruction: '展开输入', collapseInstruction: '收起输入', copyReportName: '复制文件名', reportNameCopied: '文件名已复制', copyReportNameFailed: '复制失败，请展开后手动复制文件名。',
     deleteTaskArtifacts: '删除任务及产物', taskArtifactsDeleted: '任务及平台产物已删除，Runtime 由后台回收。', reclaimRuntimeOnly: '仅回收 Runtime', taskStorageLabel: 'TASK STORAGE',
@@ -234,7 +249,7 @@ const messages = {
     taskListDescription: '任务名称与目标', taskListCount: '{count} 个任务', taskObjective: '任务目标',
     expandObjective: '展开', collapseObjective: '收起', showTaskContext: '任务信息', hideTaskContext: '收起信息',
     brandSubtitle: '持久任务工作台', navOverview: '总览', navTasks: '任务 Session', navReleaseCycles: '版本周期', navSkills: 'Skills', navAudit: '操作审计',
-    releaseCyclesNote: '按提测版本查看手动和定时创建的独立 Task。关闭版本周期后只停止后续创建，不影响已运行任务。', refreshReleaseCycles: '刷新', releaseCycleTasksLabel: '版本 Task', runReleaseCycle: '立即创建 Task', closeReleaseCycle: '结束版本周期', releaseCycleActive: '进行中', releaseCycleClosed: '已结束', noReleaseCycles: '还没有提测版本周期。', releaseCycleTaskCount: '{count} 个 Task', taskCountLabel: 'Task 数量', nextRun: '下次创建', lastRun: '最近创建', releaseKey: '提测版本',
+    releaseCyclesNote: '按提测版本查看手动和定时创建的独立 Task。关闭版本周期后只停止后续创建，不影响已运行任务。', refreshReleaseCycles: '刷新', releaseCycleTasksLabel: '版本 Task', closeReleaseCycle: '结束版本周期', releaseCycleActive: '进行中', releaseCycleClosed: '已结束', noReleaseCycles: '还没有提测版本周期。', releaseCycleTaskCount: '{count} 个 Task', taskCountLabel: 'Task 数量', nextRun: '下次创建', lastRun: '最近创建', releaseKey: '提测版本',
     fontSize: '文字大小', fontSizeSmall: '小号文字', fontSizeStandard: '标准文字', fontSizeLarge: '大号文字',
     export: '导出', import: '导入', syncRuntime: '同步 Runtime', newTask: '新建任务', executionMode: '执行模式',
     overviewHeadline: '任务即 Session，持续工作直到确认完成', overviewDescription: '每个任务拥有独立持久 Session；每轮结果可继续处理，确认完成后进入只读历史。',
@@ -274,6 +289,17 @@ const messages = {
     dataProtection: '数据保护', dataProtectionHeading: '数据完整性与恢复保护', loadingProtection: '正在检查数据保护状态...', noProtectionStatus: '尚未检查数据保护状态。', protectionChecked: '检查于 {time}', protectionRefreshFailed: '状态刷新失败：{error}', platformStorage: '平台数据', databaseBackup: '在线数据库备份', recoveryCheckpoint: '平台恢复检查点', terminalLogArchive: '终态日志托管', protectionHealthy: '正常', protectionDegraded: '异常', protectionPending: '待建立', protectionInProgress: '进行中', protectionRotationPending: '待轮转', sqliteCheck: 'SQLite 检查', stateInvariants: '状态约束', storageHeadroom: '最低可用空间', lastSuccess: '最近成功', nextRun: '下次计划', packageRetention: '有效包 / 保留数', auditContinuity: '审计连续性', auditHealthy: '已持久化', auditPending: '{count} 条待写入', invariantIssues: '{count} 项异常', storageAvailable: '{percent}% · {bytes}', rotationPendingDetail: '超出 {count} 份，下次成功发布后轮转', schedulerError: '调度错误', unreadablePackages: '不可读取包', archiveCoverage: '托管覆盖', archiveCoverageDetail: '{archived} / {total} 条终态日志', archiveLastVerified: '最近完整校验', archiveFailures: '托管异常', archiveFailureDetail: '{count} 条需修复',
   },
   en: {
+    sessionCloneWorkspace: 'Independent Session directory', sharedWorkspace: 'Shared working directory',
+    newReleaseCycle: 'New release cycle', releaseCycleCreated: 'Release cycle created.', cycleCreateRefreshFailed: 'The release cycle was created, but the list could not be refreshed. Refresh the page.', cycleName: 'Cycle name', cycleTaskName: 'Task name', cycleTaskNameDefault: 'Release regression', cycleTaskObjective: 'Instructions for every Task', cycleFormNote: 'A cycle groups independent Tasks. Each Task fetches code, deploys and tests according to its instructions. Scheduled creation is optional.', enableCycleSchedule: 'Enable scheduled Task creation', cycleCron: 'Cron expression', cycleTimezone: 'Timezone', cycleOverlap: 'When the previous Task is still active', cycleOverlapQueue: 'Queue', cycleOverlapSkip: 'Skip this occurrence', cycleOverlapParallel: 'Create in parallel', cycleAdvanced: 'Advanced settings', cycleId: 'Cycle ID', cycleWorkflow: 'Workflow identifier', cycleSavedOnly: 'Create cycle',
+    viewFullAnalysis: 'View full analysis', analysisReportHint: 'Classification, expected and actual behavior, evidence and next action',
+    collapseReleaseCycle: 'Collapse', deleteReleaseCycle: 'Delete cycle, Tasks & artifacts', releaseCycleDeleted: 'Release cycle, associated Tasks and artifacts deleted.', cycleDeletedRefreshFailed: 'The release cycle was deleted, but the list could not be refreshed. Refresh the page later.',
+    confirmDeleteReleaseCycle: 'Delete release cycle “{name}” and all associated Tasks, reports, logs and media? Running associated Tasks will be stopped automatically.',
+    confirmCloseReleaseCycle: 'Close release cycle “{name}”? Only future Task creation stops. Existing Tasks continue and their reports and artifacts remain.',
+    cycleDeletionStarted: 'Deleting release cycle, associated Tasks and artifacts.', cycleDeleting: 'Deleting',
+    cycleDeletionCompleted: 'Release cycle “{name}”, associated Tasks and artifacts deleted.',
+    cycleDeletionProgress: '{deleted}/{total} Tasks deleted. Cleaning remaining artifacts and runtime.',
+    cycleDeletionRetry: 'Cleanup is retrying. Progress updates automatically.', cycleDeletionRefreshFailed: 'Deletion accepted, but progress could not be refreshed. Check again later.',
+    cycleDeletionLegacy: 'The running service still retains Tasks on cycle deletion. Tasks and artifacts have not been deleted; apply the updated service before continuing cleanup.',
     cumulativeResults: 'Cumulative', includingReruns: 'Includes reruns', finalCaseResults: 'Final results', rerunsReplaceEarlier: 'Latest result per case', resultTotal: 'Total', fullResultDetail: 'Full conclusion', caseCountNotes: 'Totals include Skip and XFail; {count} executions excluding Skip.', resultCountsIncomplete: 'Some reports are not available for counting; these are the results read so far.',
     expandInstruction: 'Write a message', collapseInstruction: 'Collapse input', copyReportName: 'Copy filename', reportNameCopied: 'Filename copied', copyReportNameFailed: 'Copy failed. Expand the filename to copy it manually.',
     deleteTaskArtifacts: 'Delete task & artifacts', taskArtifactsDeleted: 'Task and managed artifacts deleted. Runtime reclamation runs in the background.', reclaimRuntimeOnly: 'Reclaim Runtime only', taskStorageLabel: 'TASK STORAGE',
@@ -288,7 +314,7 @@ const messages = {
     taskListDescription: 'Task name & objective', taskListCount: '{count} tasks', taskObjective: 'Objective',
     expandObjective: 'Expand', collapseObjective: 'Collapse', showTaskContext: 'Task info', hideTaskContext: 'Hide info',
     brandSubtitle: 'Persistent Task Desk', navOverview: 'Overview', navTasks: 'Task Sessions', navReleaseCycles: 'Release Cycles', navSkills: 'Skills', navAudit: 'Operation Audit',
-    releaseCyclesNote: 'View independent manual and scheduled Tasks by release version. Closing a cycle stops future creation without affecting running Tasks.', refreshReleaseCycles: 'Refresh', releaseCycleTasksLabel: 'RELEASE TASKS', runReleaseCycle: 'Create Task Now', closeReleaseCycle: 'Close Release Cycle', releaseCycleActive: 'Active', releaseCycleClosed: 'Closed', noReleaseCycles: 'No release cycles yet.', releaseCycleTaskCount: '{count} Tasks', taskCountLabel: 'Task count', nextRun: 'Next run', lastRun: 'Last run', releaseKey: 'Release version',
+    releaseCyclesNote: 'View independent manual and scheduled Tasks by release version. Closing a cycle stops future creation without affecting running Tasks.', refreshReleaseCycles: 'Refresh', releaseCycleTasksLabel: 'RELEASE TASKS', closeReleaseCycle: 'Close Release Cycle', releaseCycleActive: 'Active', releaseCycleClosed: 'Closed', noReleaseCycles: 'No release cycles yet.', releaseCycleTaskCount: '{count} Tasks', taskCountLabel: 'Task count', nextRun: 'Next run', lastRun: 'Last run', releaseKey: 'Release version',
     fontSize: 'Text size', fontSizeSmall: 'Small text', fontSizeStandard: 'Standard text', fontSizeLarge: 'Large text',
     export: 'Export', import: 'Import', syncRuntime: 'Sync Runtime', newTask: 'New Task', executionMode: 'Execution Mode',
     overviewHeadline: 'A task is a session that persists until completion', overviewDescription: 'Each task owns one persistent session. Review or continue every turn, then explicitly archive the completed task.',
@@ -554,10 +580,13 @@ async function hashRunInput(input) {
   }
 }
 
-function createRunIdempotencyKey() {
+function createClientIdempotencyKey(prefix) {
   const uuid = globalThis.crypto?.randomUUID?.();
-  if (uuid) return `web-run-${uuid}`;
-  return `web-run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}${uuid || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
+}
+
+function createRunIdempotencyKey() {
+  return createClientIdempotencyKey('web-run-');
 }
 
 async function getRunIntent(task, input) {
@@ -689,12 +718,10 @@ function taskOperationIntent(task, operation) {
   const intentId = taskOperationIntentId(taskId, operation);
   const current = taskOperationIntents.get(intentId);
   if (current?.taskCreatedAt === taskCreatedAt) return current;
-  const uuid = globalThis.crypto?.randomUUID?.();
-  const suffix = uuid || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   const intent = {
     taskId,
     operation,
-    idempotencyKey: `web-${operation}-${suffix}`,
+    idempotencyKey: createClientIdempotencyKey(`web-${operation}-`),
     taskCreatedAt,
   };
   if (!taskOperationIntents.has(intentId)
@@ -900,6 +927,11 @@ function isReviewTask(task) {
   return REVIEW_STATUSES.includes(task?.status);
 }
 
+function needsTaskRecovery(task) {
+  return ['failed', 'interrupted', 'stopped'].includes(task.status)
+    || task.recoveryState === 'recoverable';
+}
+
 function taskClassification(task, { showProject = true } = {}) {
   const project = String(task?.project || 'cloudRecord').trim() || 'cloudRecord';
   const tags = Array.isArray(task?.tags) ? task.tags : [];
@@ -932,8 +964,10 @@ function renderTaskClassificationFilters() {
 function taskCard(task, layout = 'list') {
   const running = isActiveTask(task);
   const review = isReviewTask(task);
-  const attention = ['failed', 'interrupted', 'stopped'].includes(task.status) || task.recoveryState === 'recoverable';
-  const actionLabel = review ? tr('reviewTask') : (attention ? tr('recover') : tr('start'));
+  const recover = !running && !review && task.status !== 'completed' && needsTaskRecovery(task);
+  const recovering = pendingTaskRecoveries.has(task.id);
+  const actionLabel = recovering ? tr('recovering')
+    : (review ? tr('reviewTask') : (recover ? tr('recover') : tr('start')));
   const grid = layout === 'grid';
   const badge = `<span class="status-badge ${escapeHtml(statusClass(task))}">${escapeHtml(statusLabel(task))}</span>`;
   return `
@@ -966,7 +1000,7 @@ function taskCard(task, layout = 'list') {
         <button class="button secondary small" data-action="open-task-terminal" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('terminal'))}</button>
         ${running
           ? `<button class="button danger small" data-action="stop-task" data-id="${escapeHtml(task.id)}">${escapeHtml(tr('stop'))}</button>`
-          : `<button class="button primary small" data-action="open-task" data-id="${escapeHtml(task.id)}">${escapeHtml(actionLabel)}</button>`}
+          : `<button class="button primary small" data-action="${recover ? 'recover-task' : 'open-task'}" data-id="${escapeHtml(task.id)}"${recover && (recovering || task.enabled === false) ? ' disabled' : ''}>${escapeHtml(actionLabel)}</button>`}
       </div>
     </article>`;
 }
@@ -1138,6 +1172,38 @@ function reportArtifactViewerUrl(artifactUrl, displayName) {
   return `/report-viewer.html?${parameters}`;
 }
 
+function reportFilenameCopyButton(displayName) {
+  return `<button type="button" class="report-artifact-copy" data-action="copy-report-name" data-copy-text="${escapeHtml(displayName)}" title="${escapeHtml(tr('copyReportName'))}" aria-label="${escapeHtml(tr('copyReportName'))}"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button>`;
+}
+
+function failureAnalysisReportLinks(reports) {
+  const entries = new Map();
+  for (const report of latestReportRevisions(reports)) {
+    const add = (artifact, registered) => {
+      if (!['failure-analysis-html', 'failure-analysis-markdown'].includes(artifact.kind)) return;
+      const scoped = { ...artifact, reportKey: report.reportKey || report.id || '' };
+      const key = reportArtifactIdentity(scoped);
+      if (!entries.has(key)) entries.set(key, { artifact: scoped, report, registered });
+    };
+    for (const artifact of report.artifacts || []) add(artifact, false);
+    for (const artifact of report.registeredArtifacts || []) add(artifact, true);
+  }
+  if (!entries.size) return '';
+  return `<section class="failure-analysis-reports" aria-label="${escapeHtml(tr('failureAnalysisReport'))}">
+    <div class="failure-analysis-reports-heading"><strong>${escapeHtml(tr('failureAnalysisReport'))}</strong><span>${escapeHtml(tr('analysisReportHint'))}</span></div>
+    <div class="failure-analysis-report-list">${[...entries.values()].map(({ artifact, report, registered }) => {
+      const name = reportArtifactDisplayName(artifact, report.artifactDeclarations || [], 'failureAnalysisReport');
+      const available = artifact.url && artifact.available !== false;
+      const detail = artifact.available === false ? tr('artifactUnavailable')
+        : registered ? tr('artifactRegisteredPending') : formatBytes(artifact.bytes || 0);
+      return `<div class="failure-analysis-report">
+        <div class="failure-analysis-report-meta"><strong>${escapeHtml(report.title || name)}</strong><span><code>${escapeHtml(name)}</code><small>${escapeHtml(detail)}</small></span></div>
+        <div class="failure-analysis-report-actions">${reportFilenameCopyButton(name)}${available ? `<a class="button primary small analysis-report-open" href="${escapeHtml(reportArtifactViewerUrl(artifact.url, name))}" target="_blank" rel="noopener">${escapeHtml(tr('viewFullAnalysis'))}<span aria-hidden="true">↗</span></a>` : ''}</div>
+      </div>`;
+    }).join('')}</div>
+  </section>`;
+}
+
 function reportArtifactLinks(
   artifacts,
   registeredArtifacts = [],
@@ -1146,6 +1212,7 @@ function reportArtifactLinks(
 ) {
   const groups = [
     { kind: 'pytest-html', label: 'pytestHtmlReport', action: 'openHtmlReport' },
+    { kind: 'failure-analysis-html', label: 'failureAnalysisReport', action: 'viewFullAnalysis' },
     { kind: 'failure-analysis-markdown', label: 'failureAnalysisReport', action: 'openMarkdownReport' },
   ];
   const managed = artifacts || [];
@@ -1171,13 +1238,13 @@ function reportArtifactLinks(
       const open = artifact.url && !unavailable
         ? `<a class="report-artifact-open" href="${escapeHtml(reportArtifactViewerUrl(artifact.url, displayName))}" target="_blank" rel="noopener"><b>${escapeHtml(tr(group.action))}</b><span aria-hidden="true">↗</span></a>` : '';
       return `<div class="report-artifact-row${stateClass}" role="listitem">
-        <span class="report-artifact-kind" aria-hidden="true">${group.kind === 'pytest-html' ? 'HTML' : 'MD'}</span>
+        <span class="report-artifact-kind" aria-hidden="true">${group.kind === 'failure-analysis-markdown' ? 'MD' : 'HTML'}</span>
         <details class="report-artifact-name" data-detail-key="artifact-name:${escapeHtml(detailKey)}">
           <summary title="${escapeHtml(displayName)}"><strong>${escapeHtml(displayName)}</strong></summary>
           <code>${escapeHtml(displayName)}</code>
         </details>
         <small class="report-artifact-size">${registered ? escapeHtml(tr(label)) : escapeHtml(formatBytes(artifact.bytes || 0))}</small>
-        <button type="button" class="report-artifact-copy" data-action="copy-report-name" data-copy-text="${escapeHtml(displayName)}" title="${escapeHtml(tr('copyReportName'))}" aria-label="${escapeHtml(tr('copyReportName'))}"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button>
+        ${reportFilenameCopyButton(displayName)}
         ${open}
       </div>`;
     }).join('')}</div></div>`;
@@ -1218,7 +1285,7 @@ function reportsWithRegisteredArtifacts(reports, externalAttempts) {
     const externalAttemptId = String(report.executionEvidence?.externalAttemptId || '');
     const attempt = attemptsById.get(externalAttemptId);
     for (const artifact of attempt?.artifactDeclarations || []) {
-      if (!['pytest-html', 'failure-analysis-markdown'].includes(artifact?.kind)) continue;
+      if (!['pytest-html', 'failure-analysis-html', 'failure-analysis-markdown'].includes(artifact?.kind)) continue;
       const key = String(artifact.key || '');
       const fileName = artifactFileName(artifact.path);
       if (!key || !fileName) continue;
@@ -2227,6 +2294,7 @@ function generalTaskSummaryTimeline(task, reports, externalAttempts, scheduledJo
     <header class="business-summary-head">
       <div><span class="section-label">${escapeHtml(tr('currentStatus'))}</span><h3>${escapeHtml(statusLabel(task))}</h3></div>
       <span class="status-badge ${escapeHtml(statusClass(task))}">${escapeHtml(statusLabel(task))}</span>
+      ${failureAnalysisReportLinks(reports)}
       <p>${escapeHtml(taskSummaryDetail(task))}</p>
     </header>
     ${businessExecutionList(reports, externalAttempts)}
@@ -2379,6 +2447,7 @@ function businessSummaryTimeline(task, reports, externalAttempts, scheduledJobs,
     <header class="business-summary-head">
       <div><span class="section-label">${escapeHtml(tr('currentStage'))}</span><h3>${escapeHtml(stage.title)}</h3></div>
       <span class="report-status tone-${escapeHtml(stageStatus.tone)}">${escapeHtml(stageStatus.label)}</span>
+      ${failureAnalysisReportLinks(reports)}
       ${resultStatistics || `<p>${escapeHtml(stage.detail)}</p>`}
       ${resultStatistics ? `<details class="business-final-detail" data-detail-key="final-conclusion"><summary>${escapeHtml(tr('fullResultDetail'))}</summary><p>${escapeHtml(stage.detail)}</p></details>` : ''}
     </header>
@@ -2413,14 +2482,16 @@ function skillReportList(reports, steps = []) {
     const metrics = (report.metrics || []).length
       ? `<div class="report-metrics">${report.metrics.map((metric) => `<div class="report-metric tone-${escapeHtml(metric.tone || 'neutral')}"><span>${escapeHtml(metric.label)}</span><strong>${escapeHtml(reportDisplayValue(metric.value))}</strong></div>`).join('')}</div>`
       : '';
+    const analysisLinks = failureAnalysisReportLinks([report, ...relatedReports]);
     return `<article class="business-report report-card-${escapeHtml(card.id)} report-status-${escapeHtml(report.status)}" data-report-key="${escapeHtml(report.reportKey || report.id || '')}">
       <header class="business-report-head">
         <div><div class="report-card-kicker"><span class="report-card-type">${escapeHtml(card.labels[state.lang])}</span>${report.skillId ? `<span class="report-skill">${escapeHtml(report.skillId)} <code>v${Number(report.skillVersion || 0)}</code></span>` : ''}</div><h3>${escapeHtml(report.title)}</h3></div>
         <span class="report-status tone-${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>
       </header>
+      ${analysisLinks}
       <p class="business-report-summary">${escapeHtml(report.summary)}</p>
       ${metrics}
-      ${reportGroupArtifactLinks(report, relatedReports)}
+      ${reportGroupArtifactLinks(report, relatedReports, analysisLinks ? ['pytest-html'] : null)}
       ${reportExecutionDetails(report)}
       <div class="report-sections">${(report.sections || []).map(skillReportSection).join('')}</div>
       ${relatedReportDetails(relatedReports, report.reportKey || report.id)}
@@ -2431,9 +2502,9 @@ function skillReportList(reports, steps = []) {
   </section>`;
 }
 
-function reportGroupArtifactLinks(report, relatedReports) {
+function reportGroupArtifactLinks(report, relatedReports, kinds = null) {
   const members = [report, ...relatedReports];
-  const tagged = field => members.flatMap(member => (member[field] || []).map(artifact => ({
+  const tagged = field => members.flatMap(member => (member[field] || []).filter(artifact => !kinds || kinds.includes(artifact.kind)).map(artifact => ({
     ...artifact, reportKey: member.reportKey, executionStatus: artifact.executionStatus || member.status,
   })));
   const managed = tagged('artifacts');
@@ -4470,19 +4541,93 @@ async function loadSkills() {
 
 function releaseCycleCard(cycle) {
   const active = cycle.status === 'active';
+  const expanded = state.selectedReleaseCycleId === cycle.id;
+  const deleting = Boolean(cycle.deletion);
   const schedule = (cycle.schedules || []).find((item) => item.enabled) || cycle.schedules?.[0];
   return `<article class="release-cycle-card ${active ? 'active' : 'closed'}">
-    <div class="task-card-overline"><span class="task-project-badge">${escapeHtml(cycle.project || 'cloudRecord')}</span><span class="status-badge ${active ? 'running' : 'completed'}">${escapeHtml(tr(active ? 'releaseCycleActive' : 'releaseCycleClosed'))}</span></div>
+    <div class="task-card-overline"><span class="task-project-badge">${escapeHtml(cycle.project || 'cloudRecord')}</span><span class="status-badge ${deleting ? 'stopping' : active ? 'running' : 'completed'}">${escapeHtml(tr(deleting ? 'cycleDeleting' : active ? 'releaseCycleActive' : 'releaseCycleClosed'))}</span></div>
     <h3>${escapeHtml(cycle.name)}</h3>
     <p><code>${escapeHtml(cycle.releaseKey)}</code></p>
     <dl class="release-cycle-meta">
       <div><dt>${escapeHtml(tr('taskCountLabel'))}</dt><dd>${trf('releaseCycleTaskCount', { count: Number(cycle.taskCount || 0) })}</dd></div>
       <div><dt>${escapeHtml(tr('nextRun'))}</dt><dd>${escapeHtml(schedule?.enabled ? formatTime(schedule.nextRunAt) : '-')}</dd></div>
       <div><dt>${escapeHtml(tr('lastRun'))}</dt><dd>${escapeHtml(cycle.lastTaskAt ? formatTime(cycle.lastTaskAt) : '-')}</dd></div>
-      <div><dt>${escapeHtml(tr('status'))}</dt><dd>${escapeHtml(cycle.workflow || '-')}</dd></div>
+      <div><dt>${escapeHtml(tr('cycleWorkflow'))}</dt><dd>${escapeHtml(cycle.workflow || '-')}</dd></div>
     </dl>
-    <div class="release-cycle-actions"><button class="button secondary small" data-action="open-release-cycle" data-id="${escapeHtml(cycle.id)}">${escapeHtml(tr('open'))}</button>${active ? `<button class="button danger small" data-action="close-release-cycle" data-id="${escapeHtml(cycle.id)}">${escapeHtml(tr('closeReleaseCycle'))}</button>` : ''}</div>
+    ${deleting ? `<p role="status">${escapeHtml(trf('cycleDeletionProgress', { deleted: cycle.deletion.deletedTasks, total: cycle.deletion.totalTasks }))}${cycle.deletion.lastError ? ` ${escapeHtml(tr('cycleDeletionRetry'))}` : ''}</p>` : ''}
+    <div class="release-cycle-actions"><button class="button secondary small" data-action="open-release-cycle" data-id="${escapeHtml(cycle.id)}" aria-expanded="${expanded}" aria-controls="releaseCycleTaskSection">${escapeHtml(tr(expanded ? 'collapseReleaseCycle' : 'open'))}</button>${active ? `<button class="button secondary small" data-action="close-release-cycle" data-id="${escapeHtml(cycle.id)}">${escapeHtml(tr('closeReleaseCycle'))}</button>` : ''}<button class="button danger small" data-action="delete-release-cycle" data-id="${escapeHtml(cycle.id)}"${deleting || releaseCycleDeleteIntents.get(cycle.id)?.running ? ' disabled' : ''}>${escapeHtml(tr(deleting ? 'cycleDeleting' : 'deleteReleaseCycle'))}</button></div>
   </article>`;
+}
+
+function openReleaseCycleEditor() {
+  const form = $('#releaseCycleForm');
+  delete form.dataset.createKey;
+  delete form.dataset.createPayload;
+  const id = createClientIdempotencyKey('cycle-');
+  form.innerHTML = `
+    <p class="cycle-form-note full">${escapeHtml(tr('cycleFormNote'))}</p>
+    <label class="field"><span>${escapeHtml(tr('cycleName'))}</span><input name="name" required maxlength="160" placeholder="Cloud Recording v2.8.1"></label>
+    <label class="field"><span>${escapeHtml(tr('releaseKey'))}</span><input name="releaseKey" required maxlength="200" placeholder="cloud-recording-v2.8.1"></label>
+    <label class="field"><span>${escapeHtml(tr('taskProject'))}</span><input name="project" maxlength="100" value="cloudRecord"></label>
+    <label class="field"><span>${escapeHtml(tr('cycleTaskName'))}</span><input name="taskName" required maxlength="160" value="${escapeHtml(tr('cycleTaskNameDefault'))}"></label>
+    <label class="field full"><span>${escapeHtml(tr('cycleTaskObjective'))}</span><textarea name="objective" required maxlength="524288"></textarea></label>
+    <label class="field"><span>${escapeHtml(tr('workspace'))}</span><input name="workingDir" value="." maxlength="4096"></label>
+    <label class="field"><span>${escapeHtml(tr('workspaceMode'))}</span><select name="workspaceMode"><option value="session-clone">${escapeHtml(tr('sessionCloneWorkspace'))}</option><option value="shared">${escapeHtml(tr('sharedWorkspace'))}</option></select></label>
+    <label class="check-field full"><input type="checkbox" name="scheduleEnabled" id="releaseCycleScheduleEnabled"><span>${escapeHtml(tr('enableCycleSchedule'))}</span></label>
+    <fieldset class="cycle-schedule-fields full hidden" id="releaseCycleScheduleFields" disabled>
+      <label class="field"><span>${escapeHtml(tr('cycleCron'))}</span><input name="cron" value="0 23 * * *" required></label>
+      <label class="field"><span>${escapeHtml(tr('cycleTimezone'))}</span><input name="timezone" value="Asia/Shanghai" required></label>
+      <label class="field full"><span>${escapeHtml(tr('cycleOverlap'))}</span><select name="overlapPolicy"><option value="queue">${escapeHtml(tr('cycleOverlapQueue'))}</option><option value="skip">${escapeHtml(tr('cycleOverlapSkip'))}</option><option value="parallel">${escapeHtml(tr('cycleOverlapParallel'))}</option></select></label>
+    </fieldset>
+    <details class="cycle-form-advanced full"><summary>${escapeHtml(tr('cycleAdvanced'))}</summary><div class="form-grid">
+      <label class="field"><span>${escapeHtml(tr('cycleId'))}</span><input name="id" required maxlength="64" pattern="[a-z0-9][a-z0-9_-]{0,63}" value="${escapeHtml(id)}"></label>
+      <label class="field"><span>${escapeHtml(tr('cycleWorkflow'))}</span><input name="workflow" value="full-release-regression"></label>
+    </div></details>
+    <div class="form-actions full"><button class="button secondary" type="button" data-close="releaseCycleEditorModal">${escapeHtml(tr('cancel'))}</button><button class="button primary" type="submit">${escapeHtml(tr('cycleSavedOnly'))}</button></div>`;
+  $('#releaseCycleScheduleEnabled').addEventListener('change', event => {
+    $('#releaseCycleScheduleFields').disabled = !event.target.checked;
+    $('#releaseCycleScheduleFields').classList.toggle('hidden', !event.target.checked);
+  });
+  openModal('releaseCycleEditorModal');
+}
+
+function releaseCycleFormPayload(form) {
+  const mode = form.get('workspaceMode') || 'session-clone';
+  const payload = { id: String(form.get('id') || '').trim(), name: String(form.get('name') || '').trim(),
+    releaseKey: String(form.get('releaseKey') || '').trim(), project: String(form.get('project') || 'cloudRecord').trim(),
+    workflow: String(form.get('workflow') || 'full-release-regression').trim(),
+    taskTemplate: { name: String(form.get('taskName') || '').trim(), objective: String(form.get('objective') || '').trim(),
+      workingDir: String(form.get('workingDir') || '.').trim() || '.', workspaceMode: mode,
+      sourceMode: mode === 'session-clone' ? 'session-clone' : 'shared-repo', autoResume: true, maxRetries: 2 } };
+  if (form.get('scheduleEnabled') === 'on') payload.schedule = { cron: String(form.get('cron') || '').trim(),
+    timezone: String(form.get('timezone') || 'Asia/Shanghai').trim(), overlapPolicy: form.get('overlapPolicy') || 'queue' };
+  return payload;
+}
+
+async function saveReleaseCycle(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  if (button.disabled) return;
+  const payload = releaseCycleFormPayload(new FormData(form));
+  const serialized = JSON.stringify(payload);
+  if (form.dataset.createPayload !== serialized) {
+    form.dataset.createKey = createClientIdempotencyKey('release-cycle-create:');
+    form.dataset.createPayload = serialized;
+  }
+  const key = form.dataset.createKey;
+  button.disabled = true;
+  let committed = false;
+  try {
+    const created = await api('/api/release-cycles', { method: 'POST', headers: { 'Idempotency-Key': key }, body: payload });
+    committed = true;
+    if (form.dataset.createKey === key) closeModal('releaseCycleEditorModal');
+    toast(tr('releaseCycleCreated'));
+    await loadReleaseCycles();
+    if (state.releaseCycles.some(cycle => cycle.id === created.id)) await openReleaseCycle(created.id);
+  } catch (error) {
+    toast(committed ? tr('cycleCreateRefreshFailed') : error.message, committed ? 'info' : 'error');
+  } finally { button.disabled = false; }
 }
 
 function renderReleaseCycles() {
@@ -4495,52 +4640,146 @@ function renderReleaseCycles() {
   const section = $('#releaseCycleTaskSection');
   if (!section || !cycle) {
     section?.classList.add('hidden');
+    if (section) renderHtml('release-cycle-tasks', '#releaseCycleTaskGrid', '');
     return;
   }
   section.classList.remove('hidden');
   $('#releaseCycleTaskTitle').textContent = `${cycle.name} · ${cycle.releaseKey}`;
   $('#closeReleaseCycleBtn').classList.toggle('hidden', cycle.status !== 'active');
+  $('#deleteReleaseCycleBtn').dataset.id = cycle.id;
+  $('#deleteReleaseCycleBtn').disabled = Boolean(cycle.deletion || releaseCycleDeleteIntents.get(cycle.id)?.running);
+  $('#deleteReleaseCycleBtn').textContent = tr(cycle.deletion ? 'cycleDeleting' : 'deleteReleaseCycle');
   renderHtml('release-cycle-tasks', '#releaseCycleTaskGrid', state.releaseCycleTasks.length
     ? state.releaseCycleTasks.map((task) => taskCard(task)).join('')
     : `<div class="empty-state span-all">${escapeHtml(tr('noCurrentTasks'))}</div>`);
 }
 
 async function loadReleaseCycles() {
-  state.releaseCycles = await api('/api/release-cycles');
+  const previousDeletions = state.releaseCycles.filter(cycle => cycle.deletion);
+  const version = ++releaseCyclesRequestVersion;
+  const cycles = await api('/api/release-cycles');
+  if (version !== releaseCyclesRequestVersion) return;
+  state.releaseCycles = cycles;
   if (state.selectedReleaseCycleId && !state.releaseCycles.some((cycle) => cycle.id === state.selectedReleaseCycleId)) {
     state.selectedReleaseCycleId = '';
     state.releaseCycleTasks = [];
   }
   renderReleaseCycles();
+  for (const old of previousDeletions) {
+    if (!cycles.some(cycle => cycle.id === old.id && cycle.createdAt === old.createdAt)) {
+      toast(trf('cycleDeletionCompleted', { name: old.name }));
+    }
+  }
+  scheduleReleaseCycleDeletionPoll();
+}
+
+let releaseCycleDeletionPollTimer = null;
+async function refreshDashboardAfterCycleDeletion() {
+  // Fetch after any older poll so its response cannot revive deleted Task cards.
+  try { if (state.dashboardPromise) await state.dashboardPromise; } catch {}
+  await loadDashboard({ force: true });
+}
+function scheduleReleaseCycleDeletionPoll() {
+  clearTimeout(releaseCycleDeletionPollTimer);
+  releaseCycleDeletionPollTimer = null;
+  if (document.hidden || state.view !== 'release-cycles' || !state.releaseCycles.some(cycle => cycle.deletion)) return;
+  releaseCycleDeletionPollTimer = setTimeout(async () => {
+    releaseCycleDeletionPollTimer = null;
+    try {
+      await loadReleaseCycles();
+      await refreshDashboardAfterCycleDeletion();
+      if (state.selectedReleaseCycleId) await openReleaseCycle(state.selectedReleaseCycleId);
+    } catch (error) { if (error.name !== 'AbortError') console.warn('Release cycle deletion refresh failed'); }
+    finally { scheduleReleaseCycleDeletionPoll(); }
+  }, 2000);
 }
 
 async function openReleaseCycle(id) {
+  const cycle = state.releaseCycles.find(item => item.id === id);
+  if (!cycle) return;
+  const version = ++releaseCycleTasksRequestVersion;
+  if (state.selectedReleaseCycleId !== id) state.releaseCycleTasks = [];
   state.selectedReleaseCycleId = id;
-  state.releaseCycleTasks = await api(`/api/release-cycles/${encodeURIComponent(id)}/tasks?limit=500&offset=0`);
+  renderReleaseCycles();
+  try {
+    const tasks = await api(`/api/release-cycles/${encodeURIComponent(id)}/tasks?limit=500&offset=0`);
+    if (version !== releaseCycleTasksRequestVersion || state.selectedReleaseCycleId !== id
+      || !state.releaseCycles.some(item => item.id === id && item.createdAt === cycle.createdAt)) return;
+    state.releaseCycleTasks = tasks;
+    renderReleaseCycles();
+  } catch (error) {
+    if (version === releaseCycleTasksRequestVersion && state.selectedReleaseCycleId === id) throw error;
+  }
+}
+
+function collapseReleaseCycle() {
+  releaseCycleTasksRequestVersion++;
+  state.selectedReleaseCycleId = '';
+  state.releaseCycleTasks = [];
   renderReleaseCycles();
 }
 
-async function runReleaseCycle(id) {
-  try {
-    const key = `release-cycle:${id}:manual:${Date.now()}`;
-    const task = await api(`/api/release-cycles/${encodeURIComponent(id)}/tasks`, {
-      method: 'POST', headers: { 'Idempotency-Key': key }, body: { idempotencyKey: key },
-    });
-    upsertDashboardTask(task);
-    toast(tr('taskStarted'));
-    await Promise.all([loadDashboard({ force: true }), openReleaseCycle(id), loadReleaseCycles()]);
-  } catch (error) { toast(error.message, 'error'); }
+async function toggleReleaseCycle(id) {
+  if (state.selectedReleaseCycleId === id) { collapseReleaseCycle(); return; }
+  try { await openReleaseCycle(id); }
+  catch (error) { toast(error.message, 'error'); }
 }
 
 async function closeReleaseCycle(id) {
   const cycle = state.releaseCycles.find((item) => item.id === id);
   if (!cycle || cycle.status !== 'active') return;
-  if (!window.confirm(`${tr('closeReleaseCycle')}「${cycle.name}」?`)) return;
+  if (!window.confirm(trf('confirmCloseReleaseCycle', { name: cycle.name }))) return;
   try {
     await api(`/api/release-cycles/${encodeURIComponent(id)}/close`, { method: 'POST' });
     toast(tr('closeReleaseCycle'));
     await loadReleaseCycles();
   } catch (error) { toast(error.message, 'error'); }
+}
+
+async function deleteReleaseCycle(id) {
+  const cycle = state.releaseCycles.find(item => item.id === id);
+  if (!cycle || releaseCycleDeleteIntents.get(id)?.running) return;
+  if (!window.confirm(trf('confirmDeleteReleaseCycle', { name: cycle.name }))) return;
+  let intent = releaseCycleDeleteIntents.get(id);
+  if (!intent || intent.createdAt !== cycle.createdAt) {
+    intent = { createdAt: cycle.createdAt, key: createClientIdempotencyKey('release-cycle-delete:') };
+    releaseCycleDeleteIntents.set(id, intent);
+  }
+  intent.running = true;
+  renderReleaseCycles();
+  let committed = false;
+  let completed = false;
+  try {
+    const result = await api(`/api/release-cycles/${encodeURIComponent(id)}`, { method: 'DELETE',
+      headers: { 'Idempotency-Key': intent.key, 'X-Release-Cycle-Created-At': intent.createdAt } });
+    if (result.historyRetained || result.retainedTasks > 0) throw Object.assign(new Error(tr('cycleDeletionLegacy')), { status: 409 });
+    committed = true;
+    completed = result.deleted;
+    if (releaseCycleDeleteIntents.get(id) === intent) releaseCycleDeleteIntents.delete(id);
+    state.releaseCycles = state.releaseCycles.flatMap(item => {
+      if (item.id !== id || item.createdAt !== intent.createdAt) return [item];
+      return completed ? [] : [{ ...item, status: 'deleting', deletion: result }];
+    });
+    if (completed && state.selectedReleaseCycleId === id && !state.releaseCycles.some(item => item.id === id)) {
+      state.selectedReleaseCycleId = '';
+      state.releaseCycleTasks = [];
+    }
+    renderReleaseCycles();
+    toast(tr(completed ? 'releaseCycleDeleted' : 'cycleDeletionStarted'));
+    await loadReleaseCycles();
+    await refreshDashboardAfterCycleDeletion();
+  } catch (error) {
+    if (committed) { toast(tr(completed ? 'cycleDeletedRefreshFailed' : 'cycleDeletionRefreshFailed')); return; }
+    if (!hasUnknownRequestOutcome(error) && releaseCycleDeleteIntents.get(id) === intent) releaseCycleDeleteIntents.delete(id);
+    toast(error.message, 'error');
+    if (error.status === 409) {
+      try { await loadReleaseCycles(); } catch (refreshError) { toast(refreshError.message, 'error'); }
+    }
+  } finally {
+    intent.running = false;
+    renderReleaseCycles();
+    scheduleReleaseCycleDeletionPoll();
+  }
 }
 
 async function loadAudit() {
@@ -4573,9 +4812,14 @@ function loadRuntimeView() {
 
 function setView(view) {
   state.view = view;
+  $('#topNewTaskBtn').classList.toggle('hidden', view === 'release-cycles');
   $$('.view').forEach((element) => element.classList.toggle('active', element.id === `view-${view}`));
   $$('.nav-item').forEach((element) => element.classList.toggle('active', element.dataset.view === view));
   updateViewHeading();
+  if (view !== 'release-cycles') {
+    clearTimeout(releaseCycleDeletionPollTimer);
+    releaseCycleDeletionPollTimer = null;
+  }
   if (view !== 'runtime') {
     clearTimeout(bridgeInventoryPollTimer);
     bridgeInventoryPollTimer = null;
@@ -4617,6 +4861,11 @@ function closeModal(id) {
     $('#taskForm').innerHTML = '';
     delete $('#taskForm').dataset.createRunKey;
     state.editingTaskId = '';
+  }
+  if (id === 'releaseCycleEditorModal') {
+    $('#releaseCycleForm').innerHTML = '';
+    delete $('#releaseCycleForm').dataset.createKey;
+    delete $('#releaseCycleForm').dataset.createPayload;
   }
   if (id === 'skillAttributionModal') {
     $('#skillAttributionForm').innerHTML = '';
@@ -5032,6 +5281,33 @@ async function runOrRecoverTask(event) {
   }
 }
 
+async function recoverTask(id) {
+  const task = findTask(id);
+  if (!task || task.enabled === false || isActiveTask(task) || isReviewTask(task)
+    || task.status === 'completed' || !needsTaskRecovery(task) || pendingTaskRecoveries.has(id)) return;
+  pendingTaskRecoveries.add(id);
+  renderOverview();
+  renderTasks();
+  renderReleaseCycles();
+  try {
+    const queuedTask = { ...task, ...await queueTaskRun(task) };
+    upsertDashboardTask(queuedTask);
+    state.releaseCycleTasks = state.releaseCycleTasks.map(item => item.id === id
+      ? { ...item, ...queuedTask } : item);
+    toast(tr('taskStarted'));
+  } catch (error) {
+    toast(error.message, 'error');
+    return;
+  } finally {
+    pendingTaskRecoveries.delete(id);
+    renderOverview();
+    renderTasks();
+    renderReleaseCycles();
+  }
+  try { await openTaskDetail(id); }
+  finally { scheduleDashboardPoll(0); }
+}
+
 async function stopTask(id) {
   const task = findTask(id);
   if (!task) return;
@@ -5416,6 +5692,7 @@ document.addEventListener('click', async (event) => {
   if (action.dataset.action === 'toggle-composer') setComposerExpanded($('#continueTaskForm').dataset.expanded !== 'true', true);
   if (action.dataset.action === 'copy-report-name') await copyReportFilename(action.dataset.copyText || '');
   if (action.dataset.action === 'new-task') openTaskEditor();
+  if (action.dataset.action === 'new-release-cycle') openReleaseCycleEditor();
   if (action.dataset.action === 'open-task') await openTaskDetail(id);
   if (action.dataset.action === 'open-task-terminal') {
     await openTaskDetail(id, 'task-terminal');
@@ -5423,9 +5700,10 @@ document.addEventListener('click', async (event) => {
   if (action.dataset.action === 'open-task-reports') {
     await openTaskDetail(id, 'business-reports');
   }
-  if (action.dataset.action === 'open-release-cycle') await openReleaseCycle(id);
-  if (action.dataset.action === 'run-release-cycle') await runReleaseCycle(id || state.selectedReleaseCycleId);
+  if (action.dataset.action === 'open-release-cycle') await toggleReleaseCycle(id);
+  if (action.dataset.action === 'collapse-release-cycle') collapseReleaseCycle();
   if (action.dataset.action === 'close-release-cycle') await closeReleaseCycle(id || state.selectedReleaseCycleId);
+  if (action.dataset.action === 'delete-release-cycle') await deleteReleaseCycle(id || state.selectedReleaseCycleId);
   if (action.dataset.action === 'refresh-release-cycles') await loadReleaseCycles();
   if (action.dataset.action === 'toggle-task-context') {
     state.taskContextExpanded = !state.taskContextExpanded;
@@ -5433,6 +5711,7 @@ document.addEventListener('click', async (event) => {
     if (task) renderTaskDetail(task);
   }
   if (action.dataset.action === 'edit-task') openTaskEditor(findTask(id));
+  if (action.dataset.action === 'recover-task') await recoverTask(id);
   if (action.dataset.action === 'stop-task') await stopTask(id);
   if (action.dataset.action === 'complete-task') await completeTask(id);
   if (action.dataset.action === 'restore-task') await restoreArchivedTask(id);
@@ -5508,6 +5787,7 @@ $$('.modal').forEach((modal) => modal.addEventListener('click', (event) => {
 }));
 
 $('#taskForm').addEventListener('submit', saveTask);
+$('#releaseCycleForm').addEventListener('submit', saveReleaseCycle);
 $('#taskProjectFilter').addEventListener('change', (event) => {
   state.taskProjectFilter = event.target.value;
   renderTasks();
@@ -5631,6 +5911,8 @@ async function refreshDashboard() {
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    clearTimeout(releaseCycleDeletionPollTimer);
+    releaseCycleDeletionPollTimer = null;
     clearTimeout(dashboardPollTimer);
     dashboardPollTimer = null;
     clearTimeout(bridgeInventoryPollTimer);
@@ -5646,6 +5928,7 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
   scheduleDashboardPoll(0);
+  if (state.view === 'release-cycles') loadReleaseCycles().catch(() => {});
   if (state.view === 'runtime') loadRuntimeView();
   if (state.detailTab === 'task-terminal' && !$('#taskDetailModal').classList.contains('hidden')) {
     renderCache.delete('taskConsole');
@@ -5654,6 +5937,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 window.addEventListener('pagehide', () => {
+  clearTimeout(releaseCycleDeletionPollTimer);
   clearTimeout(dashboardPollTimer);
   clearTimeout(bridgeInventoryPollTimer);
   clearTimeout(protectionPollTimer);

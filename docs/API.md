@@ -69,13 +69,22 @@ BASE_URL=http://127.0.0.1:8091
 GET  /api/release-cycles
 POST /api/release-cycles
 GET  /api/release-cycles/:id
+DELETE /api/release-cycles/:id
 POST /api/release-cycles/:id/schedules
 GET  /api/release-cycles/:id/tasks
 POST /api/release-cycles/:id/tasks
 POST /api/release-cycles/:id/close
+GET  /api/release-cycle-deletions/:deletionId
 ```
 
 创建周期时，`taskTemplate` 使用普通 Task 字段；`workspaceMode`、`sourceMode`、代码仓库和完整提测指令应由云录制工作流写入模板。Cron 到点时，Task 使用当天执行流程解析的最新代码、镜像和环境；代码、镜像和环境快照只记录在当天 Task 中，不冻结在周期对象上。
+
+`POST /api/release-cycles` 也接受可选 `schedule` 对象（`id` 可省略，由服务端生成；其余字段与
+独立创建计划接口相同）。周期、计划、审计及创建回执在同一事务内提交；Cron、时区或计划冲突
+导致失败时不会留下半个周期。省略 `schedule` 保持原来仅创建周期的行为，保存不会立即创建 Task。
+可用 `Idempotency-Key` 请求头或 body 的 `idempotencyKey` 重试相同创建请求；重试复用原周期及
+原计划，不再生成第二条 Cron。已提交结果可在维护期间重放，或在周期后来被删除后返回原创建结果，
+均不会重新创建已删除记录；同一键用于不同内容返回 `409`。
 
 ```json
 {
@@ -112,6 +121,31 @@ POST /api/release-cycles/:id/close
 `overlapPolicy=queue` 时，每天仍创建独立 Task，后续 Task 等同周期较早的活动 Task 退出后再启动；`waiting_scheduled` 仍视为活动状态。`skip` 在同周期已有活动 Task 时跳过该次触发；`parallel` 保持并行。不属于该周期的 Task 仍可正常并行。`misfirePolicy=once` 恢复后补一次，`skip` 跳过已错过完整周期的触发。
 
 调度按计划分别提交事务；单个计划失败记录 `lastError`、`failureCount`、`nextAttemptAt` 并独立退避重试，不回滚其他计划或重启 Worker。普通 Task 创建时提供的 `releaseCycleId` 与创建、排队同事务提交；版本不存在或已关闭时，不留下已创建或已排队的 Task。
+
+版本周期的“结束”和“删除”语义如下：
+
+| 操作 | 后续 Task 创建 | 已有 Task | 报告、日志与音视频 | 周期记录 |
+| --- | --- | --- | --- | --- |
+| `POST /api/release-cycles/:id/close` 结束 | 停止 Cron 和新的周期 Task 创建 | 保持原状态，可继续执行或续行 | 保留 | `closed`，可查询 |
+| `DELETE /api/release-cycles/:id` 删除 | 立即停止 | 自动停止运行中的 Turn、CLI 和已登记后台执行，再删除全部关联 Task | 清理 Task 托管产物、缓存、Skill 快照、独立 Session 源码目录和本次运行专属产物 | 清理完成后移除 |
+
+删除有 Task 的周期返回 `202`，例如 `{ok:true,id,deletionId,status:"deleting",deleted:false,totalTasks:2,...}`。
+空周期可直接返回 `200` / `deleted:true`。`GET /api/release-cycle-deletions/:deletionId` 查询持久化进度，
+返回 `remainingTasks`、`deletedTasks`、`skippedTasks`、`pendingFileCleanup`、`pendingRuntimeCleanup` 和 `lastError`。
+只有关联 Task、待清理文件及原生运行环境全部处理完成，才返回 `status=completed,deleted=true`。
+周期列表在此期间显示 `status=deleting` 和 `deletion` 进度；`status=deleting` 可单独筛选。
+
+清理复用 Task 删除机制：停止已登记的运行进程，等待进行中的归档/校验结束，再移走并删除文件。
+清理任务及每个 Task 的文件清单持久化，服务重启、局部失败后继续重试；不能把已受理误报成清理完成。
+共享仓库中已登记、位于 `task/<run-id>` 的专属运行目录和配套日志也会清理；仍被其他 Task 引用的目录、
+共享仓库代码、标准库及 `/data/jenkins` 原始数据保留。没有归属证据的外部源文件不作为 Task 自有产物删除。
+操作审计和幂等回执保留，供查询清理进度和重试。
+
+DELETE 支持 `Idempotency-Key`，并可用 `X-Release-Cycle-Created-At` 绑定本次周期记录。
+同一请求重试返回同一清理操作的当前进度；完成后的重试不会删除后来重建的同 ID 周期或 Task。
+停止后续创建、固定关联 Task 范围及操作受理在同一事务内完成，Cron 候选在实际创建前再次检查周期状态。
+新运行、重连、恢复或重置不会重新启动正在删除的 Task；“结束周期”不施加这个限制。
+已提交旧版本删除回执按原结果重放，不自动把历史的“保留 Task”操作升级成破坏性删除。
 
 ### 任务字段
 
@@ -782,6 +816,11 @@ Schema v2 可选 `relatedReportKeys` 关联同一 Task 内的执行报告。前�
 
 `GET /api/sessions/:id/skill-reports?limit=100&offset=0&history=0`
 
+前台命令生成的报告支持 `executionEvidence.commandExecutionId`，与后台的
+`executionEvidence.externalAttemptId` 二选一。前者引用同 Task 中已有的真实命令审计记录，
+归档时核对原始 Turn/Attempt 归属、终态及工作目录，不需要创建 External Attempt 或 Step Run。
+Session 模式中的文件可以位于自有 Session 目录内；共享模式仍使用命令记录的工作目录。
+
 返回任务中每个 `reportKey` 的最新修订，按发布时间倒序排列。`limit` 默认 `100`、最大 `500`，`offset` 默认 `0`。传入 `history=1` 时返回所有历史修订；同一报告的修订号从 `1` 开始递增，旧修订不会覆盖。
 
 ```bash
@@ -790,7 +829,7 @@ curl -fsS "$BASE_URL/api/sessions/verify-release/skill-reports?limit=100&offset=
 
 每条记录包含报告所属的 `sessionId`、`stepRunId`、`turnId`、`attemptId`，冻结的 `skillId`、`skillVersion`、`skillContentHash`，以及 `reportKey`、`revision`、`reportHash`、`reportType`、状态、摘要、指标和通用区块。`observedAt` 是业务结果的观察时间，`publishedAt` 是平台持久化时间。所有新报告使用 Schema v2，必须显式提交 `artifacts` 数组；运行中和终态 Run 报告都提交 `executionEvidence.externalAttemptId`，平台由此绑定 `stepRunId`。同一 `reportKey` 的 revision 不能跨 Step Run。API 用 `artifactDeclarations` 返回该报告正文的原始声明；用只读 `registeredArtifacts` 返回关联 External Attempt 已登记文件的 `key`、`kind`、`fileName`、`executionStatus` 和受控快照 `url`，不返回源路径；用 `artifacts` 返回已经成功托管的文件元数据、摘要和正式打开 URL。
 
-平台只消费显式声明，或在当前报告发布时从具体 pytest `--html` 输出做受约束的补登记；不会从摘要、普通 Section 字段或旧 Task 猜测文件。自动补登记要求 External Attempt 属于当前 Task、具备有效 Turn/Attempt 来源，并且报告工作目录与 META 权威工作目录一致且路径在其中。运行中即可投影登记项，只有终态归档阶段才要求 External Attempt 已终态并使用 META 的权威工作目录完成证据校验。每个已知 pytest HTML 仍应在 `codex-background-track register` 时通过可重复的 `--artifact pytest-html:<stable-key>:<absolute-path>` 登记，平台立即显示登记项并在源文件生成后提供只读快照，随后自动合并到终态报告；这同时支持直接 pytest 和 wrapper。同一执行可登记多份 HTML，终态报告还可追加 Fail 分析 Markdown。`registeredArtifacts` 对终态 External Attempt 的空文件、占位 HTML 或不可读文件返回 `available=false`，前端不再生成打开链接。`codex-skill-report` 在发布事务中取得新 artifact 作业的租约并同步归档，Worker 不会并发复制同一批媒体；发布进程退出后 Worker 可在租约到期时接管，复制和摘要校验期间持续续租。单个文件缺失、超过 64 MiB、目录清理失败或校验失败不会覆盖已经成功托管的文件，持久化作业会重试并保留失败证据。相同 Step Run 的后续修订会逐个复用声明和源文件 SHA-256 均未变化的 artifact；新增失败分析等其他 artifact 不会让原有媒体重新归档，同路径内容变化时仍正常生成新归档。多个独立 pytest 应使用各自的 external attempt 和 `reportKey`，允许在同一目录并行；不同报告及其同名媒体使用隔离的托管命名空间。旧 Task 不做历史 artifact 补录。
+平台只消费显式声明，或在当前报告发布时从具体 pytest `--html` 输出做受约束的补登记；不会从摘要、普通 Section 字段或旧 Task 猜测文件。自动补登记要求 External Attempt 属于当前 Task、具备有效 Turn/Attempt 来源，并且报告工作目录与 META 权威工作目录一致且路径在其中。运行中即可投影登记项，只有终态归档阶段才要求 External Attempt 已终态并使用 META 的权威工作目录完成证据校验。每个已知 pytest HTML 仍应在 `codex-background-track register` 时通过可重复的 `--artifact pytest-html:<stable-key>:<absolute-path>` 登记，平台立即显示登记项并在源文件生成后提供只读快照，随后自动合并到终态报告；这同时支持直接 pytest 和 wrapper。同一执行可登记多份 HTML，终态报告还可追加独立分析 HTML（`failure-analysis-html`）或 Markdown（`failure-analysis-markdown`）。前台分析可在 `executionEvidence` 使用实际终态命令的 `commandExecutionId`，`template --data` 保留该关联；后台执行继续使用 `externalAttemptId`，二者选择其一。`registeredArtifacts` 对终态 External Attempt 的空文件、占位 HTML 或不可读文件返回 `available=false`，前端不再生成打开链接。`codex-skill-report` 在发布事务中取得新 artifact 作业的租约并同步归档，Worker 不会并发复制同一批媒体；发布进程退出后 Worker 可在租约到期时接管，复制和摘要校验期间持续续租。单个文件缺失、超过 64 MiB、目录清理失败或校验失败不会覆盖已经成功托管的文件，持久化作业会重试并保留失败证据。相同 Step Run 的后续修订会逐个复用声明和源文件 SHA-256 均未变化的 artifact；新增失败分析等其他 artifact 不会让原有媒体重新归档，同路径内容变化时仍正常生成新归档。多个独立 pytest 应使用各自的 external attempt 和 `reportKey`，允许在同一目录并行；不同报告及其同名媒体使用隔离的托管命名空间。旧 Task 不做历史 artifact 补录。
 
 报告引用的本地 `logs/*.txt` 在总量未超过 64 MiB artifact 上限时以内嵌只读文本形式归档；若内嵌全部唯一日志会使 HTML 超限，HTML 报告本体仍会归档并可打开，日志改为该 artifact 下的独立受认证文本资源，链接不会降级为 `Log omitted: artifact size limit` 占位。独立日志资源不占用媒体清单和分片的 10,000 项额度，因此大型并发报告不会因视频资源先达到上限而漏掉后续 case 日志。
 

@@ -22,7 +22,7 @@ const PRIORITIES = new Set(['primary', 'supporting', 'debug']);
 const SENSITIVITIES = new Set(['normal', 'internal', 'sensitive']);
 const FIELD_FORMATS = new Set(['text', 'code', 'status', 'datetime', 'duration', 'bytes', 'url']);
 const SECTION_KINDS = new Set(['fields', 'list', 'table', 'json']);
-const ARTIFACT_KINDS = new Set(['pytest-html', 'failure-analysis-markdown']);
+const ARTIFACT_KINDS = new Set(['pytest-html', 'failure-analysis-html', 'failure-analysis-markdown']);
 function reportError(message) {
   return Object.assign(new Error(message), { statusCode: 400 });
 }
@@ -132,12 +132,13 @@ function normalizeExecutionEvidence(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw reportError('executionEvidence must be an object or null');
   }
-  return {
-    externalAttemptId: identifier(
-      value.externalAttemptId ?? value.external_attempt_id,
-      'executionEvidence.externalAttemptId',
-    ),
-  };
+  const externalAttemptId = value.externalAttemptId ?? value.external_attempt_id;
+  const commandExecutionId = value.commandExecutionId ?? value.command_execution_id;
+  if (Boolean(externalAttemptId) === Boolean(commandExecutionId)) {
+    throw reportError('executionEvidence must select exactly one externalAttemptId or commandExecutionId');
+  }
+  const key = externalAttemptId ? 'externalAttemptId' : 'commandExecutionId';
+  return { [key]: identifier(externalAttemptId || commandExecutionId, `executionEvidence.${key}`) };
 }
 
 function normalizeArtifact(value, index) {
@@ -149,7 +150,7 @@ function normalizeArtifact(value, index) {
   if (!path.isAbsolute(sourcePath)) {
     throw reportError(`artifacts[${index}].path must be an absolute path`);
   }
-  const expectedExtension = kind === 'pytest-html' ? /\.html?$/i : /\.md$/i;
+  const expectedExtension = kind === 'failure-analysis-markdown' ? /\.md$/i : /\.html?$/i;
   if (!expectedExtension.test(sourcePath)) {
     throw reportError(`artifacts[${index}].path has an unsupported extension for ${kind}`);
   }

@@ -3,7 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const { WebSocket } = require('ws');
-const { resolveBridgeSessionRuntime } = require('./bridge-runtime-cleanup');
+const { resolveBridgeSessionRuntime, releaseSessionRuntimeProcessesAndWait } = require('./bridge-runtime-cleanup');
+const { inspectProcess, signalVerifiedProcessGroup, processGroupStillBelongsTo } = require('./process-identity');
 
 const DEFAULT_MAX_TERMINALS = 6;
 const DEFAULT_REPLAY_BYTES = 64 * 1024 * 1024;
@@ -98,7 +99,63 @@ function createCodexTerminalManager(options) {
   const scheduleTimer = options.setTimeout || setTimeout;
   const cancelTimer = options.clearTimeout || clearTimeout;
   const terminals = new Map();
+  // Browser history can be discarded before detached native CLI processes exit.
+  // Retain only their ownership context, without keeping replay buffers alive.
+  const runtimeRecords = new Map();
+  const completionOperations = new Map();
   const transcriptFailures = new Map();
+  const releaseRuntime = options.releaseRuntime || releaseSessionRuntimeProcessesAndWait;
+  let stopping = false;
+  let shutdownPromise = null;
+
+  function terminalProcessGroupIsAlive(entry) {
+    if (entry.groupExited) return false;
+    const identity = entry.processIdentity;
+    const alive = Boolean(identity && identity.processGroupId === identity.pid && identity.sessionId === identity.pid
+      && processGroupStillBelongsTo(identity));
+    if (entry.exited && !alive) entry.groupExited = true;
+    return alive;
+  }
+
+  function terminalHasLiveProcesses(entry) {
+    return Boolean(entry && ((!entry.exited && entry.process) || terminalProcessGroupIsAlive(entry)));
+  }
+
+  function releaseExitedEntry(entry) {
+    if (entry.exited && !terminalHasLiveProcesses(entry) && entry.clients.size === 0
+      && terminals.get(entry.taskId) === entry) terminals.delete(entry.taskId);
+  }
+
+  function rememberRuntime(task, runtime) {
+    const key = JSON.stringify([task.id, task.createdAt || '', runtime.sessionId, runtime.codexHome]);
+    runtimeRecords.set(key, { key, taskId: task.id, taskCreatedAt: task.createdAt || '',
+      sessionKey: task.persistentSessionKey, runtime, cleanupPromise: null });
+    return key;
+  }
+
+  function releaseRecordedRuntime(record) {
+    if (record.cleanupPromise) return record.cleanupPromise;
+    record.cleanupPromise = Promise.resolve().then(() => releaseRuntime(record.runtime, { includeCliMain: true }))
+      .then(result => {
+        if (result.errors.length) {
+          throw new Error(`Codex runtime release failed for ${record.taskId}: ${result.errors.map(item => item.error).join('; ')}`);
+        }
+        if (runtimeRecords.get(record.key) === record) runtimeRecords.delete(record.key);
+        return result;
+      }).finally(() => { record.cleanupPromise = null; });
+    return record.cleanupPromise;
+  }
+
+  function forgetReleasedRuntime(lease, result) {
+    if (result.errors.length || result.skipped) return;
+    for (const record of runtimeRecords.values()) {
+      if (record.taskId !== lease.taskId || record.taskCreatedAt !== lease.taskCreatedAt
+        || record.sessionKey !== lease.sessionKey || record.runtime.sessionId !== result.sessionId) continue;
+      const entry = terminals.get(record.taskId);
+      if (entry?.runtimeRecordKey === record.key && terminalHasLiveProcesses(entry)) continue;
+      runtimeRecords.delete(record.key);
+    }
+  }
 
   function audit(taskId, kind, message, payload = {}) {
     try {
@@ -135,7 +192,7 @@ function createCodexTerminalManager(options) {
   }
 
   function scheduleDisconnectedTermination(entry) {
-    if (disconnectTimeoutMs === 0 || entry.exited || entry.clients.size > 0 || entry.disconnectTimer) return;
+    if (stopping || disconnectTimeoutMs === 0 || entry.exited || entry.clients.size > 0 || entry.disconnectTimer) return;
     entry.disconnectTimer = scheduleTimer(() => {
       entry.disconnectTimer = null;
       if (entry.exited || entry.clients.size > 0) return;
@@ -183,7 +240,7 @@ function createCodexTerminalManager(options) {
     if (activeStatuses.has(task.status)) {
       throw terminalError('Wait for the managed task turn to finish before opening interactive CLI');
     }
-    if (terminals.size >= maxTerminals) {
+    if ([...terminals.values()].filter(terminalHasLiveProcesses).length >= maxTerminals) {
       throw terminalError('Interactive terminal capacity has been reached', 503);
     }
     const runtime = launchContext(task);
@@ -213,32 +270,33 @@ function createCodexTerminalManager(options) {
       cwd: runtime.cwdDir,
       env: environment,
     });
-    let transcript = null;
-    try {
-      transcript = options.transcripts?.start(task.id, {
-        threadId: runtime.threadId,
-        pid: processHandle.pid,
-      }) || null;
-    } catch (error) {
-      try { processHandle.kill('SIGTERM'); } catch {}
-      throw terminalError(`Interactive Codex CLI transcript could not be started: ${error.message}`, 507);
-    }
+    const identity = inspectProcess(processHandle.pid);
+    // forkpty owns a new session/group with this PID, but can return before
+    // setsid completes. Keep that group identity even if the launcher exits.
+    const processIdentity = identity?.parentPid === process.pid
+      ? { ...identity, processGroupId: identity.pid, sessionId: identity.pid } : null;
     let resolveExit;
     const exitPromise = new Promise((resolve) => { resolveExit = resolve; });
     const entry = {
       taskId: task.id,
       taskVersion: task.version,
+      taskCreatedAt: task.createdAt || '',
+      runtimeRecordKey: rememberRuntime(task, runtime),
       runtime,
       process: processHandle,
+      processIdentity,
       clients: new Set(),
       replayChunks: [],
       replayBytes: 0,
       cols,
       rows,
       exited: false,
+      groupExited: false,
+      exitWaitPromise: null,
       terminationRequested: false,
-      transcript,
+      transcript: null,
       transcriptError: null,
+      startupError: null,
       disconnectTimer: null,
       forceKillTimer: null,
       exitPromise,
@@ -246,6 +304,7 @@ function createCodexTerminalManager(options) {
     };
     terminals.set(task.id, entry);
     processHandle.onData((chunk) => {
+      if (entry.startupError) return;
       try {
         entry.transcript?.append(chunk);
       } catch (error) {
@@ -257,10 +316,14 @@ function createCodexTerminalManager(options) {
     });
     processHandle.onExit(({ exitCode, signal }) => {
       clearDisconnectTimer(entry);
-      if (entry.forceKillTimer) cancelTimer(entry.forceKillTimer);
-      entry.forceKillTimer = null;
       entry.exited = true;
       entry.process = null;
+      // The launcher can exit while its native CLI children still own the PTY
+      // process group. Keep escalation until the whole group has exited.
+      if (entry.forceKillTimer && !terminalProcessGroupIsAlive(entry)) {
+        cancelTimer(entry.forceKillTimer);
+        entry.forceKillTimer = null;
+      }
       try {
         entry.transcript?.seal({ exitCode, signal });
       } catch (error) {
@@ -273,8 +336,25 @@ function createCodexTerminalManager(options) {
         threadId: runtime.threadId,
       });
       entry.resolveExit({ exitCode, signal, transcriptError: entry.transcriptError });
-      if (entry.clients.size === 0 && terminals.get(task.id) === entry) terminals.delete(task.id);
+      if (terminalHasLiveProcesses(entry)) {
+        terminateEntry(entry, 'launcher_exited');
+        waitForExit(entry).catch(error => options.onError?.(error));
+      } else releaseExitedEntry(entry);
     });
+    try {
+      entry.transcript = options.transcripts?.start(task.id, {
+        threadId: runtime.threadId,
+        pid: processHandle.pid,
+      }) || null;
+    } catch (error) {
+      entry.startupError = terminalError(`Interactive Codex CLI transcript could not be started: ${error.message}`, 507);
+      audit(task.id, 'session.interactive_cli.start_failed', `Interactive Codex CLI transcript could not be initialized for ${task.id}`, {
+        pid: processHandle.pid, threadId: runtime.threadId,
+      });
+      terminateEntry(entry, 'transcript_initialization_failed');
+      waitForExit(entry).catch(cleanupError => options.onError?.(cleanupError));
+      throw entry.startupError;
+    }
     audit(task.id, 'session.interactive_cli.started', `Interactive Codex CLI started for ${task.id}`, {
       pid: processHandle.pid,
       threadId: runtime.threadId,
@@ -286,7 +366,9 @@ function createCodexTerminalManager(options) {
   function currentOrSpawn(task, cols, rows) {
     const taskId = task.id;
     let entry = terminals.get(taskId);
+    if (entry?.startupError) throw entry.startupError;
     if (entry?.exited) {
+      if (terminalHasLiveProcesses(entry)) throw terminalError('Previous CLI process group is still exiting; reconnect again', 503);
       if (terminals.get(taskId) === entry) terminals.delete(taskId);
       entry = null;
     }
@@ -325,16 +407,30 @@ function createCodexTerminalManager(options) {
   }
 
   function terminateEntry(entry, reason) {
-    if (!entry || entry.exited || !entry.process) return false;
-    if (entry.terminationRequested) return true;
+    if (!terminalHasLiveProcesses(entry)) return false;
+    if (entry.terminationRequested && entry.forceKillTimer) return true;
+    const signal = name => {
+      // Older Codex launchers keep a native CLI child in the PTY's process group.
+      // forkpty may return before its child has completed setsid(). Bind the PID
+      // at spawn, then inspect its final group when sending the signal.
+      const original = entry.processIdentity;
+      const current = original ? inspectProcess(original.pid) : null;
+      if (original && current && current.startTicks !== original.startTicks) return;
+      if (current?.parentPid === process.pid && current.processGroupId === current.pid && current.sessionId === current.pid) {
+        entry.processIdentity = current;
+      }
+      if (terminalProcessGroupIsAlive(entry)) {
+        signalVerifiedProcessGroup(entry.processIdentity, name);
+      } else if (!entry.exited && entry.process) entry.process.kill(name);
+    };
     try {
-      entry.process.kill('SIGTERM');
+      signal('SIGTERM');
       entry.terminationRequested = true;
       clearDisconnectTimer(entry);
       entry.forceKillTimer = scheduleTimer(() => {
         entry.forceKillTimer = null;
-        if (entry.exited || !entry.process) return;
-        try { entry.process.kill('SIGKILL'); } catch (error) { options.onError?.(error); }
+        if ((entry.exited || !entry.process) && !terminalProcessGroupIsAlive(entry)) return;
+        try { signal('SIGKILL'); } catch (error) { options.onError?.(error); }
       }, 2000);
       entry.forceKillTimer.unref?.();
     } catch (error) {
@@ -354,8 +450,11 @@ function createCodexTerminalManager(options) {
   }
 
   function attach(taskId, socket, dimensions = {}) {
+    if (stopping) throw terminalError('Interactive terminals are shutting down', 503);
+    if (completionOperations.has(taskId)) throw terminalError('Task completion is in progress; reconnect after it finishes', 503);
     const task = options.getTask(taskId);
     if (!task) throw terminalError('Task not found', 404);
+    if (task.releaseCycleStatus === 'deleting') throw terminalError('Task is being deleted with its release cycle');
     if (task.status === 'completed') {
       attachArchived(task, socket);
       return;
@@ -378,8 +477,8 @@ function createCodexTerminalManager(options) {
 
     const release = () => {
       entry.clients.delete(socket);
-      if (entry.exited && entry.clients.size === 0 && terminals.get(taskId) === entry) {
-        terminals.delete(taskId);
+      if (entry.exited) {
+        releaseExitedEntry(entry);
         return;
       }
       scheduleDisconnectedTermination(entry);
@@ -414,19 +513,41 @@ function createCodexTerminalManager(options) {
   }
 
   async function attachWhenReady(taskId, socket, dimensions = {}) {
-    const entry = terminals.get(taskId);
-    if (entry?.terminationRequested && !entry.exited) {
-      let timer;
-      try {
-        await Promise.race([
-          entry.exitPromise,
-          new Promise((_, reject) => {
-            timer = setTimeout(() => reject(terminalError('Previous CLI process is still exiting; reconnect again', 503)), terminationTimeoutMs);
-          }),
-        ]);
-      } finally { clearTimeout(timer); }
+    let runtimeReady = false;
+    while (socket.readyState === WebSocket.OPEN) {
+      const completion = completionOperations.get(taskId);
+      if (completion) {
+        // The HTTP caller receives a completion failure. A waiting browser can
+        // resume the still-reviewable Task when that operation has finished.
+        await completion.catch(() => {});
+        runtimeReady = false;
+        continue;
+      }
+      const entry = terminals.get(taskId);
+      if (entry && (entry.terminationRequested || entry.exited) && terminalHasLiveProcesses(entry)) {
+        terminateEntry(entry, 'reconnect');
+        await waitForExit(entry);
+        runtimeReady = false;
+        continue;
+      }
+      if (!runtimeReady && options.beforeConnect) {
+        await options.beforeConnect(taskId);
+        runtimeReady = true;
+        continue;
+      }
+      attach(taskId, socket, dimensions);
+      return;
     }
-    if (socket.readyState === WebSocket.OPEN) attach(taskId, socket, dimensions);
+  }
+
+  function withTaskCompletion(taskId, operation) {
+    if (stopping) return Promise.reject(terminalError('Interactive terminals are shutting down', 503));
+    const previous = completionOperations.get(taskId) || Promise.resolve();
+    const completion = previous.catch(() => {}).then(operation).finally(() => {
+      if (completionOperations.get(taskId) === completion) completionOperations.delete(taskId);
+    });
+    completionOperations.set(taskId, completion);
+    return completion;
   }
 
   function terminate(taskId, reason = 'operator') {
@@ -438,46 +559,103 @@ function createCodexTerminalManager(options) {
     if (error) throw terminalError(`Interactive Codex CLI transcript is incomplete: ${error.message}`, 507);
   }
 
-  async function terminateAndWait(taskId, reason = 'operator') {
+  function waitForExit(entry) {
+    if (entry.exitWaitPromise) return entry.exitWaitPromise;
+    entry.exitWaitPromise = (async () => {
+      let timer;
+      let cancelled = false;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(terminalError('Timed out waiting for the interactive Codex CLI to end', 504)), terminationTimeoutMs);
+      });
+      const exited = entry.exitPromise.then(async result => {
+        while (!cancelled && terminalProcessGroupIsAlive(entry)) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        return result;
+      });
+      try { return await Promise.race([exited, timeout]); }
+      finally { cancelled = true; clearTimeout(timer); }
+    })().finally(() => {
+      entry.exitWaitPromise = null;
+      if (!terminalHasLiveProcesses(entry) && entry.forceKillTimer) {
+        cancelTimer(entry.forceKillTimer);
+        entry.forceKillTimer = null;
+      }
+      releaseExitedEntry(entry);
+    });
+    return entry.exitWaitPromise;
+  }
+
+  async function terminateAndWait(taskId, reason = 'operator', expectedCreatedAt = '') {
     const entry = terminals.get(taskId);
-    if (!entry || entry.exited || !entry.process) {
+    if (expectedCreatedAt && entry?.taskCreatedAt && entry.taskCreatedAt !== expectedCreatedAt) return false;
+    if (!terminalHasLiveProcesses(entry)) {
       assertTranscriptHealthy(taskId);
       return false;
     }
     if (!terminateEntry(entry, reason)) {
       throw terminalError('Interactive Codex CLI could not be terminated', 503);
     }
-    let timer;
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(terminalError('Timed out waiting for the interactive Codex CLI to end', 504)), terminationTimeoutMs);
-    });
-    try {
-      const result = await Promise.race([entry.exitPromise, timeout]);
-      if (result.transcriptError) {
-        throw terminalError(`Interactive Codex CLI transcript is incomplete: ${result.transcriptError.message}`, 507);
-      }
-      assertTranscriptHealthy(taskId);
-      return true;
-    } finally {
-      clearTimeout(timer);
+    const result = await waitForExit(entry);
+    if (result.transcriptError) {
+      throw terminalError(`Interactive Codex CLI transcript is incomplete: ${result.transcriptError.message}`, 507);
     }
+    assertTranscriptHealthy(taskId);
+    return true;
   }
 
   function isRunning(taskId) {
+    return terminalHasLiveProcesses(terminals.get(taskId));
+  }
+
+  async function terminateForDeletion(taskId, expectedCreatedAt = '') {
     const entry = terminals.get(taskId);
-    return Boolean(entry && !entry.exited && entry.process);
+    if (!entry) {
+      const current = options.getTask(taskId);
+      if (!expectedCreatedAt || !current || current.createdAt === expectedCreatedAt) transcriptFailures.delete(taskId);
+      return;
+    }
+    if (expectedCreatedAt && entry.taskCreatedAt && entry.taskCreatedAt !== expectedCreatedAt) return;
+    if (terminalHasLiveProcesses(entry)) {
+      if (!terminateEntry(entry, 'release_cycle_deleted')) throw terminalError('Interactive CLI could not be terminated', 503);
+      await waitForExit(entry);
+    }
+    clearDisconnectTimer(entry);
+    for (const client of entry.clients) client.terminate();
+    if (terminals.get(taskId) === entry) terminals.delete(taskId);
+    transcriptFailures.delete(taskId);
   }
 
   function shutdown() {
-    for (const entry of terminals.values()) {
-      clearDisconnectTimer(entry);
-      for (const client of entry.clients) client.terminate();
-      terminateEntry(entry, 'server_shutdown');
-    }
-    terminals.clear();
+    if (shutdownPromise) return shutdownPromise;
+    stopping = true;
+    const entries = [...terminals.values()];
+    shutdownPromise = (async () => {
+      if (completionOperations.size) await Promise.allSettled([...completionOperations.values()]);
+      const terminalsStopped = await Promise.allSettled(entries.map(async entry => {
+        clearDisconnectTimer(entry);
+        for (const client of entry.clients) client.terminate();
+        if (terminalHasLiveProcesses(entry)) {
+          if (!terminateEntry(entry, 'server_shutdown')) {
+            throw terminalError(`Interactive Codex CLI could not be terminated for ${entry.taskId}`, 503);
+          }
+          await waitForExit(entry);
+        }
+        assertTranscriptHealthy(entry.taskId);
+      }));
+      const runtimesStopped = await Promise.allSettled([...runtimeRecords.values()]
+        .filter(record => !entries.some(entry => entry.runtimeRecordKey === record.key && terminalHasLiveProcesses(entry)))
+        .map(releaseRecordedRuntime));
+      const errors = [...terminalsStopped, ...runtimesStopped]
+        .filter(result => result.status === 'rejected').map(result => result.reason);
+      if (errors.length) throw new AggregateError(errors, `Interactive Codex shutdown failed: ${errors.map(error => error.message).join('; ')}`);
+      terminals.clear();
+    })();
+    return shutdownPromise;
   }
 
-  return { attach, attachWhenReady, isRunning, terminate, terminateAndWait, assertTranscriptHealthy, shutdown };
+  return { attach, attachWhenReady, withTaskCompletion, isRunning, terminate, terminateAndWait, terminateForDeletion,
+    forgetReleasedRuntime, assertTranscriptHealthy, shutdown };
 }
 
 module.exports = {

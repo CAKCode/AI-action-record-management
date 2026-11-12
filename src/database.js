@@ -401,6 +401,34 @@ function schema(db) {
     CREATE INDEX IF NOT EXISTS idx_task_series_runs_task
       ON task_series_runs(task_id);
 
+    CREATE TABLE IF NOT EXISTS release_cycle_deletions (
+      id TEXT PRIMARY KEY,
+      cycle_id TEXT NOT NULL,
+      cycle_created_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      context_json TEXT NOT NULL DEFAULT '{}',
+      lease_owner TEXT NOT NULL DEFAULT '',
+      lease_expires_at TEXT NOT NULL DEFAULT '',
+      next_attempt_at TEXT NOT NULL DEFAULT '',
+      last_error TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT NOT NULL DEFAULT '',
+      UNIQUE(cycle_id, cycle_created_at)
+    );
+    CREATE INDEX IF NOT EXISTS idx_release_cycle_deletions_due
+      ON release_cycle_deletions(status, next_attempt_at);
+    CREATE TABLE IF NOT EXISTS release_cycle_deletion_tasks (
+      deletion_id TEXT NOT NULL REFERENCES release_cycle_deletions(id) ON DELETE CASCADE,
+      task_id TEXT NOT NULL,
+      task_created_at TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'pending',
+      staged_files_json TEXT NOT NULL DEFAULT '[]',
+      PRIMARY KEY(deletion_id, task_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_release_cycle_deletion_task_generation
+      ON release_cycle_deletion_tasks(task_id, task_created_at, deletion_id);
+
     CREATE TABLE IF NOT EXISTS command_executions (
       id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,

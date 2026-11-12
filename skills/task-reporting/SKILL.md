@@ -19,6 +19,13 @@ Use this common reporting contract alongside the Skill that performs the busines
 
 Choose by the operation being reported, independently of project and Skill name. Custom and historical `reportType` values remain supported and display with the business-result layout. These five types standardize presentation; they do not introduce a publication allowlist.
 
+The fixed content contract is **Card Templates v1**, using Schema v2. Generate it with
+`codex-skill-report template --data <observed-results.json>`; the helper fixes metric order,
+labels and the primary section's columns. Use `--preset rerun` for test reruns and
+`--preset final-summary` for the workflow's final card. `codex-skill-report cards` prints the
+catalog. Read [references/cards.md](references/cards.md) for fields and the seven runnable
+examples. Put additional business facts in `context`, `evidence` or extra `sections`.
+
 ## Register
 
 Generate the skeleton with the platform helper, wrapped by the actual business Skill:
@@ -35,7 +42,7 @@ The helper takes `skillId` from the active business Skill; `--skill-id` also sup
 codex-skill-use <business-skill> -- codex-skill-report publish --file <run-dir>/report.json
 ```
 
-Read [references/cards.md](references/cards.md) when filling a card. Keep one stable `reportKey` through the running and terminal revisions of a logical report; give separate executions and business reruns their own keys. Link the same registered execution using `executionEvidence.externalAttemptId`. Technical retries remain generations of their Step Run.
+Read [references/cards.md](references/cards.md) when filling a card. Keep one stable `reportKey` through the running and terminal revisions of a logical report; give separate executions and business reruns their own keys. Background reports link their registered execution using `executionEvidence.externalAttemptId`; foreground-produced analysis files use the actual completed command's `executionEvidence.commandExecutionId`. Select one execution identity per report. Technical retries remain generations of their Step Run.
 
 Organize visible reports by business stage. One execution with several HTML outputs uses one report
 with all its registered files. When a stage spans independent executions, its owner publishes one
@@ -49,7 +56,9 @@ Reuse one final-summary key rather than publishing a second final-evidence repor
 
 Keep the exact command in `primaryExecution`, not repeated in a second execution section. Put results in `summary`, `metrics`, and business sections. Unknown counts stay absent instead of becoming zero. Extra business fields remain supported in sections, and the complete payload remains available.
 
-Running reports use `artifacts: []`. Register each known HTML at launch with repeated `codex-background-track register --artifact` options. Terminal reports inherit those registrations; explicitly add later-created analysis Markdown. Preserve every file's own stable artifact key and original filename. Report publication and file archival have separate states.
+Running reports use `artifacts: []`. Register each known pytest HTML at launch with repeated `codex-background-track register --artifact` options. Terminal reports inherit those registrations; explicitly add later-created standalone analysis HTML as `failure-analysis-html`, or Markdown as `failure-analysis-markdown` when that format was requested. Preserve every file's own stable artifact key and original filename. Report publication and file archival have separate states.
+
+Analysis HTML is attached directly in its analysis card's `artifacts`, using the same managed archive and report-viewer flow as pytest reports. Put the actual producing command's `commandExecutionId` in the `--data` file; the template retains it. An analysis spanning multiple test Runs still has its own file-producing execution, so it does not need a single upstream External Attempt. The empty-artifact rule for cross-stage summaries does not remove the analysis report's own file. See [Foreground analysis HTML](references/cards.md#foreground-analysis-html) for the command lookup, payload and publish example. A path in a section or a file reply is additional evidence, not an attached report.
 
 Use the existing business workflow's publication timing. Deployment Skills keep their start/end pair; reading this Skill does not add polling Turns, extra model calls or intermediate deployment publications. This shared Skill is a format helper and does not replace the actual publisher with `task-reporting`.
 

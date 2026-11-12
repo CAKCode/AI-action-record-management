@@ -119,6 +119,7 @@ test('idle cleanup excludes managed Turns but includes background-waiting and fa
 
 test('reconnect waits for release, while a connected CLI is excluded from cleanup', async () => {
   let finishRelease; let finished = false; let claims = 0;
+  let notified = false;
   const manager = createIdleTaskRuntimeManager({
     list: () => ['connected', 'idle'],
     isInteractive: id => id === 'connected',
@@ -126,9 +127,16 @@ test('reconnect waits for release, while a connected CLI is excluded from cleanu
     release: (sessionKey, options) => {
       assert.equal(sessionKey, 'single:history');
       assert.equal(options.sourceDir, workspace);
+      assert.equal(options.includeCliMain, true);
       return new Promise(resolve => { finishRelease = resolve; });
     },
     finish: () => { finished = true; }, getRelease: () => null,
+    onReleased(lease, result) {
+      assert.equal(finished, true);
+      assert.equal(lease.taskId, 'idle');
+      assert.equal(result.sessionId, 'history');
+      notified = true;
+    },
   });
   const sweep = manager.sweep(); await new Promise(resolve => setImmediate(resolve));
   let connected = false;
@@ -137,6 +145,7 @@ test('reconnect waits for release, while a connected CLI is excluded from cleanu
   finishRelease({ sessionId: 'history', released: [123], errors: [] });
   await Promise.all([reconnect, sweep]);
   assert.equal(connected, true); assert.equal(finished, true); assert.equal(claims, 1);
+  assert.equal(notified, true);
   await manager.shutdown();
 });
 
@@ -163,4 +172,24 @@ test('an unresolved Session release records failure and clears its coordination 
 test('Cron preserves sub-second scheduling and midnight in the configured timezone', () => {
   assert.equal(nextCronAt('0 23 * * *', '2026-10-26T10:00:00.753Z'), '2026-10-26T15:00:00.000Z');
   assert.equal(nextCronAt('0 0 * * *', '2026-10-26T15:00:00.753Z'), '2026-10-26T16:00:00.000Z');
+});
+
+test('idle sweeps also reclaim deleted Task processes and shutdown waits for that release', async () => {
+  let resolveRelease; let calls = 0;
+  const manager = createIdleTaskRuntimeManager({
+    list: () => [],
+    sweepOrphans: () => { calls++; return new Promise(resolve => { resolveRelease = resolve; }); },
+  });
+  const sweep = manager.sweep();
+  assert.equal(manager.sweep(), sweep);
+  let stopped = false;
+  const shutdown = manager.shutdown().then(() => { stopped = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stopped, false);
+  const result = { taskId: 'deleted', sessionId: 'old-session', released: [123], errors: [] };
+  resolveRelease([result]);
+  assert.deepEqual(await sweep, [result]);
+  await shutdown;
+  assert.equal(calls, 1);
+  assert.deepEqual(await manager.sweep(), []);
 });

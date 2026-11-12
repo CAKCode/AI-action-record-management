@@ -16,13 +16,14 @@ function createIdleTaskRuntimeManager(options) {
     if (!lease) return null;
     const operation = Promise.resolve().then(async () => {
       options.retain?.(lease.taskId, lease.sessionKey);
-      const result = await release(lease.sessionKey, { sourceDir: lease.sourceDir });
+      const result = await release(lease.sessionKey, { sourceDir: lease.sourceDir, includeCliMain: true });
       options.retain?.(lease.taskId, lease.sessionKey);
       return result;
     })
       .catch(error => ({ sessionId: '', released: [], errors: [{ error: error.message }] }))
       .then(result => {
         options.finish(lease, result);
+        if (!result.errors.length && !result.skipped) options.onReleased?.(lease, result);
         return result;
       }).finally(() => pending.delete(taskId));
     pending.set(taskId, operation);
@@ -40,6 +41,10 @@ function createIdleTaskRuntimeManager(options) {
           const operation = releaseTask(taskId);
           if (operation) results.push(await operation);
         } catch (error) { options.onError?.(error); }
+      }
+      if (!stopped && options.sweepOrphans) {
+        try { results.push(...await options.sweepOrphans()); }
+        catch (error) { options.onError?.(error); }
       }
       return results;
     })().finally(() => { cycle = null; });

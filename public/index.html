@@ -161,13 +161,13 @@
       <section class="view" id="view-release-cycles">
         <div class="section-toolbar">
           <div class="inline-note" data-i18n="releaseCyclesNote">按提测版本查看手动和定时创建的独立 Task。关闭版本周期后只停止后续创建，不影响已运行任务。</div>
-          <button class="button secondary" data-action="refresh-release-cycles" data-i18n="refreshReleaseCycles">刷新</button>
+          <div class="toolbar-actions"><button class="button secondary" data-action="refresh-release-cycles" data-i18n="refreshReleaseCycles">刷新</button><button class="button primary" data-action="new-release-cycle" data-i18n="newReleaseCycle">新建版本周期</button></div>
         </div>
         <div class="release-cycle-grid" id="releaseCycleGrid"></div>
         <section class="workspace-section hidden" id="releaseCycleTaskSection">
           <div class="section-head">
             <div><span class="section-label" data-i18n="releaseCycleTasksLabel">RELEASE TASKS</span><h2 id="releaseCycleTaskTitle"></h2></div>
-            <div class="toolbar-actions"><button class="button secondary" data-action="run-release-cycle" id="runReleaseCycleBtn" data-i18n="runReleaseCycle">立即创建 Task</button><button class="button danger" data-action="close-release-cycle" id="closeReleaseCycleBtn" data-i18n="closeReleaseCycle">结束版本周期</button></div>
+            <div class="toolbar-actions"><button class="button secondary" data-action="collapse-release-cycle" data-i18n="collapseReleaseCycle">收起</button><button class="button secondary" data-action="close-release-cycle" id="closeReleaseCycleBtn" data-i18n="closeReleaseCycle">结束版本周期</button><button class="button danger" data-action="delete-release-cycle" id="deleteReleaseCycleBtn" data-i18n="deleteReleaseCycle">删除版本周期</button></div>
           </div>
           <div class="task-grid large" id="releaseCycleTaskGrid"></div>
         </section>
@@ -242,6 +242,13 @@
         <button class="icon-button" data-close="taskEditorModal" aria-label="Close">&#215;</button>
       </div>
       <form id="taskForm" class="modal-body form-grid"></form>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="releaseCycleEditorModal" role="dialog" aria-modal="true" aria-labelledby="releaseCycleEditorTitle">
+    <div class="modal-card form-modal wide-modal">
+      <div class="modal-head"><div><span class="section-label">RELEASE CYCLE</span><h2 id="releaseCycleEditorTitle" data-i18n="newReleaseCycle">新建版本周期</h2></div><button class="icon-button" data-close="releaseCycleEditorModal" aria-label="Close">&#215;</button></div>
+      <form class="modal-body form-grid" id="releaseCycleForm"></form>
     </div>
   </div>
 

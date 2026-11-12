@@ -1,0 +1,30 @@
+{
+  "title": "示例：业务流程",
+  "status": "running",
+  "summary": "部署已结束，正在执行测试，分析尚未开始。",
+  "metrics": {
+    "stages": 3,
+    "completed": 1,
+    "failed": 0
+  },
+  "rows": [
+    {
+      "stage": "部署",
+      "outcome": "succeeded",
+      "detail": "版本检查完成。"
+    },
+    {
+      "stage": "测试",
+      "outcome": "running",
+      "detail": "已登记后台执行和 HTML 预览入口。"
+    },
+    {
+      "stage": "分析",
+      "outcome": "pending",
+      "detail": "等待测试结果。"
+    }
+  ],
+  "relatedReportKeys": [
+    "demo:deployment"
+  ]
+}

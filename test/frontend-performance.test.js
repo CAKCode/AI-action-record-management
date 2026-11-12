@@ -311,6 +311,141 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(document.documentElement.dataset.fontSize, 'standard');
+  assert.equal(requests.filter(url => url === '/api/dashboard?taskLimit=100').length, 1);
+
+  const cycleFixture = { id: 'demo-cycle', name: 'Demo cycle', releaseKey: 'demo-v1',
+    project: 'cloudRecord', status: 'closed', createdAt: '2026-10-22T10:00:00Z', taskCount: 0, schedules: [] };
+  const secureRandomUUID = context.crypto.randomUUID;
+  context.crypto.randomUUID = undefined;
+  vm.runInContext('openReleaseCycleEditor()', context);
+  const cycleEditorHtml = element('#releaseCycleForm').innerHTML;
+  const generatedCycleId = /name="id"[^>]*value="([^"]+)"/.exec(cycleEditorHtml)[1];
+  assert.match(generatedCycleId, /^[a-z0-9][a-z0-9_-]{0,63}$/);
+  assert.match(cycleEditorHtml, /name="scheduleEnabled"[^>]*>/);
+  assert.doesNotMatch(cycleEditorHtml, /name="scheduleEnabled"[^>]*\bchecked/);
+  assert.match(cycleEditorHtml, /id="releaseCycleScheduleFields" disabled/);
+  const cycleFormEntries = [['id', generatedCycleId], ['name', 'Release v1'], ['releaseKey', 'v1'], ['objective', 'Fetch latest code and regress']];
+  const manualCyclePayload = JSON.parse(vm.runInContext(`JSON.stringify(releaseCycleFormPayload(new Map(${JSON.stringify(cycleFormEntries)})))`, context));
+  assert.equal('schedule' in manualCyclePayload, false);
+  assert.equal(manualCyclePayload.taskTemplate.workspaceMode, 'session-clone');
+  assert.equal(manualCyclePayload.taskTemplate.sourceMode, 'session-clone');
+  const scheduledCyclePayload = JSON.parse(vm.runInContext(`JSON.stringify(releaseCycleFormPayload(new Map(${JSON.stringify([
+    ...cycleFormEntries, ['scheduleEnabled', 'on'], ['cron', '0 23 * * *'], ['timezone', 'Asia/Shanghai'], ['workspaceMode', 'shared'],
+  ])})))`, context));
+  assert.deepEqual(scheduledCyclePayload.schedule, { cron: '0 23 * * *', timezone: 'Asia/Shanghai', overlapPolicy: 'queue' });
+  assert.equal(scheduledCyclePayload.taskTemplate.sourceMode, 'shared-repo');
+  vm.runInContext("closeModal('releaseCycleEditorModal')", context);
+  vm.runInContext(`state.releaseCycles=[${JSON.stringify(cycleFixture)}]; state.selectedReleaseCycleId='demo-cycle'; renderReleaseCycles();`, context);
+  assert.match(element('#releaseCycleGrid').innerHTML, /data-action="delete-release-cycle"/);
+  responseOverrides.set('GET /api/release-cycles/demo-cycle/tasks', { payload: [] });
+  vm.runInContext("state.selectedReleaseCycleId=''; renderReleaseCycles()", context);
+  await vm.runInContext("toggleReleaseCycle('demo-cycle')", context);
+  assert.equal(vm.runInContext('state.selectedReleaseCycleId', context), 'demo-cycle');
+  assert.equal(element('#releaseCycleTaskSection').classList.contains('hidden'), false);
+  assert.match(element('#releaseCycleGrid').innerHTML, /aria-expanded="true"/);
+  await vm.runInContext("openReleaseCycle('demo-cycle')", context);
+  assert.equal(vm.runInContext('state.selectedReleaseCycleId', context), 'demo-cycle');
+  await vm.runInContext("toggleReleaseCycle('demo-cycle')", context);
+  assert.equal(vm.runInContext('state.selectedReleaseCycleId', context), '');
+  assert.equal(element('#releaseCycleTaskSection').classList.contains('hidden'), true);
+  let finishCollapsedRequest;
+  responseOverrides.set('GET /api/release-cycles/demo-cycle/tasks', {
+    payload: new Promise(resolve => { finishCollapsedRequest = resolve; }),
+  });
+  const collapsedRequest = vm.runInContext("toggleReleaseCycle('demo-cycle')", context);
+  await new Promise(resolve => setImmediate(resolve));
+  await vm.runInContext("toggleReleaseCycle('demo-cycle')", context);
+  assert.equal(element('#releaseCycleTaskSection').classList.contains('hidden'), true);
+  responseOverrides.set('GET /api/release-cycles/demo-cycle/tasks', { payload: [] });
+  await vm.runInContext("toggleReleaseCycle('demo-cycle')", context);
+  finishCollapsedRequest([{ id: 'stale-before-collapse' }]);
+  await collapsedRequest;
+  assert.equal(vm.runInContext('state.selectedReleaseCycleId', context), 'demo-cycle');
+  assert.equal(vm.runInContext('state.releaseCycleTasks.length', context), 0);
+  await vm.runInContext("toggleReleaseCycle('demo-cycle')", context);
+  assert.equal(element('#releaseCycleTaskSection').classList.contains('hidden'), true);
+  responseOverrides.delete('GET /api/release-cycles/demo-cycle/tasks');
+  vm.runInContext("state.selectedReleaseCycleId='demo-cycle';renderReleaseCycles()", context);
+  responseOverrides.set('GET /api/release-cycles', { payload: [cycleFixture] });
+  vm.runInContext("setView('release-cycles')", context);
+  assert.equal(element('#topNewTaskBtn').classList.contains('hidden'), true);
+  await new Promise(resolve => setImmediate(resolve));
+  responseOverrides.delete('GET /api/release-cycles');
+  vm.runInContext("setView('tasks')", context);
+  assert.equal(element('#topNewTaskBtn').classList.contains('hidden'), false);
+  vm.runInContext("setView('overview')", context);
+  const cycleDeleteCount = () => requestDetails.filter(request => request.url === '/api/release-cycles/demo-cycle' && request.method === 'DELETE').length;
+  const initialCycleDeletes = cycleDeleteCount();
+  window.confirm = () => false;
+  await vm.runInContext("deleteReleaseCycle('demo-cycle')", context);
+  assert.equal(cycleDeleteCount(), initialCycleDeletes);
+  window.confirm = () => true;
+  responseOverrides.set('DELETE /api/release-cycles/demo-cycle', () => { throw new TypeError('simulated connection loss'); });
+  await vm.runInContext("deleteReleaseCycle('demo-cycle')", context);
+  const uncertainDelete = requestDetails.filter(request => request.url === '/api/release-cycles/demo-cycle' && request.method === 'DELETE').at(-1);
+  assert.equal(vm.runInContext("releaseCycleDeleteIntents.get('demo-cycle').running", context), false);
+  responseOverrides.set('DELETE /api/release-cycles/demo-cycle', { payload: { ok: true, deleted: true, retainedTasks: 0 } });
+  responseOverrides.set('GET /api/release-cycles', { payload: [] });
+  await vm.runInContext("deleteReleaseCycle('demo-cycle')", context);
+  const repeatedDelete = requestDetails.filter(request => request.url === '/api/release-cycles/demo-cycle' && request.method === 'DELETE').at(-1);
+  assert.equal(repeatedDelete.headers['Idempotency-Key'], uncertainDelete.headers['Idempotency-Key']);
+  assert.equal(repeatedDelete.headers['X-Release-Cycle-Created-At'], cycleFixture.createdAt);
+  assert.equal(vm.runInContext('state.selectedReleaseCycleId', context), '');
+  assert.equal(vm.runInContext('state.releaseCycleTasks.length', context), 0);
+  assert.equal(vm.runInContext("releaseCycleDeleteIntents.has('demo-cycle')", context), false);
+  vm.runInContext(`state.releaseCycles=[${JSON.stringify(cycleFixture)}]; state.selectedReleaseCycleId='demo-cycle';`, context);
+  responseOverrides.set('GET /api/release-cycles', () => { throw new TypeError('simulated refresh failure'); });
+  await vm.runInContext("deleteReleaseCycle('demo-cycle')", context);
+  assert.equal(element('#toastMessage').textContent, '版本周期已删除，但刷新列表失败，请稍后刷新页面。');
+  assert.equal(vm.runInContext('state.releaseCycles.length', context), 0);
+  responseOverrides.delete('DELETE /api/release-cycles/demo-cycle');
+  responseOverrides.delete('GET /api/release-cycles');
+  let resolveOlderCycles;
+  responseOverrides.set('GET /api/release-cycles', { payload: new Promise(resolve => { resolveOlderCycles = resolve; }) });
+  const olderCycles = vm.runInContext('loadReleaseCycles()', context);
+  await new Promise(resolve => setImmediate(resolve));
+  responseOverrides.set('GET /api/release-cycles', { payload: [] });
+  await vm.runInContext('loadReleaseCycles()', context);
+  resolveOlderCycles([cycleFixture]);
+  await olderCycles;
+  assert.equal(vm.runInContext('state.releaseCycles.length', context), 0);
+  let resolveOlderTasks;
+  responseOverrides.set('GET /api/release-cycles/demo-cycle/tasks', { payload: new Promise(resolve => { resolveOlderTasks = resolve; }) });
+  vm.runInContext(`state.releaseCycles=[${JSON.stringify(cycleFixture)}]`, context);
+  const olderCycleTasks = vm.runInContext("openReleaseCycle('demo-cycle')", context);
+  await new Promise(resolve => setImmediate(resolve));
+  vm.runInContext("state.releaseCycles=[];state.selectedReleaseCycleId='';state.releaseCycleTasks=[]", context);
+  resolveOlderTasks([{ id: 'stale-cycle-task' }]);
+  await olderCycleTasks;
+  assert.equal(vm.runInContext('state.releaseCycleTasks.length', context), 0);
+  responseOverrides.delete('GET /api/release-cycles/demo-cycle/tasks');
+  responseOverrides.delete('GET /api/release-cycles');
+  const pendingDeletion = { ok: true, id: 'demo-cycle', deletionId: 'delete-fixture', status: 'deleting',
+    deleted: false, totalTasks: 2, deletedTasks: 0, remainingTasks: 2 };
+  const deletingCycle = { ...cycleFixture, status: 'deleting', taskCount: 2, deletion: pendingDeletion };
+  responseOverrides.set('GET /api/release-cycles', { payload: [deletingCycle] });
+  responseOverrides.set('DELETE /api/release-cycles/demo-cycle', { status: 202, payload: pendingDeletion });
+  vm.runInContext(`state.releaseCycles=[${JSON.stringify({ ...cycleFixture, status: 'active' })}]; state.selectedReleaseCycleId='demo-cycle';`, context);
+  vm.runInContext("setView('release-cycles')", context);
+  await new Promise(resolve => setImmediate(resolve));
+  await vm.runInContext("deleteReleaseCycle('demo-cycle')", context);
+  assert.equal(vm.runInContext('state.releaseCycles.length', context), 1);
+  assert.equal(element('#deleteReleaseCycleBtn').disabled, true);
+  assert.match(element('#releaseCycleGrid').innerHTML, /删除中/);
+  assert.equal(element('#toastMessage').textContent, '已开始删除版本周期、关联 Task 和产物。');
+  const deletionTimerId = vm.runInContext('releaseCycleDeletionPollTimer', context);
+  const deletionPoll = timers.get(deletionTimerId); assert(deletionPoll);
+  responseOverrides.set('GET /api/release-cycles', { payload: [] });
+  timers.delete(deletionTimerId);
+  await deletionPoll.callback();
+  assert.equal(vm.runInContext('state.releaseCycles.length', context), 0);
+  assert.equal(vm.runInContext('state.selectedReleaseCycleId', context), '');
+  assert.equal(vm.runInContext('releaseCycleDeletionPollTimer', context), null);
+  assert.equal(element('#toastMessage').textContent, '版本周期「Demo cycle」及其关联 Task、产物已删除。');
+  responseOverrides.delete('DELETE /api/release-cycles/demo-cycle');
+  responseOverrides.delete('GET /api/release-cycles');
+  vm.runInContext("setView('overview')", context);
+  context.crypto.randomUUID = secureRandomUUID;
   assert.equal(element('#fontSizeControl').getAttribute('aria-label'), '文字大小');
   assert.equal(fontSizeButtons.find((button) => button.dataset.fontSize === 'standard').classList.contains('active'), true);
   vm.runInContext("setFontSize('large')", context);
@@ -319,7 +454,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.equal(fontSizeButtons.find((button) => button.dataset.fontSize === 'large').getAttribute('aria-pressed'), 'true');
   vm.runInContext("setFontSize('standard')", context);
 
-  assert.equal(requests.filter((url) => url === '/api/dashboard?taskLimit=100').length, 1);
+  const dashboardRequestsBeforePoll = requests.filter(url => url === '/api/dashboard?taskLimit=100').length;
   assert.equal(requests.filter((url) => url.startsWith('/api/audit')).length, 0);
   assert.equal(requests.filter((url) => url === '/api/runtime/bridge-sessions').length, 0);
   assert.equal(requests.filter((url) => url === '/api/health').length, 0);
@@ -332,7 +467,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   await idlePoll[1].callback();
   await new Promise((resolve) => setImmediate(resolve));
   const writesAfterUnchangedPoll = [...elements.values()].reduce((total, item) => total + item.writeCount, 0);
-  assert.equal(requests.filter((url) => url === '/api/dashboard?taskLimit=100').length, 2);
+  assert.equal(requests.filter((url) => url === '/api/dashboard?taskLimit=100').length, dashboardRequestsBeforePoll + 1);
   assert.equal(writesAfterUnchangedPoll, initialWrites);
 
   dashboardHang = true;
@@ -1597,6 +1732,55 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.ok(summaryHtml.indexOf('首轮回归') < summaryHtml.indexOf('Rerun #1'));
   assert.ok(summaryHtml.indexOf('Rerun #1') < summaryHtml.lastIndexOf('最终结果'));
 
+  const analysisWithFile = {
+    ...summaryReports.find(report => report.id === 'analysis-report'), revision: 2,
+    artifacts: [{ key: 'full-analysis', kind: 'failure-analysis-markdown', fileName: 'full-analysis.md',
+      bytes: 185193, url: '/api/analysis/latest-markdown' }],
+    artifactDeclarations: [{ key: 'full-analysis', kind: 'failure-analysis-markdown', path: '/session/full-analysis.md' }],
+  };
+  const analysisHistory = [{ ...analysisWithFile, revision: 1,
+    artifacts: [{ ...analysisWithFile.artifacts[0], url: '/api/analysis/obsolete-markdown' }] }, analysisWithFile];
+  const analysisActions = vm.runInContext(`failureAnalysisReportLinks(${JSON.stringify(analysisHistory)})`, context);
+  assert.match(analysisActions, /查看完整分析/);
+  assert.match(analysisActions, /artifact=%2Fapi%2Fanalysis%2Flatest-markdown/);
+  assert.doesNotMatch(analysisActions, /obsolete-markdown/);
+  assert.equal((analysisActions.match(/class="button primary small analysis-report-open"/g) || []).length, 1);
+  const highlightedSummary = vm.runInContext(`businessSummaryTimeline(
+    {id:'summary-task',name:'Cloud recording regression',status:'waiting_review'},
+    ${JSON.stringify([...summaryReports.filter(report => report.id !== 'analysis-report'), analysisWithFile])},[],[],[])`, context);
+  assert.match(highlightedSummary.split('</header>')[0], /analysis-report-open/);
+  assert.ok(highlightedSummary.indexOf('analysis-report-open') < highlightedSummary.indexOf('business-regressions'));
+  const analysisCard = vm.runInContext(`skillReportList([${JSON.stringify(analysisWithFile)}])`, context);
+  assert.ok(analysisCard.indexOf('analysis-report-open') < analysisCard.indexOf('business-report-summary'));
+  assert.equal((analysisCard.match(/artifact=%2Fapi%2Fanalysis%2Flatest-markdown/g) || []).length, 1);
+  const summaryWithAnalysis = { reportKey:'workflow:summary',reportType:'workflow-progress',status:'partial',
+    title:'Final summary',summary:'Final result',relatedReportKeys:[analysisWithFile.reportKey],metrics:[],sections:[] };
+  const groupedAnalysis = vm.runInContext(`businessReportPage(${JSON.stringify([summaryWithAnalysis, analysisWithFile])},[])`, context);
+  assert.match(groupedAnalysis.split('class="report-section report-related"')[0], /analysis-report-open/);
+  const unavailableAnalysis = vm.runInContext(`failureAnalysisReportLinks([{reportKey:'pending-analysis',artifacts:[],
+    registeredArtifacts:[{kind:'failure-analysis-markdown',key:'analysis',fileName:'pending.md',available:false,url:'/unavailable'}]}])`, context);
+  assert.doesNotMatch(unavailableAnalysis, /<a /);
+  assert.equal(vm.runInContext('failureAnalysisReportLinks([])', context), '');
+
+  const htmlAnalysis = { ...analysisWithFile, reportKey: 'analysis:html',
+    artifacts: [{ key: 'full-analysis', kind: 'failure-analysis-html', fileName: 'failure_analysis.html',
+      bytes: 4096, url: '/api/analysis/latest-html' }],
+    artifactDeclarations: [{ key: 'full-analysis', kind: 'failure-analysis-html', path: '/session/failure_analysis.html' }],
+  };
+  const mixedAnalyses = vm.runInContext(`failureAnalysisReportLinks(${JSON.stringify([htmlAnalysis, analysisWithFile])})`, context);
+  assert.equal((mixedAnalyses.match(/class="button primary small analysis-report-open"/g) || []).length, 2);
+  assert.match(mixedAnalyses, /artifact=%2Fapi%2Fanalysis%2Flatest-html/);
+  const htmlAnalysisCard = vm.runInContext(`skillReportList([${JSON.stringify(htmlAnalysis)}])`, context);
+  assert.equal((htmlAnalysisCard.match(/artifact=%2Fapi%2Fanalysis%2Flatest-html/g) || []).length, 1);
+  assert.ok(htmlAnalysisCard.indexOf('analysis-report-open') < htmlAnalysisCard.indexOf('business-report-summary'));
+  const registeredAnalysis = vm.runInContext(`reportsWithRegisteredArtifacts(
+    [{reportKey:'analysis:pending',executionEvidence:{externalAttemptId:'external-analysis'}}],
+    [{id:'external-analysis',artifactDeclarations:[{key:'analysis',kind:'failure-analysis-html',path:'/session/analysis.html'}]}])`, context);
+  assert.equal(registeredAnalysis[0].registeredArtifacts[0].kind, 'failure-analysis-html');
+  const genericAnalysisLinks = vm.runInContext(`reportArtifactLinks(${JSON.stringify(htmlAnalysis.artifacts)})`, context);
+  assert.match(genericAnalysisLinks, /artifact=%2Fapi%2Fanalysis%2Flatest-html/);
+  assert.match(genericAnalysisLinks, />HTML<\/span>/);
+
   const generalTaskReport = {
     id: 'implementation-report', reportKey: 'implementation:summary', revision: 1,
     skillId: 'clean-code', reportType: 'implementation-result',
@@ -2668,6 +2852,63 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     .filter((request) => request.url === '/api/sessions/start' && request.method === 'POST').at(-1);
   assert.equal(createdTaskRequest.body.id, createdTask.id);
   assert.ok(createdTaskRequest.headers['Idempotency-Key']);
+
+  const recoverableTask = {
+    id: 'recover-card-task', name: 'Interrupted workflow', objective: 'Finish the existing workflow',
+    status: 'stopped', enabled: true, createdAt: '2026-08-03T03:00:00.000Z',
+    persistentSessionKey: 'single:recover-card-task',
+  };
+  vm.runInContext(`state.dashboard.sessions.push(${JSON.stringify(recoverableTask)});
+    state.releaseCycleTasks = [${JSON.stringify({ ...recoverableTask, releaseCycleId: 'recovery-cycle' })}];`, context);
+  const recoveryCard = vm.runInContext("taskCard(findTask('recover-card-task'), 'grid')", context);
+  assert.match(recoveryCard, /data-action="recover-task"/);
+  assert.match(recoveryCard, /class="card-hit" data-action="open-task"/);
+  let finishRecovery;
+  responseOverrides.set('POST /api/sessions/recover-card-task/run', {
+    status: 202, payload: new Promise(resolve => { finishRecovery = resolve; }),
+  });
+  const recoveryAction = { dataset: { action: 'recover-task', id: recoverableTask.id } };
+  const recoveryClick = { target: { closest: selector => selector === '[data-action]' ? recoveryAction : null } };
+  const firstRecovery = documentListeners.get('click')(recoveryClick);
+  await new Promise(resolve => setImmediate(resolve));
+  const duplicateRecovery = documentListeners.get('click')(recoveryClick);
+  await new Promise(resolve => setImmediate(resolve));
+  const recoveryRequests = requestDetails.filter(request => request.url === '/api/sessions/recover-card-task/run');
+  assert.equal(recoveryRequests.length, 1);
+  assert.equal(recoveryRequests[0].method, 'POST');
+  assert.equal(recoveryRequests[0].body.input, '');
+  assert.match(recoveryRequests[0].body.idempotencyKey, /^web-run-/);
+  assert.match(vm.runInContext("taskCard(findTask('recover-card-task'))", context), /data-action="recover-task"[^>]*disabled/);
+  finishRecovery({ ...recoverableTask, status: 'queued' });
+  await Promise.all([firstRecovery, duplicateRecovery]);
+  assert.equal(vm.runInContext("findTask('recover-card-task').status", context), 'queued');
+  assert.equal(vm.runInContext('state.releaseCycleTasks[0].status', context), 'queued');
+  assert.equal(vm.runInContext('state.releaseCycleTasks[0].releaseCycleId', context), 'recovery-cycle');
+  assert.equal(vm.runInContext("findTask('recover-card-task').persistentSessionKey", context), recoverableTask.persistentSessionKey);
+  assert.equal(vm.runInContext('openedTaskDetailId', context), recoverableTask.id);
+  assert.equal(element('#toastMessage').textContent, '任务已排队');
+
+  const failedRecoveryTask = { ...recoverableTask, id: 'recover-card-failure' };
+  vm.runInContext(`state.dashboard.sessions.push(${JSON.stringify(failedRecoveryTask)})`, context);
+  responseOverrides.set('POST /api/sessions/recover-card-failure/run', {
+    status: 503, payload: { error: 'Worker unavailable' },
+  });
+  await vm.runInContext("recoverTask('recover-card-failure')", context);
+  assert.equal(element('#toastMessage').textContent, 'Worker unavailable');
+  assert.equal(vm.runInContext("findTask('recover-card-failure').status", context), 'stopped');
+  assert.doesNotMatch(vm.runInContext("taskCard(findTask('recover-card-failure'))", context), /data-action="recover-task"[^>]*disabled/);
+  responseOverrides.set('POST /api/sessions/recover-card-failure/run', {
+    status: 202, payload: { ...failedRecoveryTask, status: 'queued' },
+  });
+  await vm.runInContext("recoverTask('recover-card-failure')", context);
+  assert.equal(vm.runInContext("findTask('recover-card-failure').status", context), 'queued');
+  const requestsBeforeUnavailableRecovery = requestDetails.length;
+  for (const [id, status, enabled] of [['recover-disabled', 'stopped', false],
+    ['recover-active', 'running', true], ['recover-completed', 'completed', true]]) {
+    vm.runInContext(`state.dashboard.sessions.push(${JSON.stringify({ ...recoverableTask, id, status, enabled })})`, context);
+    await vm.runInContext(`recoverTask(${JSON.stringify(id)})`, context);
+  }
+  assert.equal(requestDetails.length, requestsBeforeUnavailableRecovery);
 
   assert.match(APP_SOURCE, /savedTask\s*=\s*await api\('\/api\/sessions\/start'/);
   assert.match(APP_SOURCE, /function attemptOutputWebSocketUrl[\s\S]*\/live\?offset=/);

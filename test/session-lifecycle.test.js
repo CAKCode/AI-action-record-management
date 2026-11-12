@@ -103,6 +103,8 @@ fs.writeFileSync(fakeBridgeRunner, [
   'report_runtime_cwd = "RUNTIME_CWD_UNREPORTED" not in message',
   'if "IGNORE_TERM" in message:',
   '    signal.signal(signal.SIGTERM, lambda *_: None)',
+  'if "IGNORE_INT" in message:',
+  '    signal.signal(signal.SIGINT, lambda *_: None)',
   'if "EXIT_ZERO_ON_INTERRUPT" in message:',
   '    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))',
   'snapshot_path = next(line.split(": ", 1)[1] for line in message.splitlines() if line.startswith("Skill snapshot: "))',
@@ -3243,4 +3245,82 @@ test('removed Agent APIs and model configuration remain unavailable', async () =
   assert.ok(sessions.payload.every((session) => !('model' in session) && !('agentId' in session)));
   const health = await request('/api/health');
   assert.equal('defaultModel' in health.payload.runtime, false);
+});
+
+test('cycle DELETE automatically stops an active Turn and removes its Tasks and artifacts', async () => {
+  const cycleId = 'active-cycle-cascade';
+  const taskId = 'active-cycle-owned-task';
+  const created = await request('/api/release-cycles', { method: 'POST', body: {
+    id: cycleId, name: 'Active cycle cascade fixture', releaseKey: cycleId,
+    taskTemplate: { name: 'Cycle execution', objective: 'IGNORE_INT IGNORE_TERM SLOW_TASK',
+      workingDir: projectDir, workspaceMode: 'shared', autoResume: false, maxRetries: 0 },
+  } });
+  assert.equal(created.response.status, 201);
+  const started = await request(`/api/release-cycles/${cycleId}/tasks`, { method: 'POST',
+    headers: { 'Idempotency-Key': 'active-cycle-first' }, body: { taskId } });
+  assert.equal(started.response.status, 202);
+  const running = await waitFor(async () => {
+    const task = (await request(`/api/sessions/${taskId}`)).payload;
+    return task.status === 'running' && task.currentPid ? task : null;
+  });
+  const pid = running.currentPid;
+  const artifact = path.join(dataDir, 'sessions', taskId, 'skill-report-artifacts', 'report.mp4');
+  fs.mkdirSync(path.dirname(artifact), { recursive: true }); fs.writeFileSync(artifact, 'owned video');
+  const unrelated = await request('/api/sessions', { method: 'POST', body: {
+    id: 'cycle-unrelated-control', name: 'Keep unrelated', objective: 'Unrelated fixture', workingDir: projectDir,
+  } });
+  assert.equal(unrelated.response.status, 201);
+  const accepted = await request(`/api/release-cycles/${cycleId}`, { method: 'DELETE', headers: {
+    'Idempotency-Key': 'active-cycle-delete', 'X-Release-Cycle-Created-At': created.payload.createdAt,
+  } });
+  assert.equal(accepted.response.status, 202);
+  assert.equal(accepted.payload.deleted, false);
+  let removedBeforeExit = false;
+  const progress = await waitFor(async () => {
+    if (!fs.existsSync(artifact) && processIsRunning(pid)) removedBeforeExit = true;
+    const result = await request(`/api/release-cycle-deletions/${accepted.payload.deletionId}`);
+    return result.payload.deleted ? result.payload : null;
+  }, 15000);
+  assert.equal(removedBeforeExit, false);
+  assert.equal(progress.deletedTasks, 1);
+  assert.equal(processIsRunning(pid), false);
+  assert.equal(fs.existsSync(path.join(dataDir, 'sessions', taskId)), false);
+  assert.equal((await request(`/api/sessions/${taskId}`)).response.status, 404);
+  assert.equal((await request(`/api/release-cycles/${cycleId}`)).response.status, 404);
+  assert.equal((await request('/api/sessions/cycle-unrelated-control')).response.status, 200);
+  const replay = await request(`/api/release-cycles/${cycleId}`, { method: 'DELETE', headers: {
+    'Idempotency-Key': 'active-cycle-delete', 'X-Release-Cycle-Created-At': created.payload.createdAt,
+  } });
+  assert.equal(replay.response.status, 200);
+  assert.deepEqual(replay.payload, progress);
+});
+
+test('cycle close preserves a running Task and rejects only new cycle Task creation', async () => {
+  const cycleId = 'close-cycle-running';
+  const taskId = 'close-cycle-running-task';
+  await request('/api/release-cycles', { method: 'POST', body: {
+    id: cycleId, name: 'Close preserves execution', releaseKey: cycleId,
+    taskTemplate: { name: 'Existing execution', objective: 'SLOW_TASK', workingDir: projectDir,
+      workspaceMode: 'shared', autoResume: false, maxRetries: 0 },
+    schedule: { cron: '0 23 * * *', timezone: 'Asia/Shanghai' },
+  } });
+  await request(`/api/release-cycles/${cycleId}/tasks`, { method: 'POST', body: { taskId },
+    headers: { 'Idempotency-Key': 'close-cycle-first' } });
+  const running = await waitFor(async () => {
+    const task = (await request(`/api/sessions/${taskId}`)).payload;
+    return task.status === 'running' && task.currentPid ? task : null;
+  });
+  const artifact = path.join(dataDir, 'sessions', taskId, 'retained-report.html');
+  fs.writeFileSync(artifact, 'keep report');
+  const closed = await request(`/api/release-cycles/${cycleId}/close`, { method: 'POST' });
+  assert.equal(closed.response.status, 200);
+  assert.equal(closed.payload.status, 'closed');
+  assert(closed.payload.schedules.every(schedule => !schedule.enabled));
+  assert.equal(processIsRunning(running.currentPid), true);
+  assert.equal((await request(`/api/sessions/${taskId}`)).payload.status, 'running');
+  assert.equal(fs.readFileSync(artifact, 'utf8'), 'keep report');
+  assert.equal((await request(`/api/release-cycles/${cycleId}/tasks`, { method: 'POST',
+    headers: { 'Idempotency-Key': 'closed-cycle-must-not-create' }, body: {} })).response.status, 409);
+  await request(`/api/sessions/${taskId}/stop`, { method: 'POST', body: {} });
+  await waitFor(async () => (await request(`/api/sessions/${taskId}`)).payload.status === 'stopped');
 });

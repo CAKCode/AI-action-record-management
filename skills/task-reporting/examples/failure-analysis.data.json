@@ -1,0 +1,35 @@
+{
+  "title": "示例：失败分析",
+  "status": "partial",
+  "summary": "已分析 5 项问题：1 项确认问题，4 项待补充证据。",
+  "metrics": {
+    "analyzed": 5,
+    "confirmed": 1,
+    "unresolved": 4
+  },
+  "rows": [
+    {
+      "case": "服务持续返回 503",
+      "classification": "确认问题",
+      "evidence": "相同输入连续两轮返回 503，预期为 200。",
+      "action": "将复现输入和两轮日志交由业务负责人核对。"
+    }
+  ],
+  "evidence": [
+    {
+      "label": "日志引用",
+      "value": "task/demo/logs/example.log",
+      "format": "code"
+    }
+  ],
+  "executionEvidence": {
+    "commandExecutionId": "execution-example-producing-analysis"
+  },
+  "artifacts": [
+    {
+      "key": "full-analysis",
+      "kind": "failure-analysis-html",
+      "path": "/absolute/task/analysis/failure_analysis.html"
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "title": "示例：组件部署",
+  "status": "succeeded",
+  "summary": "2 个目标已部署指定版本并完成检查。",
+  "metrics": {
+    "targets": 2,
+    "succeeded": 2,
+    "failed": 0,
+    "duration": "60 s"
+  },
+  "rows": [
+    {
+      "target": "example-host-a",
+      "component": "example-service",
+      "version": "example-v1",
+      "outcome": "succeeded"
+    },
+    {
+      "target": "example-host-b",
+      "component": "example-service",
+      "version": "example-v1",
+      "outcome": "succeeded"
+    }
+  ],
+  "context": [
+    {
+      "label": "开始时间",
+      "value": "2026-01-01T09:00:00Z",
+      "format": "datetime"
+    },
+    {
+      "label": "结束时间",
+      "value": "2026-01-01T09:01:00Z",
+      "format": "datetime"
+    }
+  ],
+  "evidence": [
+    {
+      "label": "版本检查",
+      "value": "两个目标均与本轮指定版本一致。"
+    }
+  ]
+}

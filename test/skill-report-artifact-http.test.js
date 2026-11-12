@@ -69,6 +69,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
   const pairedMp4ResourceId = 'report-resource-paired-mp4-head';
   const imageResourceId = 'report-resource-image-head';
   const markdownArtifactId = 'failure-analysis-artifact-head';
+  const analysisHtmlArtifactId = 'failure-analysis-html-head';
   const externalAttemptId = 'external-artifact-head';
   const resourceApiPath = `/api/sessions/${taskId}/skill-reports/${reportId}`
     + `/artifacts/${artifactId}/resources/${resourceId}`;
@@ -145,6 +146,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
   const pairedPlaylist = `#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:1,\n${playlistSegmentResourceApiPath}\n#EXT-X-ENDLIST\n`;
   const media = Buffer.from('<!doctype html><style>body{color:white}</style><pre>0123456789</pre>', 'utf8');
   const markdown = '# Failure analysis\n\n- BUG: 1\n';
+  const analysisHtml = '<!doctype html><html lang="zh-CN"><head><title>Analysis</title><style>body{color:#123}</style></head><body><h1>失败分析</h1><details><summary>证据</summary>Expected / actual</details></body></html>';
   const fakeFfmpegPath = path.join(root, 'fake-ffmpeg');
   const fakeFfmpegCalls = path.join(root, 'fake-ffmpeg-calls.txt');
   fs.writeFileSync(fakeFfmpegPath, [
@@ -175,6 +177,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     `const pairedMp4ResourceId = ${JSON.stringify(pairedMp4ResourceId)};`,
     `const imageResourceId = ${JSON.stringify(imageResourceId)};`,
     `const markdownArtifactId = ${JSON.stringify(markdownArtifactId)};`,
+    `const analysisHtmlArtifactId = ${JSON.stringify(analysisHtmlArtifactId)};`,
     `const externalAttemptId = ${JSON.stringify(externalAttemptId)};`,
     `const html = ${JSON.stringify(html)};`,
     `const registeredHtml = ${JSON.stringify(registeredHtml)};`,
@@ -194,9 +197,11 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     `const pairedPlaylist = ${JSON.stringify(pairedPlaylist)};`,
     `const media = Buffer.from(${JSON.stringify(media.toString('base64'))}, 'base64');`,
     `const markdown = ${JSON.stringify(markdown)};`,
+    `const analysisHtml = ${JSON.stringify(analysisHtml)};`,
     "store.saveSession(taskId, { name: taskId, objective: 'HTTP artifact contract.', workingDir: process.env.CODEX_TASK_WORKSPACE_ROOTS });",
     "const registeredTaskDir = path.join(process.env.CODEX_TASK_WORKSPACE_ROOTS, 'task');",
     "const registeredPath = path.join(registeredTaskDir, 'running.html');",
+    "const registeredAnalysisPath = path.join(registeredTaskDir, 'analysis.html');",
     "const missingPath = path.join(registeredTaskDir, 'missing.html');",
     "const emptyPath = path.join(registeredTaskDir, 'empty.html');",
     "const registeredAssets = path.join(registeredTaskDir, 'assets');",
@@ -208,6 +213,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     "fs.mkdirSync(registeredLogs, { recursive: true, mode: 0o700 });",
     "fs.mkdirSync(registeredVideos, { recursive: true, mode: 0o700 });",
     "fs.writeFileSync(registeredPath, registeredHtml, { mode: 0o600 });",
+    "fs.writeFileSync(registeredAnalysisPath, analysisHtml, { mode: 0o600 });",
     "fs.writeFileSync(emptyPath, '', { mode: 0o600 });",
     "fs.writeFileSync(path.join(registeredAssets, 'style.css'), '#running { color: rgb(1, 2, 3); }', { mode: 0o600 });",
     "fs.writeFileSync(path.join(registeredAssets, 'app.js'), 'window.__runningArtifactReady = true;', { mode: 0o600 });",
@@ -226,6 +232,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     "fs.mkdirSync(artifactDir, { recursive: true, mode: 0o700 });",
     "const artifactPath = path.join(artifactDir, `${artifactId}.html`);",
     "const markdownPath = path.join(artifactDir, `${markdownArtifactId}.md`);",
+    "const analysisHtmlPath = path.join(artifactDir, `${analysisHtmlArtifactId}.html`);",
     "const resourceDir = path.join(artifactDir, `${artifactId}.resources`);",
     "fs.mkdirSync(resourceDir, { recursive: true, mode: 0o700 });",
     "const resourcePath = path.join(resourceDir, `${resourceId}.html`);",
@@ -236,6 +243,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     "const imageResourcePath = path.join(resourceDir, `${imageResourceId}.png`);",
     "fs.writeFileSync(artifactPath, html, { mode: 0o600 });",
     "fs.writeFileSync(markdownPath, markdown, { mode: 0o600 });",
+    "fs.writeFileSync(analysisHtmlPath, analysisHtml, { mode: 0o600 });",
     "fs.writeFileSync(resourcePath, media, { mode: 0o600 });",
     "fs.writeFileSync(playlistResourcePath, managedPlaylist, { mode: 0o600 });",
     "fs.writeFileSync(playlistSegmentResourcePath, managedSegment, { mode: 0o600 });",
@@ -244,6 +252,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     "fs.writeFileSync(imageResourcePath, imageResource, { mode: 0o600 });",
     "const hash = crypto.createHash('sha256').update(html).digest('hex');",
     "const markdownHash = crypto.createHash('sha256').update(markdown).digest('hex');",
+    "const analysisHtmlHash = crypto.createHash('sha256').update(analysisHtml).digest('hex');",
     "const mediaHash = crypto.createHash('sha256').update(media).digest('hex');",
     "const playlistResourceHash = crypto.createHash('sha256').update(managedPlaylist).digest('hex');",
     "const playlistSegmentResourceHash = crypto.createHash('sha256').update(managedSegment).digest('hex');",
@@ -253,13 +262,15 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     "const now = new Date().toISOString();",
     "const db = getDatabase();",
     "db.prepare(`INSERT INTO external_attempts(id, task_id, chain_key, generation, label, status, log_path, meta_path, artifact_declarations_json, started_at, created_at, updated_at) VALUES (?, ?, ?, 1, ?, 'running', ?, ?, ?, ?, ?, ?)` )",
-    "  .run(externalAttemptId, taskId, 'artifact-http', 'Running report', path.join(registeredTaskDir, 'run.log'), metaPath, JSON.stringify([{ key: 'normal', kind: 'pytest-html', path: registeredPath }, { key: 'missing', kind: 'pytest-html', path: missingPath }, { key: 'empty', kind: 'pytest-html', path: emptyPath }]), now, now, now);",
+    "  .run(externalAttemptId, taskId, 'artifact-http', 'Running report', path.join(registeredTaskDir, 'run.log'), metaPath, JSON.stringify([{ key: 'normal', kind: 'pytest-html', path: registeredPath }, { key: 'missing', kind: 'pytest-html', path: missingPath }, { key: 'empty', kind: 'pytest-html', path: emptyPath }, { key: 'analysis', kind: 'failure-analysis-html', path: registeredAnalysisPath }]), now, now, now);",
     "db.prepare(`INSERT INTO skill_reports(id, task_id, turn_id, attempt_id, report_key, revision, report_hash, schema_version, skill_id, skill_version, skill_content_hash, report_type, status, title, summary, payload_json, published_at) VALUES (?, ?, NULL, NULL, ?, 1, ?, 1, ?, 1, ?, ?, ?, ?, ?, ?, ?)`)",
     "  .run(reportId, taskId, 'head', hash, 'report-skill', hash, 'test-result', 'succeeded', 'Artifact head', 'Artifact HTTP contract.', JSON.stringify({ executionEvidence: { externalAttemptId }, artifacts: [{ key: 'normal', kind: 'pytest-html', path: registeredPath }] }), now);",
     "db.prepare(`INSERT INTO skill_report_artifacts(id, task_id, report_id, artifact_key, label, kind, file_name, media_type, managed_path, bytes, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)",
     "  .run(artifactId, taskId, reportId, 'pytest-html', 'Pytest HTML report', 'pytest-html', 'artifact.html', 'text/html; charset=utf-8', artifactPath, Buffer.byteLength(html), hash, now);",
     "db.prepare(`INSERT INTO skill_report_artifacts(id, task_id, report_id, artifact_key, label, kind, file_name, media_type, managed_path, bytes, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)",
     "  .run(markdownArtifactId, taskId, reportId, 'failure-analysis-markdown', 'Failure analysis report', 'failure-analysis-markdown', 'failure-analysis.md', 'text/markdown; charset=utf-8', markdownPath, Buffer.byteLength(markdown), markdownHash, now);",
+    "db.prepare(`INSERT INTO skill_report_artifacts(id, task_id, report_id, artifact_key, label, kind, file_name, media_type, managed_path, bytes, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)",
+    "  .run(analysisHtmlArtifactId, taskId, reportId, 'failure-analysis-html', 'Failure analysis report', 'failure-analysis-html', 'failure_analysis.html', 'text/html; charset=utf-8', analysisHtmlPath, Buffer.byteLength(analysisHtml), analysisHtmlHash, now);",
     "db.prepare(`INSERT INTO skill_report_artifact_resources(id, task_id, report_id, artifact_id, resource_key, file_name, media_type, managed_path, bytes, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)",
     "  .run(resourceId, taskId, reportId, artifactId, 'logs/sample.html', 'sample.html', 'text/html; charset=utf-8', resourcePath, media.length, mediaHash, now);",
     "db.prepare(`INSERT INTO skill_report_artifact_resources(id, task_id, report_id, artifact_id, resource_key, file_name, media_type, managed_path, bytes, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)",
@@ -304,8 +315,10 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
   });
   const artifactUrl = `http://127.0.0.1:${port}/api/sessions/${taskId}/skill-reports/${reportId}/artifacts/${artifactId}`;
   const markdownUrl = `http://127.0.0.1:${port}/api/sessions/${taskId}/skill-reports/${reportId}/artifacts/${markdownArtifactId}`;
+  const analysisHtmlUrl = `http://127.0.0.1:${port}/api/sessions/${taskId}/skill-reports/${reportId}/artifacts/${analysisHtmlArtifactId}`;
   const resourceUrl = `${artifactUrl}/resources/${resourceId}`;
   const registeredUrl = `http://127.0.0.1:${port}/api/sessions/${taskId}/external-attempts/${externalAttemptId}/artifacts/normal`;
+  const registeredAnalysisUrl = `http://127.0.0.1:${port}/api/sessions/${taskId}/external-attempts/${externalAttemptId}/artifacts/analysis`;
   const registeredFlvUrl = `${registeredUrl}/resources/${encodeURIComponent('../videos/sample.flv')}`;
     const registeredStyleUrl = `${registeredUrl}/resources/assets/style.css`;
     const registeredScriptUrl = `${registeredUrl}/resources/assets/app.js`;
@@ -345,6 +358,7 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     assert.equal(head.headers.get('x-content-type-options'), 'nosniff');
     const contentSecurityPolicy = head.headers.get('content-security-policy');
     assert.match(contentSecurityPolicy, /sandbox allow-scripts/);
+    assert.doesNotMatch(contentSecurityPolicy, /allow-popups/);
     assert.match(contentSecurityPolicy, /default-src 'none'/);
     assert.match(contentSecurityPolicy, /frame-src http: https: data:/);
     assert.doesNotMatch(contentSecurityPolicy, /allow-same-origin/);
@@ -617,6 +631,30 @@ test('managed pytest HTML artifacts support HEAD without streaming a response bo
     const markdownGet = await authenticatedFetch(markdownUrl);
     assert.equal(markdownGet.status, 200);
     assert.equal(await markdownGet.text(), markdown);
+
+    const analysisHead = await authenticatedFetch(analysisHtmlUrl, { method: 'HEAD' });
+    assert.equal(analysisHead.status, 200);
+    assert.equal(analysisHead.headers.get('content-type'), 'text/html; charset=utf-8');
+    assert.equal(analysisHead.headers.get('content-disposition'), 'inline; filename="failure_analysis.html"');
+    assert.match(analysisHead.headers.get('content-security-policy'), /sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox;/);
+    const analysisGet = await authenticatedFetch(analysisHtmlUrl);
+    assert.equal(analysisGet.status, 200);
+    const servedAnalysis = await analysisGet.text();
+    assert.match(servedAnalysis, /<h1>失败分析<\/h1>/);
+    assert.match(servedAnalysis, /<details><summary>证据<\/summary>Expected \/ actual<\/details>/);
+    assert.match(servedAnalysis, /<title>failure_analysis\.html<\/title>/);
+    assert.match(servedAnalysis, /data-codex-analysis-navigation/);
+    assert.doesNotMatch(servedAnalysis, /codexTaskMediaViewedAdapter/);
+    assert.equal(analysisHead.headers.get('content-length'), String(Buffer.byteLength(servedAnalysis)));
+    const analysisPreview = await authenticatedFetch(registeredAnalysisUrl);
+    assert.equal(analysisPreview.status, 200);
+    assert.equal(analysisPreview.headers.get('content-type'), 'text/html; charset=utf-8');
+    const previewHtml = await analysisPreview.text();
+    assert.match(previewHtml, /<h1>失败分析<\/h1>/);
+    assert.match(previewHtml, /<title>analysis\.html<\/title>/);
+    const analysisPreviewHead = await authenticatedFetch(registeredAnalysisUrl, { method: 'HEAD' });
+    assert.equal(analysisPreviewHead.status, 200);
+    assert.equal(analysisPreviewHead.headers.get('content-length'), String(Buffer.byteLength(previewHtml)));
 
     assert.equal((await fetch(resourceUrl)).status, 401);
     const resourceHead = await fetch(signedResourceUrl, { method: 'HEAD' });

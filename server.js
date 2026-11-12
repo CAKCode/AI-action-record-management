@@ -26,9 +26,13 @@ const {
   createReleaseCycle,
   createTaskSeriesSchedule,
   closeReleaseCycle,
+  deleteReleaseCycle,
+  normalizeRetainedReleaseCycles,
+  getReleaseCycleDeletion,
   createReleaseCycleTask,
   listReleaseCycleTasks,
   listIdleTaskRuntimes,
+  releaseOrphanTaskRuntimes,
   getTaskRuntimeRelease,
   claimIdleTaskRuntime,
   finishIdleTaskRuntimeRelease,
@@ -44,7 +48,9 @@ const {
   createAndQueueSession,
   queueSessionRun,
   requestSessionStop,
+  prepareSessionStop,
   completeSession,
+  prepareSessionCompletion,
   resetSession,
   restoreCompletedSession,
   listTurns,
@@ -132,6 +138,8 @@ const { gzipHtmlArtifact } = require('./src/report-http-encoding');
 const { pipeResponseStream } = require('./src/response-stream');
 const { createCodexTerminalManager } = require('./src/codex-terminal');
 const { createIdleTaskRuntimeManager } = require('./src/idle-task-runtime');
+const { createReleaseCycleDeletionManager } = require('./src/release-cycle-deletion');
+const { writeTaskApiAuthentication } = require('./src/task-api-auth');
 const { prepareTaskSessionResume } = require('./src/task-session-history');
 const { createInteractiveCliTranscriptStore } = require('./src/interactive-cli-transcript');
 const { resolveBridgeSessionRuntime } = require('./src/bridge-runtime-cleanup');
@@ -237,6 +245,7 @@ if (!LOOPBACK_HOSTS.has(HOST) && (!AUTH_USER || !AUTH_PASSWORD)) {
 }
 
 ensureStorage();
+const taskApiHost = HOST === '0.0.0.0' ? '127.0.0.1' : HOST === '::' ? '::1' : HOST;
 seedExamples();
 storageAudit = createStorageAuditRecorder(appendAuditEventsIdempotent, {
   outbox: createStorageAuditOutbox(),
@@ -639,6 +648,25 @@ function artifactDocumentTitle(html, fileName) {
   return titleElement + html;
 }
 
+function analysisReportNavigation(html) {
+  const script = `<script data-codex-analysis-navigation>
+document.addEventListener('click',function(event){
+  var link=event.target.closest?event.target.closest('a[href]'):null;
+  if(!link||event.defaultPrevented||link.hasAttribute('download'))return;
+  var url;
+  try{url=new URL(link.getAttribute('href'),document.baseURI);}catch{return;}
+  if((url.protocol==='http:'||url.protocol==='https:')&&url.origin!==location.origin){
+    link.target='_blank';
+    link.rel='noopener noreferrer';
+  }
+},true);
+</script>`;
+  const closingBody = /<\/body\s*>/i.exec(html);
+  return closingBody
+    ? html.slice(0, closingBody.index) + script + html.slice(closingBody.index)
+    : html + script;
+}
+
 function inlineKnownPytestPlayerScripts(html) {
   return String(html).replace(
     /<script\b[^>]*\bsrc\s*=\s*(["'])([^"']+)\1[^>]*>\s*<\/script\s*>/gi,
@@ -929,7 +957,8 @@ async function withSignedArtifactResourceUrls(opened, resourceScope, options = {
     'text/javascript; charset=utf-8',
   ]);
   const shouldSignResources = Boolean(
-    AUTH_USER && AUTH_PASSWORD && resourceScope && rewritableMediaTypes.has(opened.mediaType),
+    opened.kind !== 'failure-analysis-html'
+      && AUTH_USER && AUTH_PASSWORD && resourceScope && rewritableMediaTypes.has(opened.mediaType),
   );
   const shouldInjectViewedAdapter = Boolean(
     options.viewedMediaAdapter && opened.mediaType === 'text/html; charset=utf-8',
@@ -958,7 +987,10 @@ async function withSignedArtifactResourceUrls(opened, resourceScope, options = {
   if (shouldSetDocumentTitle) {
     transformedContent = artifactDocumentTitle(transformedContent, opened.fileName);
   }
-  if (opened.mediaType === 'text/html; charset=utf-8') {
+  if (opened.kind === 'failure-analysis-html') {
+    transformedContent = analysisReportNavigation(transformedContent);
+  }
+  if (opened.mediaType === 'text/html; charset=utf-8' && opened.kind !== 'failure-analysis-html') {
     transformedContent = inlineKnownPytestPlayerScripts(transformedContent);
     transformedContent = progressivePytestReportHtml(transformedContent);
     transformedContent = optimizeLegacyPytestVideoViewedObserver(transformedContent);
@@ -1086,7 +1118,10 @@ function writeSkillReportArtifactHeaders(res, opened, options = {}) {
     if (range) headers['Content-Range'] = `bytes ${range.start}-${range.end}/${opened.bytes}`;
   }
   if (opened.mediaType === 'text/html; charset=utf-8') {
-    headers['Content-Security-Policy'] = "sandbox allow-scripts; default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; frame-src http: https: data:; media-src 'self' blob:; connect-src 'self'; worker-src blob:";
+    const sandbox = opened.kind === 'failure-analysis-html'
+      ? 'sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox'
+      : 'sandbox allow-scripts';
+    headers['Content-Security-Policy'] = `${sandbox}; default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; frame-src http: https: data:; media-src 'self' blob:; connect-src 'self'; worker-src blob:`;
   }
   res.writeHead(range ? 206 : 200, headers);
 }
@@ -1261,10 +1296,11 @@ function terminalOperationContext(req, requestContext) {
 }
 
 function acceptsIdempotentReplayDuringMaintenance(req, pathname) {
+  if (req.method === 'POST' && pathname === '/api/release-cycles') return true;
   if (req.method === 'POST' && pathname === '/api/sessions/start') return true;
   if (req.method === 'POST'
     && /^\/api\/sessions\/[^/]+\/(?:run|stop|complete|restore|reset)$/.test(pathname)) return true;
-  return req.method === 'DELETE' && /^\/api\/sessions\/[^/]+$/.test(pathname);
+  return req.method === 'DELETE' && /^\/api\/(?:sessions|release-cycles)\/[^/]+$/.test(pathname);
 }
 
 function secureEqual(left, right) {
@@ -1666,6 +1702,7 @@ const codexTerminalManager = createCodexTerminalManager({
   activeStatuses: ACTIVE_STATUSES,
   transcripts: interactiveCliTranscripts,
   prepareRuntime: prepareTaskSessionResume,
+  beforeConnect: taskId => idleTaskRuntimeManager.beforeConnect(taskId),
   appendWorklog: appendSessionWorklog,
   onError(error) {
     console.error(`[codex-terminal] ${error.stack || error.message}`);
@@ -1674,14 +1711,27 @@ const codexTerminalManager = createCodexTerminalManager({
 
 const idleTaskRuntimeManager = createIdleTaskRuntimeManager({
   list: listIdleTaskRuntimes,
+  sweepOrphans: releaseOrphanTaskRuntimes,
   claim: claimIdleTaskRuntime,
   finish: finishIdleTaskRuntimeRelease,
   getRelease: getTaskRuntimeRelease,
   retain: retainOwnedTaskSessionHistory,
   isInteractive: taskId => codexTerminalManager.isRunning(taskId),
+  onReleased: (lease, result) => codexTerminalManager.forgetReleasedRuntime(lease, result),
   onError(error) { console.error(`[idle-task-runtime] ${error.stack || error.message}`); },
 });
 let idleTaskRuntimeTimer = null;
+const releaseCycleDeletionManager = createReleaseCycleDeletionManager({
+  async terminateInteractive(taskId, expectedCreatedAt) {
+    await codexTerminalManager.terminateForDeletion(taskId, expectedCreatedAt);
+  },
+});
+let releaseCycleDeletionTimer = null;
+
+function sweepReleaseCycleDeletions() {
+  if (shuttingDown) return;
+  releaseCycleDeletionManager.sweep().catch(error => console.error(`[release-cycle-deletion] ${error.stack || error.message}`));
+}
 
 function sweepIdleTaskRuntimes() {
   if (shuttingDown) return;
@@ -2287,7 +2337,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (pathname === '/api/release-cycles' && req.method === 'POST') {
       const body = await readBody(req);
-      json(res, createReleaseCycle(body, requestContext), 201);
+      const { idempotencyKey, ...cycle } = body || {};
+      json(res, createReleaseCycle(cycle, {
+        ...requestContext, idempotencyKey: req.headers['idempotency-key'] || idempotencyKey || '',
+      }), 201);
       return;
     }
     {
@@ -2295,6 +2348,24 @@ const server = http.createServer(async (req, res) => {
       if (params && req.method === 'GET') {
         const cycle = getReleaseCycle(params[0]);
         json(res, cycle || { error: 'Not found' }, cycle ? 200 : 404);
+        return;
+      }
+      if (params && req.method === 'DELETE') {
+        const result = deleteReleaseCycle(params[0], {
+          ...requestContext,
+          idempotencyKey: req.headers['idempotency-key'] || '',
+          expectedCreatedAt: req.headers['x-release-cycle-created-at'] || '',
+        });
+        json(res, result, result.deleted ? 200 : 202);
+        sweepReleaseCycleDeletions();
+        return;
+      }
+    }
+    {
+      const params = routeParams(/^\/api\/release-cycle-deletions\/([^/]+)$/, pathname);
+      if (params && req.method === 'GET') {
+        const progress = getReleaseCycleDeletion(params[0]);
+        json(res, progress || { error: 'Release cycle deletion not found' }, progress ? 200 : 404);
         return;
       }
     }
@@ -2505,12 +2576,16 @@ const server = http.createServer(async (req, res) => {
       const params = routeParams(/^\/api\/sessions\/([^/]+)\/stop$/, pathname);
       if (params && req.method === 'POST') {
         const id = canonicalTaskId(params[0]);
-        await codexTerminalManager.terminateAndWait(id, 'task_stopped');
-        codexTerminalManager.assertTranscriptHealthy(id);
+        const operationContext = terminalOperationContext(req, requestContext);
+        const plan = prepareSessionStop(id, operationContext);
+        if (!plan.replayed) {
+          await codexTerminalManager.terminateAndWait(id, 'task_stopped', plan.taskCreatedAt);
+          codexTerminalManager.assertTranscriptHealthy(id);
+        }
         json(res, {
           ok: requestSessionStop(
             id,
-            terminalOperationContext(req, requestContext),
+            { ...operationContext, ...(!plan.replayed ? { preparedTaskCreatedAt: plan.taskCreatedAt } : {}) },
           ),
         });
         return;
@@ -2520,19 +2595,25 @@ const server = http.createServer(async (req, res) => {
       const params = routeParams(/^\/api\/sessions\/([^/]+)\/complete$/, pathname);
       if (params && req.method === 'POST') {
         const id = canonicalTaskId(params[0]);
-        const session = getSession(id);
-        if (session && ['waiting_review', 'waiting_input'].includes(session.status)
-          && !session.activeExternalAttempts && !session.activeScheduledJobs) {
-          await codexTerminalManager.terminateAndWait(id, 'task_completed');
+        const operationContext = terminalOperationContext(req, requestContext);
+        const completed = await codexTerminalManager.withTaskCompletion(id, async () => {
+          let plan = prepareSessionCompletion(id, operationContext);
+          if (plan.replayed) return plan.session;
+          const completionContext = { ...operationContext, preparedTaskCreatedAt: plan.taskCreatedAt };
+          await codexTerminalManager.terminateAndWait(id, 'task_completed', plan.taskCreatedAt);
+          plan = prepareSessionCompletion(id, completionContext);
+          if (plan.replayed) return plan.session;
           codexTerminalManager.assertTranscriptHealthy(id);
           interactiveCliTranscripts.sealUnfinished(id);
           await interactiveCliTranscripts.verify(id);
-          if (session.workspaceMode === 'session-clone') await sealPendingSessionWorkspace(id);
-        }
-        json(res, completeSession(
-          id,
-          terminalOperationContext(req, requestContext),
-        ));
+          plan = prepareSessionCompletion(id, completionContext);
+          if (plan.replayed) return plan.session;
+          if (plan.session.workspaceMode === 'session-clone') {
+            await sealPendingSessionWorkspace(id, { expectedTaskCreatedAt: plan.taskCreatedAt });
+          }
+          return completeSession(id, completionContext);
+        });
+        json(res, completed);
         return;
       }
     }
@@ -2939,7 +3020,7 @@ const server = http.createServer(async (req, res) => {
             json(res, { error: 'Report artifact not found' }, 404);
             return;
           }
-          const views = artifact.mediaType === 'text/html; charset=utf-8'
+          const views = artifact.kind === 'pytest-html'
             ? listSkillReportArtifactMediaViews(taskId, params[1], params[2])
             : null;
           const playbackAlternatives = views
@@ -2971,7 +3052,7 @@ const server = http.createServer(async (req, res) => {
             json(res, { error: 'Report artifact not found' }, 404);
             return;
           }
-          const views = artifact.mediaType === 'text/html; charset=utf-8'
+          const views = artifact.kind === 'pytest-html'
             ? listSkillReportArtifactMediaViews(taskId, params[1], params[2])
             : null;
           const playbackAlternatives = views
@@ -3126,9 +3207,7 @@ server.on('upgrade', (req, socket, head) => {
         return [name, value ? Number(value) : undefined];
       }));
       codexTerminalWebSocketServer.handleUpgrade(req, socket, head, (ws) => {
-        idleTaskRuntimeManager.beforeConnect(taskId).then(() => {
-          if (ws.readyState === WebSocket.OPEN) return codexTerminalManager.attachWhenReady(taskId, ws, dimensions);
-        }).catch(error => {
+        codexTerminalManager.attachWhenReady(taskId, ws, dimensions).catch(error => {
           sendAttemptOutputControl(ws, { type: 'error', message: error.message || 'Interactive terminal failed' });
           ws.close(Number(error.statusCode) === 503 ? 1013 : 1008, 'Interactive terminal unavailable');
         });
@@ -3203,6 +3282,11 @@ server.on('clientError', (_error, socket) => {
 });
 
 server.listen(PORT, HOST, () => {
+  normalizeRetainedReleaseCycles();
+  writeTaskApiAuthentication({
+    baseUrl: `http://${taskApiHost.includes(':') ? `[${taskApiHost}]` : taskApiHost}:${PORT}`,
+    user: AUTH_USER, password: AUTH_PASSWORD,
+  });
   console.log(`[codex-ops] listening on http://${HOST}:${PORT}`);
   if (webSupervisorStatus().required) {
     webSupervisorWatchTimer = setInterval(() => {
@@ -3219,6 +3303,9 @@ server.listen(PORT, HOST, () => {
   idleTaskRuntimeTimer = setInterval(sweepIdleTaskRuntimes, 30000);
   idleTaskRuntimeTimer.unref();
   sweepIdleTaskRuntimes();
+  releaseCycleDeletionTimer = setInterval(sweepReleaseCycleDeletions, 1000);
+  releaseCycleDeletionTimer.unref();
+  sweepReleaseCycleDeletions();
   if (!getPlatformMaintenance()) storageAudit.retryAll();
   storageAuditRetryTimer = setInterval(() => {
     if (getPlatformMaintenance()) return;
@@ -3300,6 +3387,12 @@ async function shutdown() {
   if (shutdown.started) return;
   shutdown.started = true;
   shuttingDown = true;
+  if (releaseCycleDeletionTimer) clearInterval(releaseCycleDeletionTimer);
+  releaseCycleDeletionTimer = null;
+  const cycleDeletionsStopped = releaseCycleDeletionManager.shutdown().catch(error => {
+    console.error(`[release-cycle-deletion] shutdown failed: ${error.message}`);
+    process.exitCode = 1;
+  });
   if (idleTaskRuntimeTimer) clearInterval(idleTaskRuntimeTimer);
   idleTaskRuntimeTimer = null;
   if (webSupervisorWatchTimer) clearInterval(webSupervisorWatchTimer);
@@ -3311,7 +3404,10 @@ async function shutdown() {
   stopRecoveryCheckpointScheduler();
   for (const client of attemptOutputWebSocketServer.clients) client.terminate();
   attemptOutputWebSocketServer.close();
-  codexTerminalManager.shutdown();
+  const terminalsStopped = codexTerminalManager.shutdown().catch(error => {
+    console.error(`[codex-terminal] shutdown failed: ${error.stack || error.message}`);
+    process.exitCode = 1;
+  });
   codexTerminalWebSocketServer.close();
   const storageOperationInProgress = databaseBackupStatus().inProgress
     || recoveryCheckpointStatus().inProgress;
@@ -3325,6 +3421,8 @@ async function shutdown() {
     console.error(`[codex-ops] worker shutdown failed: ${error.message}`);
   }
   await idleTaskRuntimeManager.shutdown();
+  await cycleDeletionsStopped;
+  await terminalsStopped;
   try {
     await waitForDatabaseBackup();
   } catch (error) {

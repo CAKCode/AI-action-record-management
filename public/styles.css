@@ -398,6 +398,26 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .business-summary-head h3 { margin: 5px 0 0; font-size: var(--detail-font-title); }
 .business-summary-head .report-status, .business-summary-head > .status-badge { align-self: center; }
 .business-summary-head p { grid-column: 1 / -1; margin: 3px 0 0; color: var(--muted); font: var(--detail-font-body)/1.5 var(--font); white-space: pre-wrap; overflow-wrap: anywhere; }
+.failure-analysis-reports { min-width: 0; grid-column: 1 / -1; display: grid; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-left: 3px solid var(--blue); border-radius: var(--radius); background: var(--surface-2); }
+.business-report > .failure-analysis-reports { margin: 12px 20px 16px; }
+.failure-analysis-reports-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+.failure-analysis-reports-heading strong { color: var(--text); font-size: var(--detail-font-body); }
+.failure-analysis-reports-heading span { color: var(--dim); font-size: var(--detail-font-meta); }
+.failure-analysis-report-list { display: grid; gap: 10px; min-width: 0; }
+.failure-analysis-report { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.failure-analysis-report + .failure-analysis-report { border-top: 1px solid var(--line); padding-top: 10px; }
+.failure-analysis-report-meta { display: grid; gap: 5px; min-width: 0; }
+.failure-analysis-report-meta > strong { color: var(--muted); font-size: var(--detail-font-body); overflow-wrap: anywhere; }
+.failure-analysis-report-meta > span { display: flex; flex-wrap: wrap; gap: 5px 10px; min-width: 0; color: var(--dim); }
+.failure-analysis-report-meta code { font: var(--detail-font-meta) var(--mono); overflow-wrap: anywhere; }
+.failure-analysis-report-meta small { font-size: var(--detail-font-meta); }
+.failure-analysis-report-actions { display: flex; flex-shrink: 0; align-items: center; gap: 8px; }
+.analysis-report-open { text-decoration: none; white-space: nowrap; min-height: 36px; }
+@media (max-width: 700px) {
+  .business-report > .failure-analysis-reports { margin-inline: 12px; }
+  .failure-analysis-report { align-items: stretch; flex-direction: column; }
+  .failure-analysis-report-actions .analysis-report-open { flex: 1; justify-content: center; }
+}
 .final-result-statistics { min-width: 0; grid-column: 1 / -1; }
 .final-result-row { display: grid; grid-template-columns: minmax(130px, 1.1fr) repeat(3, minmax(0, 1fr)); align-items: center; gap: 8px 20px; padding: 12px 0; }
 .final-result-row + .final-result-row { border-top: 1px solid var(--line-soft); }
@@ -859,6 +879,14 @@ code.report-value { font: 0.625rem var(--mono); }
 .check-field input { width: 16px; height: 16px; accent-color: var(--green); }
 .form-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 8px; }
 .form-actions > div { display: flex; gap: 8px; }
+.cycle-form-note { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: .75rem; line-height: 1.65; }
+.cycle-schedule-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; min-width: 0; margin: 0; padding: 16px; border: 1px solid var(--line-soft); border-radius: 6px; }
+.cycle-schedule-fields.full, .cycle-form-advanced.full { grid-column: 1 / -1; }
+.cycle-form-advanced { min-width: 0; padding-top: 4px; }
+.cycle-form-advanced > summary { color: var(--muted); cursor: pointer; font-size: .75rem; }
+.cycle-form-advanced > .form-grid { margin-top: 12px; }
+#releaseCycleForm .field select { width: 100%; min-height: 42px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: var(--surface); }
+#view-release-cycles > .section-toolbar .toolbar-actions { flex-wrap: wrap; }
 .attribution-command { display: grid; gap: 6px; min-width: 0; }
 .attribution-command span { color: var(--muted); font-size: 0.6875rem; font-weight: 700; }
 .attribution-command code { max-height: 100px; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 5px; background: #0b0f10; color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -1187,6 +1215,7 @@ code.report-value { font: 0.625rem var(--mono); }
   .segmented button { flex: 1 0 auto; }
   .filter-bar { grid-template-columns: 1fr; }
   .form-grid { grid-template-columns: 1fr; }
+  .cycle-schedule-fields { grid-template-columns: minmax(0, 1fr); }
   .field.full, .form-actions.full { grid-column: auto; }
   .modal { padding: 8px; }
   .modal { backdrop-filter: none; }
@@ -1302,6 +1331,7 @@ code.report-value { font: 0.625rem var(--mono); }
 .release-cycle-meta dt { color: var(--text-dim, #a6adc8); font-size: .75rem; }
 .release-cycle-meta dd { margin: .15rem 0 0; overflow-wrap: anywhere; }
 .release-cycle-actions { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: auto; }
+#releaseCycleTaskSection .toolbar-actions { flex-wrap: wrap; }
 
 /* Auth overlay */
 .auth-overlay {
