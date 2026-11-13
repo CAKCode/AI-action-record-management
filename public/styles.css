@@ -1512,7 +1512,10 @@ code.report-value { font: 0.625rem var(--mono); }
 .overview-business-entry-list {
   display: flex;
   gap: 16px;
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
+  flex-wrap: nowrap;
   padding: 2px 2px 12px;
   overflow-x: auto;
   overflow-y: hidden;
@@ -1678,6 +1681,7 @@ body {
 #view-overview .workspace-section .section-head h2 { font-size: 1.4rem; }
 
 #view-overview .overview-task-grid {
+  min-width: 0;
   gap: 0;
   overflow: visible;
 }
