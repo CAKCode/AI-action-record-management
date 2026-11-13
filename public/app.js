@@ -4173,7 +4173,7 @@ function overviewTaskGroupsHtml(tasks) {
     if (!businesses.has(business)) businesses.set(business, []);
     businesses.get(business).push(task);
   }
-  return `<div class="overview-business-entry-list">${[...businesses.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([business, members]) => {
+  return `<div class="overview-business-entry-list${businesses.size < 3 ? ' no-scroll' : ''}">${[...businesses.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([business, members]) => {
     const current = members.filter((task) => task.status !== 'completed');
     const waiting = current.filter((task) => REVIEW_STATUSES.includes(task.status)).length;
     const failed = current.filter((task) => ['failed', 'interrupted', 'stopped'].includes(task.status) || task.recoveryState === 'recoverable').length;

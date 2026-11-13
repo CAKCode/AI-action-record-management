@@ -1527,6 +1527,13 @@ code.report-value { font: 0.625rem var(--mono); }
 .overview-business-entry-list::-webkit-scrollbar { height: 8px; }
 .overview-business-entry-list::-webkit-scrollbar-track { border-radius: 999px; background: rgba(36, 42, 44, .7); }
 .overview-business-entry-list::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(120, 169, 229, .55); }
+.overview-business-entry-list:not(:has(> .overview-business-entry:nth-child(3))) {
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+.overview-business-entry-list:not(:has(> .overview-business-entry:nth-child(3)))::-webkit-scrollbar { display: none; }
+.overview-business-entry-list.no-scroll { overflow-x: hidden; scrollbar-width: none; }
+.overview-business-entry-list.no-scroll::-webkit-scrollbar { display: none; }
 .overview-business-entry-list .overview-business-entry {
   flex: 1 1 300px;
   min-width: 300px;
