@@ -5232,8 +5232,27 @@ function loadRuntimeView() {
   }
 }
 
-function setView(view) {
+function routeHash() {
+  if (state.view === 'business' && state.businessKey) return `#/business/${encodeURIComponent(state.businessKey)}`;
+  return `#/${encodeURIComponent(state.view)}`;
+}
+
+function applyRouteFromLocation() {
+  const route = String(window.location?.hash || '').replace(/^#\/?/, '');
+  const [section, encodedBusiness] = route.split('/');
+  if (section === 'business' && encodedBusiness) {
+    state.businessKey = decodeURIComponent(encodedBusiness);
+    setView('business', { updateRoute: false });
+    return;
+  }
+  const views = new Set(['overview', 'tasks', 'release-cycles', 'skills', 'runtime', 'audit']);
+  setView(views.has(section) ? section : 'overview', { updateRoute: false });
+}
+
+function setView(view, options = {}) {
   state.view = view;
+  if (view !== 'business') state.businessKey = '';
+  if (options.updateRoute !== false) window.history?.pushState?.({}, '', routeHash());
   $('#topNewTaskBtn').classList.toggle('hidden', view === 'release-cycles');
   $$('.view').forEach((element) => element.classList.toggle('active', element.id === `view-${view}`));
   $$('.nav-item').forEach((element) => element.classList.toggle('active', element.dataset.view === view));
@@ -6406,7 +6425,10 @@ window.addEventListener('pagehide', () => {
   if (state.protectionController) state.protectionController.abort();
 }, { once: true });
 
+window.addEventListener('popstate', () => applyRouteFromLocation());
+
 async function initialize() {
+  applyRouteFromLocation();
   applyFontSize();
   applyTranslations();
   try {
