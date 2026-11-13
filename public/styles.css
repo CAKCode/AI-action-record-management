@@ -1528,7 +1528,8 @@ code.report-value { font: 0.625rem var(--mono); }
 .overview-business-entry-list::-webkit-scrollbar-track { border-radius: 999px; background: rgba(36, 42, 44, .7); }
 .overview-business-entry-list::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(120, 169, 229, .55); }
 .overview-business-entry-list .overview-business-entry {
-  flex: 0 0 min(460px, calc(100vw - 64px));
+  flex: 1 1 300px;
+  min-width: 300px;
   scroll-snap-align: start;
 }
 .overview-business-entry {
@@ -1608,7 +1609,7 @@ code.report-value { font: 0.625rem var(--mono); }
   .business-page-header { align-items: flex-start; flex-direction: column; padding: 20px; }
   .overview-business-entry { grid-template-columns: 4px minmax(0, 1fr) auto; padding: 16px; }
   .overview-business-entry-metrics { grid-column: 2 / -1; justify-self: start; }
-  .overview-business-entry-list .overview-business-entry { flex-basis: min(340px, calc(100vw - 48px)); }
+  .overview-business-entry-list .overview-business-entry { flex: 0 0 min(340px, calc(100vw - 48px)); min-width: 0; }
 }
 
 /* Overview visual refresh: keep the dashboard airy while preserving the dense task data. */
