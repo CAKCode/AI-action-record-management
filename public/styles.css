@@ -1476,6 +1476,118 @@ code.report-value { font: 0.625rem var(--mono); }
 .auth-error { color: var(--red, #f38ba8); font-size: 0.85rem; min-height: 1.2em; margin: 0; }
 .auth-submit { margin-top: 0.5rem; }
 
+/* Dynamic business navigation and independent business workspaces. */
+.business-nav {
+  display: grid;
+  gap: 4px;
+  margin: 22px 0 0;
+  padding: 18px 0 0;
+  border-top: 1px solid var(--line);
+}
+.business-nav:empty { display: none; }
+.business-nav-label { padding: 0 10px 6px; color: var(--dim); font: .625rem var(--mono); text-transform: uppercase; }
+.business-nav-item {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--muted);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.business-nav-item:hover { color: var(--text); background: var(--surface); }
+.business-nav-item.active { color: var(--text); border-color: var(--line); background: var(--surface-2); }
+.business-nav-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); box-shadow: 0 0 0 3px rgba(120, 169, 229, .1); }
+.business-nav-item.active .business-nav-dot { background: var(--green); box-shadow: 0 0 0 3px rgba(72, 214, 173, .12); }
+.business-nav-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .75rem; }
+.business-nav-count { min-width: 22px; color: var(--dim); text-align: center; font: .625rem var(--mono); }
+
+.overview-business-entry-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr)); gap: 16px; }
+.overview-business-entry {
+  position: relative;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 4px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  min-height: 154px;
+  padding: 20px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 17px;
+  color: var(--text);
+  background: linear-gradient(145deg, rgba(29, 34, 36, .98), rgba(18, 22, 23, .92));
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, .15);
+  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+.overview-business-entry:hover { border-color: rgba(72, 214, 173, .58); box-shadow: 0 20px 40px rgba(0, 0, 0, .26); transform: translateY(-3px); }
+.overview-business-entry-accent { align-self: stretch; border-radius: 999px; background: var(--green); }
+.overview-business-entry.running .overview-business-entry-accent { background: var(--blue); }
+.overview-business-entry.waiting_review .overview-business-entry-accent { background: var(--amber); }
+.overview-business-entry.failed .overview-business-entry-accent { background: var(--red); }
+.overview-business-entry-main { min-width: 0; display: grid; gap: 4px; }
+.overview-business-entry-main strong { overflow-wrap: anywhere; font-size: 1.28rem; }
+.overview-business-entry-main small { color: var(--dim); }
+.overview-business-entry-metrics { display: grid; grid-template-columns: repeat(2, minmax(52px, auto)); gap: 8px 14px; }
+.overview-business-entry-metrics span { display: grid; gap: 1px; }
+.overview-business-entry-metrics b { font: 1.05rem var(--mono); }
+.overview-business-entry-metrics small { color: var(--dim); font-size: .625rem; white-space: nowrap; }
+.overview-business-entry-arrow { color: var(--green); font-size: 1.35rem; }
+
+.business-page-shell { display: grid; gap: 22px; }
+.business-page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 24px 26px;
+  border: 1px solid rgba(72, 214, 173, .24);
+  border-radius: 20px;
+  background: linear-gradient(110deg, rgba(25, 61, 52, .72), rgba(23, 27, 29, .88));
+}
+.business-page-header h2 { margin: 6px 0 0; font-size: 1.8rem; }
+.business-page-header p { margin: 8px 0 0; color: var(--muted); }
+.business-back-button { margin-bottom: 4px; }
+.business-page-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.business-page-metrics > div { padding: 16px 18px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); }
+.business-page-metrics span { display: block; color: var(--dim); font-size: .6875rem; }
+.business-page-metrics strong { display: block; margin-top: 5px; font: 1.65rem var(--mono); }
+.business-page-section { display: grid; gap: 14px; padding: 20px 0 24px; border-bottom: 1px solid rgba(166, 173, 200, .14); }
+.business-page-section:last-child { border-bottom: 0; }
+.business-page-section-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.business-page-section-head h3 { margin: 4px 0 0; font-size: 1.08rem; }
+#view-business .overview-task-group-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; overflow: visible; border: 0; }
+#view-business .overview-task-group-grid .task-card-grid { border-radius: 14px; }
+.business-cycle-entry-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.business-cycle-entry { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; min-height: 126px; padding: 18px; overflow: hidden; border: 1px solid rgba(203, 166, 247, .28); border-radius: 15px; color: var(--text); background: linear-gradient(145deg, rgba(43, 35, 64, .76), rgba(29, 34, 36, .94)); text-align: left; cursor: pointer; }
+.business-cycle-entry::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: #cba6f7; }
+.business-cycle-entry:hover { border-color: rgba(203, 166, 247, .7); transform: translateY(-2px); }
+.business-cycle-entry-main { display: grid; align-content: start; gap: 5px; min-width: 0; }
+.business-cycle-entry-main strong { overflow-wrap: anywhere; }
+.business-cycle-entry-main code { color: #bfaedb; font-size: .6875rem; overflow-wrap: anywhere; }
+.business-cycle-entry-meta { align-self: end; display: flex; flex-wrap: wrap; gap: 6px; grid-column: 1 / -1; }
+.business-cycle-entry-meta b { min-width: 32px; padding: 3px 8px; border: 1px solid rgba(203, 166, 247, .32); border-radius: 999px; text-align: center; font: .6875rem var(--mono); }
+.business-cycle-entry-arrow { grid-column: 2; grid-row: 1; color: #d7c4ef; font-size: 1.2rem; }
+
+@media (max-width: 900px) {
+  .business-page-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #view-business .overview-task-group-grid,
+  .business-cycle-entry-list { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 640px) {
+  .business-page-header { align-items: flex-start; flex-direction: column; padding: 20px; }
+  .overview-business-entry { grid-template-columns: 4px minmax(0, 1fr) auto; padding: 16px; }
+  .overview-business-entry-metrics { grid-column: 2 / -1; justify-self: start; }
+}
+
 /* Overview visual refresh: keep the dashboard airy while preserving the dense task data. */
 body {
   background:

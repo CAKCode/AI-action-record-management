@@ -46,6 +46,7 @@
         <button class="nav-item" data-view="runtime"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5M12 17.5h5"/></svg><span data-i18n="navRuntime">运行库存</span></button>
         <button class="nav-item" data-view="audit"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H5v17h14V4h-3M9 3h6v4H9zM9 12h6M9 16h6"/></svg><span data-i18n="navAudit">操作审计</span></button>
       </nav>
+      <div class="business-nav" id="businessNav" aria-label="Businesses"></div>
 
       <div class="runtime-card">
         <div class="runtime-line"><span class="runtime-dot" id="runtimeDot"></span><span id="runtimeState">Runtime</span></div>
@@ -138,6 +139,10 @@
           <div class="event-list compact-list" id="overviewAuditList"></div>
         </section>
         </div>
+      </section>
+
+      <section class="view" id="view-business">
+        <div class="business-page-shell" id="businessPageContent"></div>
       </section>
 
       <section class="view" id="view-tasks">

@@ -111,6 +111,7 @@ const state = {
   lang: storedLanguage(),
   fontSize: storedFontSize(),
   view: 'overview',
+  businessKey: '',
   taskFilter: 'current',
   taskProjectFilter: '',
   taskTagFilter: '',
@@ -259,7 +260,7 @@ const messages = {
     releaseCyclesNote: '按提测版本查看手动和定时创建的独立 Task。关闭版本周期后只停止后续创建，不影响已运行任务。', refreshReleaseCycles: '刷新', releaseCycleTasksLabel: '版本 Task', closeReleaseCycle: '结束版本周期', releaseCycleActive: '进行中', releaseCycleClosed: '已结束', noReleaseCycles: '还没有提测版本周期。', releaseCycleTaskCount: '{count} 个 Task', taskCountLabel: 'Task 数量', nextRun: '下次创建', lastRun: '最近创建', releaseKey: '提测版本', releaseCycleAnalysis: '周期数据分析', releaseCycleAnalysisHint: '比较 initial 与 rerun-1 的 Pass/Fail 变化，按测试类型分组。', releaseCycleAnalysisLoading: '正在计算周期数据分析…', releaseCycleAnalysisUnavailable: '暂无可比较的 initial/rerun-1 结果。', analysisAll: '全部', analysisComparable: '可比较 Task', analysisPartial: '部分可比较', analysisPending: '待完成', analysisUnavailable: '不可统计', analysisInitialPass: 'initial 全量通过率', analysisTargetInitialPass: 'rerun 目标 initial 通过率', analysisTargetInitialFail: 'rerun 目标 initial 失败率', analysisRerunPass: 'rerun-1 通过率', analysisRecovered: 'Fail → Pass', analysisPersistent: '持续失败', analysisRegressed: 'Pass → Fail', analysisTrend: 'Pass/Fail 趋势', analysisChartHint: '每个 Task 分别显示 initial 与 rerun-1 的 Pass/Fail 比例', analysisPass: 'Pass', analysisFail: 'Fail', analysisTask: 'Task', analysisScheduled: '执行时间', analysisInitial: 'Initial', analysisRerun: 'Rerun-1', analysisTransitions: '状态变化', analysisNoTrend: '暂无完整的 rerun-1 数据。',
     fontSize: '文字大小', fontSizeSmall: '小号文字', fontSizeStandard: '标准文字', fontSizeLarge: '大号文字',
     export: '导出', import: '导入', syncRuntime: '同步 Runtime', newTask: '新建任务', executionMode: '执行模式',
-    overviewHeadline: '任务即 Session，持续工作直到确认完成', overviewDescription: '每个任务拥有独立持久 Session；每轮结果可继续处理，确认完成后进入只读历史。', overviewCyclePage: '第 {page} 页 · 当前 {count} 个 Task', overviewCyclePrevious: '上一页', overviewCycleNext: '下一页', overviewCycleLoading: '正在加载版本周期 Task…',
+    overviewHeadline: '任务即 Session，持续工作直到确认完成', overviewDescription: '每个任务拥有独立持久 Session；每轮结果可继续处理，确认完成后进入只读历史。', overviewCyclePage: '第 {page} 页 · 当前 {count} 个 Task', overviewCyclePrevious: '上一页', overviewCycleNext: '下一页', overviewCycleLoading: '正在加载版本周期 Task…', businessWorkspace: '业务工作台', businessWorkspaceSubtitle: '按业务查看任务、版本周期和测试结果。', businessBackToOverview: '返回总览', businessStatus: '业务状态', businessCurrentTasks: '当前 Task', businessWaitingTasks: '待确认', businessFailedTasks: '失败 / 阻塞', businessVersionCycles: '版本周期', businessStandaloneTasks: '单次 Task', businessCycleTasks: '版本周期 Task', businessNoTasks: '该业务还没有 Task。', businessNoCycles: '该业务还没有版本周期。', openBusiness: '进入业务', businessUnknown: '未分类业务',
     liveFloor: '当前任务', currentSessionsHeading: '任务 Sessions', recentActivity: '最近活动', recentOperations: '最近操作', viewAll: '查看全部',
     completedSessions: '已完成 Sessions', recentHistory: '最近完成记录', viewHistory: '查看历史', loadMore: '加载更多', newer: '较新记录', older: '更早记录',
     filterCurrent: '当前任务', filterRunning: '工作中', filterHistory: '历史记录', taskProjectFilter: '项目', taskTagFilter: '标签', taskTestTypeFilter: '测试类型', taskOriginFilter: 'Task 来源', allProjects: '全部项目', allTags: '全部标签', allTestTypes: '全部测试类型', allTaskOrigins: '全部来源', standaloneTask: '单次 Task', releaseCycleTask: '版本周期 Task', featureTest: 'Feature 测试', regressionTest: '回归测试', noFilteredTasks: '没有符合当前筛选条件的任务。',
@@ -324,7 +325,7 @@ const messages = {
     releaseCyclesNote: 'View independent manual and scheduled Tasks by release version. Closing a cycle stops future creation without affecting running Tasks.', refreshReleaseCycles: 'Refresh', releaseCycleTasksLabel: 'RELEASE TASKS', closeReleaseCycle: 'Close Release Cycle', releaseCycleActive: 'Active', releaseCycleClosed: 'Closed', noReleaseCycles: 'No release cycles yet.', releaseCycleTaskCount: '{count} Tasks', taskCountLabel: 'Task count', nextRun: 'Next run', lastRun: 'Last run', releaseKey: 'Release version', releaseCycleAnalysis: 'Cycle analytics', releaseCycleAnalysisHint: 'Compare initial and rerun-1 Pass/Fail results by test type.', releaseCycleAnalysisLoading: 'Calculating cycle analytics…', releaseCycleAnalysisUnavailable: 'No comparable initial/rerun-1 results yet.', analysisAll: 'All', analysisComparable: 'Comparable Tasks', analysisPartial: 'Partially comparable', analysisPending: 'Pending', analysisUnavailable: 'Unavailable', analysisInitialPass: 'Initial full pass rate', analysisTargetInitialPass: 'Rerun target initial pass rate', analysisTargetInitialFail: 'Rerun target initial fail rate', analysisRerunPass: 'Rerun-1 pass rate', analysisRecovered: 'Fail → Pass', analysisPersistent: 'Persistent failures', analysisRegressed: 'Pass → Fail', analysisTrend: 'Pass/Fail trend', analysisChartHint: 'Each Task shows its initial and rerun-1 Pass/Fail ratio', analysisPass: 'Pass', analysisFail: 'Fail', analysisTask: 'Task', analysisScheduled: 'Scheduled', analysisInitial: 'Initial', analysisRerun: 'Rerun-1', analysisTransitions: 'Transitions', analysisNoTrend: 'No complete rerun-1 data yet.',
     fontSize: 'Text size', fontSizeSmall: 'Small text', fontSizeStandard: 'Standard text', fontSizeLarge: 'Large text',
     export: 'Export', import: 'Import', syncRuntime: 'Sync Runtime', newTask: 'New Task', executionMode: 'Execution Mode',
-    overviewHeadline: 'A task is a session that persists until completion', overviewDescription: 'Each task owns one persistent session. Review or continue every turn, then explicitly archive the completed task.', overviewCyclePage: 'Page {page} · {count} Tasks shown', overviewCyclePrevious: 'Previous', overviewCycleNext: 'Next', overviewCycleLoading: 'Loading release cycle Tasks…',
+    overviewHeadline: 'A task is a session that persists until completion', overviewDescription: 'Each task owns one persistent session. Review or continue every turn, then explicitly archive the completed task.', overviewCyclePage: 'Page {page} · {count} Tasks shown', overviewCyclePrevious: 'Previous', overviewCycleNext: 'Next', overviewCycleLoading: 'Loading release cycle Tasks…', businessWorkspace: 'Business workspace', businessWorkspaceSubtitle: 'View Tasks, release cycles and test results by business.', businessBackToOverview: 'Back to overview', businessStatus: 'Business status', businessCurrentTasks: 'Current Tasks', businessWaitingTasks: 'Awaiting review', businessFailedTasks: 'Failed / blocked', businessVersionCycles: 'Release cycles', businessStandaloneTasks: 'Standalone Tasks', businessCycleTasks: 'Release cycle Tasks', businessNoTasks: 'This business has no Tasks yet.', businessNoCycles: 'This business has no release cycles yet.', openBusiness: 'Open business', businessUnknown: 'Unclassified business',
     liveFloor: 'Current Tasks', currentSessionsHeading: 'Task Sessions', recentActivity: 'Recent Activity', recentOperations: 'Recent Operations', viewAll: 'View All',
     completedSessions: 'Completed Sessions', recentHistory: 'Recent History', viewHistory: 'View History', loadMore: 'Load more', newer: 'Newer', older: 'Older',
     filterCurrent: 'Current', filterRunning: 'Running', filterHistory: 'History', taskProjectFilter: 'Project', taskTagFilter: 'Tag', taskTestTypeFilter: 'Test type', taskOriginFilter: 'Task origin', allProjects: 'All projects', allTags: 'All tags', allTestTypes: 'All test types', allTaskOrigins: 'All origins', standaloneTask: 'Standalone Task', releaseCycleTask: 'Release-cycle Task', featureTest: 'Feature test', regressionTest: 'Regression test', noFilteredTasks: 'No tasks match the current filters.',
@@ -903,6 +904,7 @@ function applyTranslations() {
 function updateViewHeading() {
   const map = {
     overview: ['overviewTitle', 'overviewSubtitle'],
+    business: ['businessWorkspace', 'businessWorkspaceSubtitle'],
     tasks: ['tasksTitle', 'tasksSubtitle'],
     'release-cycles': ['releaseCyclesTitle', 'releaseCyclesSubtitle'],
     skills: ['skillsTitle', 'skillsSubtitle'],
@@ -910,8 +912,10 @@ function updateViewHeading() {
     audit: ['auditTitle', 'auditSubtitle'],
   };
   const [title, subtitle] = map[state.view];
-  $('#viewTitle').textContent = tr(title);
-  $('#viewSubtitle').textContent = tr(subtitle);
+  $('#viewTitle').textContent = state.view === 'business' && state.businessKey
+    ? state.businessKey : tr(title);
+  $('#viewSubtitle').textContent = state.view === 'business' && state.businessKey
+    ? tr('businessWorkspaceSubtitle') : tr(subtitle);
   $('#viewKicker').textContent = state.view === 'overview' ? 'SESSION OPERATIONS' : state.view.toUpperCase();
 }
 
@@ -4158,17 +4162,81 @@ function overviewBusinessHtml(business, tasks, standaloneLimit) {
       return `<button type="button" class="overview-cycle-card" data-action="open-overview-cycle" data-cycle-id="${escapeHtml(cycleId)}" data-business="${escapeHtml(business)}"><span><strong>${escapeHtml(cycle.name)}</strong><code>${escapeHtml(cycle.releaseKey)}</code></span><span class="overview-cycle-stats"><span class="task-test-type feature">${escapeHtml(tr('featureTest'))} ${cycleFeature}</span><span class="task-test-type regression">${escapeHtml(tr('regressionTest'))} ${cycleRegression}</span><b>${cycle.tasks.length}</b></span><span class="overview-cycle-open">↗</span></button>`;
     }).join('')}</div></section>`
     : '';
-  return `<section class="overview-business-group"><header class="overview-business-head"><div><span class="section-label">${escapeHtml(tr('businessResult'))}</span><h2>${escapeHtml(business)}</h2></div><div class="overview-business-stats"><span>${escapeHtml(tr('taskCountLabel'))} ${tasks.length}</span><span class="task-test-type feature">${escapeHtml(tr('featureTest'))} ${featureCount}</span><span class="task-test-type regression">${escapeHtml(tr('regressionTest'))} ${regressionCount}</span></div></header>${standaloneHtml}${cycleHtml}</section>`;
+  return `<section class="overview-business-group"><header class="overview-business-head"><div><span class="section-label">${escapeHtml(tr('businessResult'))}</span><h2><button class="business-name-button" type="button" data-action="open-business" data-business="${escapeHtml(business)}">${escapeHtml(business)}</button></h2></div><div class="overview-business-stats"><span>${escapeHtml(tr('taskCountLabel'))} ${tasks.length}</span><span class="task-test-type feature">${escapeHtml(tr('featureTest'))} ${featureCount}</span><span class="task-test-type regression">${escapeHtml(tr('regressionTest'))} ${regressionCount}</span></div></header>${standaloneHtml}${cycleHtml}</section>`;
 }
 
-function overviewTaskGroupsHtml(tasks, limit) {
+function overviewTaskGroupsHtml(tasks) {
   const businesses = new Map();
   for (const task of tasks) {
     const business = String(task.project || 'cloudRecord');
     if (!businesses.has(business)) businesses.set(business, []);
     businesses.get(business).push(task);
   }
-  return `<div class="overview-business-list">${[...businesses.entries()].map(([business, members]) => overviewBusinessHtml(business, members, limit)).join('')}</div>`;
+  return `<div class="overview-business-entry-list">${[...businesses.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([business, members]) => {
+    const current = members.filter((task) => task.status !== 'completed');
+    const waiting = current.filter((task) => REVIEW_STATUSES.includes(task.status)).length;
+    const failed = current.filter((task) => ['failed', 'interrupted', 'stopped'].includes(task.status) || task.recoveryState === 'recoverable').length;
+    const cycleCount = new Set(current.filter((task) => task.taskOrigin === 'release-cycle').map((task) => task.releaseCycleId || task.releaseKey)).size;
+    const activeCount = current.filter(isActiveTask).length;
+    const status = failed ? 'failed' : (activeCount ? 'running' : (waiting ? 'waiting_review' : 'completed'));
+    return `<button type="button" class="overview-business-entry ${escapeHtml(status)}" data-action="open-business" data-business="${escapeHtml(business)}"><span class="overview-business-entry-accent"></span><span class="overview-business-entry-main"><span class="section-label">${escapeHtml(tr('businessResult'))}</span><strong>${escapeHtml(business)}</strong><small>${escapeHtml(tr('overviewCycleHint'))}</small></span><span class="overview-business-entry-metrics"><span><b>${current.length}</b><small>${escapeHtml(tr('businessCurrentTasks'))}</small></span><span><b>${waiting}</b><small>${escapeHtml(tr('businessWaitingTasks'))}</small></span><span><b>${failed}</b><small>${escapeHtml(tr('businessFailedTasks'))}</small></span><span><b>${cycleCount}</b><small>${escapeHtml(tr('businessVersionCycles'))}</small></span></span><span class="overview-business-entry-arrow">→</span></button>`;
+  }).join('')}</div>`;
+}
+
+function businessDirectory() {
+  const tasks = state.dashboard.sessions || [];
+  const entries = new Map();
+  for (const task of tasks) {
+    const key = String(task.project || 'cloudRecord').trim() || 'cloudRecord';
+    if (!entries.has(key)) entries.set(key, { key, tasks: [] });
+    entries.get(key).tasks.push(task);
+  }
+  return [...entries.values()].map((entry) => {
+    const current = entry.tasks.filter((task) => task.status !== 'completed');
+    const failed = current.filter((task) => ['failed', 'interrupted', 'stopped'].includes(task.status) || task.recoveryState === 'recoverable').length;
+    const cycles = new Set(entry.tasks.filter((task) => task.taskOrigin === 'release-cycle').map((task) => task.releaseCycleId || task.releaseKey));
+    return { ...entry, current, failed, cycleCount: cycles.size };
+  }).sort((left, right) => left.key.localeCompare(right.key));
+}
+
+function renderBusinessNavigation() {
+  const target = $('#businessNav');
+  if (!target) return;
+  const entries = businessDirectory();
+  target.innerHTML = entries.length
+    ? `<div class="business-nav-label">${escapeHtml(tr('businessWorkspace'))}</div>${entries.map((entry) => `<button class="business-nav-item ${state.view === 'business' && state.businessKey === entry.key ? 'active' : ''}" type="button" data-action="open-business" data-business="${escapeHtml(entry.key)}"><span class="business-nav-dot"></span><span class="business-nav-name">${escapeHtml(entry.key)}</span><span class="business-nav-count">${entry.current.length}</span></button>`).join('')}`
+    : '';
+}
+
+function businessCycleCardsHtml(tasks, business) {
+  const cycles = new Map();
+  for (const task of tasks.filter((item) => item.taskOrigin === 'release-cycle')) {
+    const key = task.releaseCycleId || task.releaseKey || 'cycle';
+    if (!cycles.has(key)) cycles.set(key, { name: task.releaseCycleName || task.releaseKey || key, releaseKey: task.releaseKey || '', tasks: [] });
+    cycles.get(key).tasks.push(task);
+  }
+  if (!cycles.size) return `<div class="empty-state">${escapeHtml(tr('businessNoCycles'))}</div>`;
+  return [...cycles.values()].map((cycle) => {
+    const feature = cycle.tasks.filter((task) => task.testType === 'feature').length;
+    return `<button type="button" class="business-cycle-entry" data-action="open-overview-cycle" data-cycle-id="${escapeHtml(cycle.tasks[0]?.releaseCycleId || cycle.releaseKey)}" data-business="${escapeHtml(business)}"><span class="business-cycle-entry-main"><strong>${escapeHtml(cycle.name)}</strong><code>${escapeHtml(cycle.releaseKey)}</code></span><span class="business-cycle-entry-meta"><span class="task-test-type feature">${escapeHtml(tr('featureTest'))} ${feature}</span><span class="task-test-type regression">${escapeHtml(tr('regressionTest'))} ${cycle.tasks.length - feature}</span><b>${cycle.tasks.length}</b></span><span class="business-cycle-entry-arrow">↗</span></button>`;
+  }).join('');
+}
+
+function renderBusinessView() {
+  const target = $('#businessPageContent');
+  if (!target) return;
+  const business = state.businessKey;
+  if (!business) {
+    target.innerHTML = `<div class="empty-state">${escapeHtml(tr('businessUnknown'))}</div>`;
+    return;
+  }
+  const members = sortTasksForDisplay((state.dashboard.sessions || []).filter((task) => String(task.project || 'cloudRecord') === business));
+  const current = members.filter((task) => task.status !== 'completed');
+  const standalone = current.filter((task) => task.taskOrigin !== 'release-cycle');
+  const cycles = current.filter((task) => task.taskOrigin === 'release-cycle');
+  const waiting = current.filter((task) => REVIEW_STATUSES.includes(task.status)).length;
+  const failed = current.filter((task) => ['failed', 'interrupted', 'stopped'].includes(task.status) || task.recoveryState === 'recoverable').length;
+  target.innerHTML = `<header class="business-page-header"><div><button type="button" class="text-button business-back-button" data-action="go-overview">← ${escapeHtml(tr('businessBackToOverview'))}</button><span class="section-label">${escapeHtml(tr('businessWorkspace'))}</span><h2>${escapeHtml(business)}</h2><p>${escapeHtml(tr('businessWorkspaceSubtitle'))}</p></div><button class="button primary" data-action="new-task" data-business="${escapeHtml(business)}">${escapeHtml(tr('newTask'))}</button></header><div class="business-page-metrics"><div><span>${escapeHtml(tr('businessCurrentTasks'))}</span><strong>${current.length}</strong></div><div><span>${escapeHtml(tr('businessWaitingTasks'))}</span><strong>${waiting}</strong></div><div><span>${escapeHtml(tr('businessFailedTasks'))}</span><strong>${failed}</strong></div><div><span>${escapeHtml(tr('businessVersionCycles'))}</span><strong>${new Set(cycles.map((task) => task.releaseCycleId || task.releaseKey)).size}</strong></div></div><section class="business-page-section"><header class="business-page-section-head"><div><span class="section-label">${escapeHtml(tr('businessStandaloneTasks'))}</span><h3>${escapeHtml(tr('overviewStandaloneHint'))}</h3></div><span class="overview-section-count">${standalone.length}</span></header><div class="task-grid overview-task-group-grid">${standalone.length ? standalone.map((task) => taskCard(task, 'grid')).join('') : `<div class="empty-state span-all">${escapeHtml(tr('businessNoTasks'))}</div>`}</div></section><section class="business-page-section"><header class="business-page-section-head"><div><span class="section-label">${escapeHtml(tr('businessCycleTasks'))}</span><h3>${escapeHtml(tr('overviewCycleHint'))}</h3></div><span class="overview-section-count">${new Set(cycles.map((task) => task.releaseCycleId || task.releaseKey)).size}</span></header><div class="business-cycle-entry-list">${businessCycleCardsHtml(cycles, business)}</div></section>`;
 }
 
 function overviewCycleLocalTasks(cycleId, business) {
@@ -4280,7 +4348,7 @@ function renderOverview() {
   const current = tasks.filter((task) => task.status !== 'completed');
   const history = tasks.filter((task) => task.status === 'completed');
   renderHtml('overviewTasks', '#overviewTaskGrid', current.length
-    ? overviewTaskGroupsHtml(current, 8)
+    ? overviewTaskGroupsHtml(current)
     : `<div class="empty-state span-all">${escapeHtml(tr('noCurrentTasks'))}</div>`);
   renderHtml('overviewHistory', '#overviewHistoryList', history.length
     ? history.slice(0, 6).map(historyRow).join('')
@@ -4688,9 +4756,11 @@ function scheduleProtectionPoll() {
 
 function renderAll() {
   applyTranslations();
+  renderBusinessNavigation();
   renderRuntime();
   renderMetrics();
   renderOverview();
+  renderBusinessView();
   renderTasks();
   renderReleaseCycles();
   renderSkills();
@@ -4722,6 +4792,8 @@ async function loadDashboard(options = {}) {
         renderRuntime();
         renderMetrics();
         renderOverview();
+        renderBusinessNavigation();
+        renderBusinessView();
         renderTasks();
       } else if (connectionRecovered) {
         renderRuntime();
@@ -5166,6 +5238,8 @@ function setView(view) {
   $$('.view').forEach((element) => element.classList.toggle('active', element.id === `view-${view}`));
   $$('.nav-item').forEach((element) => element.classList.toggle('active', element.dataset.view === view));
   updateViewHeading();
+  renderBusinessNavigation();
+  if (view === 'business') renderBusinessView();
   if (view !== 'release-cycles') {
     clearTimeout(releaseCycleDeletionPollTimer);
     releaseCycleDeletionPollTimer = null;
@@ -5183,6 +5257,13 @@ function setView(view) {
   if (view === 'audit') loadAudit().catch((error) => {
     if (error.name !== 'AbortError') toast(error.message, 'error');
   });
+}
+
+function openBusinessView(business) {
+  const key = String(business || '').trim();
+  if (!key) return;
+  state.businessKey = key;
+  setView('business');
 }
 
 function openModal(id) {
@@ -6047,6 +6128,8 @@ document.addEventListener('click', async (event) => {
   if (!action) return;
   const id = action.dataset.id;
   if (action.dataset.action === 'toggle-composer') setComposerExpanded($('#continueTaskForm').dataset.expanded !== 'true', true);
+  if (action.dataset.action === 'open-business') openBusinessView(action.dataset.business);
+  if (action.dataset.action === 'go-overview') setView('overview');
   if (action.dataset.action === 'copy-report-name') await copyReportFilename(action.dataset.copyText || '');
   if (action.dataset.action === 'new-task') openTaskEditor();
   if (action.dataset.action === 'new-release-cycle') openReleaseCycleEditor();
