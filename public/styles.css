@@ -1536,8 +1536,8 @@ code.report-value { font: 0.625rem var(--mono); }
 .overview-business-entry-list.no-scroll { overflow-x: hidden; scrollbar-width: none; }
 .overview-business-entry-list.no-scroll::-webkit-scrollbar { display: none; }
 .overview-business-entry-list .overview-business-entry {
-  flex: 1 1 300px;
-  min-width: 300px;
+  flex: 0 0 350px;
+  min-width: 350px;
   scroll-snap-align: start;
 }
 .overview-business-entry {
@@ -1565,11 +1565,11 @@ code.report-value { font: 0.625rem var(--mono); }
 .overview-business-entry.waiting_review .overview-business-entry-accent { background: var(--amber); }
 .overview-business-entry.failed .overview-business-entry-accent { background: var(--red); }
 .overview-business-entry-main { min-width: 0; display: grid; gap: 4px; }
-.overview-business-entry-main strong { overflow-wrap: anywhere; font-size: 1.28rem; }
-.overview-business-entry-main small { color: var(--dim); }
+.overview-business-entry-main strong { overflow-wrap: anywhere; font-size: 1.45rem; letter-spacing: -.02em; }
+.overview-business-entry-main small { color: var(--dim); font-size: .72rem; }
 .overview-business-entry-metrics { display: grid; grid-template-columns: repeat(2, minmax(52px, auto)); gap: 8px 14px; }
 .overview-business-entry-metrics span { display: grid; gap: 1px; }
-.overview-business-entry-metrics b { font: 1.05rem var(--mono); }
+.overview-business-entry-metrics b { font: 1.18rem var(--mono); }
 .overview-business-entry-metrics small { color: var(--dim); font-size: .625rem; white-space: nowrap; }
 .overview-business-entry-arrow { color: var(--green); font-size: 1.35rem; }
 
