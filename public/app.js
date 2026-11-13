@@ -144,6 +144,7 @@ const state = {
   bridgeReclaimSubmitting: false,
   selectedBridgeSessionId: '',
   currentTaskId: '',
+  newTaskBusiness: '',
   editingTaskId: '',
   editingSkillId: '',
   editingExecutionId: '',
@@ -260,7 +261,7 @@ const messages = {
     releaseCyclesNote: '按提测版本查看手动和定时创建的独立 Task。关闭版本周期后只停止后续创建，不影响已运行任务。', refreshReleaseCycles: '刷新', releaseCycleTasksLabel: '版本 Task', closeReleaseCycle: '结束版本周期', releaseCycleActive: '进行中', releaseCycleClosed: '已结束', noReleaseCycles: '还没有提测版本周期。', releaseCycleTaskCount: '{count} 个 Task', taskCountLabel: 'Task 数量', nextRun: '下次创建', lastRun: '最近创建', releaseKey: '提测版本', releaseCycleAnalysis: '周期数据分析', releaseCycleAnalysisHint: '比较 initial 与 rerun-1 的 Pass/Fail 变化，按测试类型分组。', releaseCycleAnalysisLoading: '正在计算周期数据分析…', releaseCycleAnalysisUnavailable: '暂无可比较的 initial/rerun-1 结果。', analysisAll: '全部', analysisComparable: '可比较 Task', analysisPartial: '部分可比较', analysisPending: '待完成', analysisUnavailable: '不可统计', analysisInitialPass: 'initial 全量通过率', analysisTargetInitialPass: 'rerun 目标 initial 通过率', analysisTargetInitialFail: 'rerun 目标 initial 失败率', analysisRerunPass: 'rerun-1 通过率', analysisRecovered: 'Fail → Pass', analysisPersistent: '持续失败', analysisRegressed: 'Pass → Fail', analysisTrend: 'Pass/Fail 趋势', analysisChartHint: '每个 Task 分别显示 initial 与 rerun-1 的 Pass/Fail 比例', analysisPass: 'Pass', analysisFail: 'Fail', analysisTask: 'Task', analysisScheduled: '执行时间', analysisInitial: 'Initial', analysisRerun: 'Rerun-1', analysisTransitions: '状态变化', analysisNoTrend: '暂无完整的 rerun-1 数据。',
     fontSize: '文字大小', fontSizeSmall: '小号文字', fontSizeStandard: '标准文字', fontSizeLarge: '大号文字',
     export: '导出', import: '导入', syncRuntime: '同步 Runtime', newTask: '新建任务', executionMode: '执行模式',
-    overviewHeadline: '任务即 Session，持续工作直到确认完成', overviewDescription: '每个任务拥有独立持久 Session；每轮结果可继续处理，确认完成后进入只读历史。', overviewCyclePage: '第 {page} 页 · 当前 {count} 个 Task', overviewCyclePrevious: '上一页', overviewCycleNext: '下一页', overviewCycleLoading: '正在加载版本周期 Task…', businessWorkspace: '业务工作台', businessWorkspaceSubtitle: '按业务查看任务、版本周期和测试结果。', businessBackToOverview: '返回总览', businessStatus: '业务状态', businessCurrentTasks: '当前 Task', businessWaitingTasks: '待确认', businessFailedTasks: '失败 / 阻塞', businessVersionCycles: '版本周期', businessStandaloneTasks: '单次 Task', businessCycleTasks: '版本周期 Task', businessNoTasks: '该业务还没有 Task。', businessNoCycles: '该业务还没有版本周期。', openBusiness: '进入业务', businessUnknown: '未分类业务',
+    overviewHeadline: '任务即 Session，持续工作直到确认完成', overviewDescription: '每个任务拥有独立持久 Session；每轮结果可继续处理，确认完成后进入只读历史。', overviewCyclePage: '第 {page} 页 · 当前 {count} 个 Task', overviewCyclePrevious: '上一页', overviewCycleNext: '下一页', overviewCycleLoading: '正在加载版本周期 Task…', businessWorkspace: '业务工作台', businessWorkspaceSubtitle: '按业务查看任务、版本周期和测试结果。', businessEntriesHeading: '业务入口', recentTasksHeading: '近期 Task', viewAllTasks: '查看全部', businessBackToOverview: '返回总览', businessStatus: '业务状态', businessCurrentTasks: '当前 Task', businessWaitingTasks: '待确认', businessFailedTasks: '失败 / 阻塞', businessVersionCycles: '版本周期', businessStandaloneTasks: '单次 Task', businessCycleTasks: '版本周期 Task', businessNoTasks: '该业务还没有 Task。', businessNoCycles: '该业务还没有版本周期。', openBusiness: '进入业务', businessUnknown: '未分类业务',
     liveFloor: '当前任务', currentSessionsHeading: '任务 Sessions', recentActivity: '最近活动', recentOperations: '最近操作', viewAll: '查看全部',
     completedSessions: '已完成 Sessions', recentHistory: '最近完成记录', viewHistory: '查看历史', loadMore: '加载更多', newer: '较新记录', older: '更早记录',
     filterCurrent: '当前任务', filterRunning: '工作中', filterHistory: '历史记录', taskProjectFilter: '项目', taskTagFilter: '标签', taskTestTypeFilter: '测试类型', taskOriginFilter: 'Task 来源', allProjects: '全部项目', allTags: '全部标签', allTestTypes: '全部测试类型', allTaskOrigins: '全部来源', standaloneTask: '单次 Task', releaseCycleTask: '版本周期 Task', featureTest: 'Feature 测试', regressionTest: '回归测试', noFilteredTasks: '没有符合当前筛选条件的任务。',
@@ -325,7 +326,7 @@ const messages = {
     releaseCyclesNote: 'View independent manual and scheduled Tasks by release version. Closing a cycle stops future creation without affecting running Tasks.', refreshReleaseCycles: 'Refresh', releaseCycleTasksLabel: 'RELEASE TASKS', closeReleaseCycle: 'Close Release Cycle', releaseCycleActive: 'Active', releaseCycleClosed: 'Closed', noReleaseCycles: 'No release cycles yet.', releaseCycleTaskCount: '{count} Tasks', taskCountLabel: 'Task count', nextRun: 'Next run', lastRun: 'Last run', releaseKey: 'Release version', releaseCycleAnalysis: 'Cycle analytics', releaseCycleAnalysisHint: 'Compare initial and rerun-1 Pass/Fail results by test type.', releaseCycleAnalysisLoading: 'Calculating cycle analytics…', releaseCycleAnalysisUnavailable: 'No comparable initial/rerun-1 results yet.', analysisAll: 'All', analysisComparable: 'Comparable Tasks', analysisPartial: 'Partially comparable', analysisPending: 'Pending', analysisUnavailable: 'Unavailable', analysisInitialPass: 'Initial full pass rate', analysisTargetInitialPass: 'Rerun target initial pass rate', analysisTargetInitialFail: 'Rerun target initial fail rate', analysisRerunPass: 'Rerun-1 pass rate', analysisRecovered: 'Fail → Pass', analysisPersistent: 'Persistent failures', analysisRegressed: 'Pass → Fail', analysisTrend: 'Pass/Fail trend', analysisChartHint: 'Each Task shows its initial and rerun-1 Pass/Fail ratio', analysisPass: 'Pass', analysisFail: 'Fail', analysisTask: 'Task', analysisScheduled: 'Scheduled', analysisInitial: 'Initial', analysisRerun: 'Rerun-1', analysisTransitions: 'Transitions', analysisNoTrend: 'No complete rerun-1 data yet.',
     fontSize: 'Text size', fontSizeSmall: 'Small text', fontSizeStandard: 'Standard text', fontSizeLarge: 'Large text',
     export: 'Export', import: 'Import', syncRuntime: 'Sync Runtime', newTask: 'New Task', executionMode: 'Execution Mode',
-    overviewHeadline: 'A task is a session that persists until completion', overviewDescription: 'Each task owns one persistent session. Review or continue every turn, then explicitly archive the completed task.', overviewCyclePage: 'Page {page} · {count} Tasks shown', overviewCyclePrevious: 'Previous', overviewCycleNext: 'Next', overviewCycleLoading: 'Loading release cycle Tasks…', businessWorkspace: 'Business workspace', businessWorkspaceSubtitle: 'View Tasks, release cycles and test results by business.', businessBackToOverview: 'Back to overview', businessStatus: 'Business status', businessCurrentTasks: 'Current Tasks', businessWaitingTasks: 'Awaiting review', businessFailedTasks: 'Failed / blocked', businessVersionCycles: 'Release cycles', businessStandaloneTasks: 'Standalone Tasks', businessCycleTasks: 'Release cycle Tasks', businessNoTasks: 'This business has no Tasks yet.', businessNoCycles: 'This business has no release cycles yet.', openBusiness: 'Open business', businessUnknown: 'Unclassified business',
+    overviewHeadline: 'A task is a session that persists until completion', overviewDescription: 'Each task owns one persistent session. Review or continue every turn, then explicitly archive the completed task.', overviewCyclePage: 'Page {page} · {count} Tasks shown', overviewCyclePrevious: 'Previous', overviewCycleNext: 'Next', overviewCycleLoading: 'Loading release cycle Tasks…', businessWorkspace: 'Business workspace', businessWorkspaceSubtitle: 'View Tasks, release cycles and test results by business.', businessEntriesHeading: 'Business entry points', recentTasksHeading: 'Recent Tasks', viewAllTasks: 'View all', businessBackToOverview: 'Back to overview', businessStatus: 'Business status', businessCurrentTasks: 'Current Tasks', businessWaitingTasks: 'Awaiting review', businessFailedTasks: 'Failed / blocked', businessVersionCycles: 'Release cycles', businessStandaloneTasks: 'Standalone Tasks', businessCycleTasks: 'Release cycle Tasks', businessNoTasks: 'This business has no Tasks yet.', businessNoCycles: 'This business has no release cycles yet.', openBusiness: 'Open business', businessUnknown: 'Unclassified business',
     liveFloor: 'Current Tasks', currentSessionsHeading: 'Task Sessions', recentActivity: 'Recent Activity', recentOperations: 'Recent Operations', viewAll: 'View All',
     completedSessions: 'Completed Sessions', recentHistory: 'Recent History', viewHistory: 'View History', loadMore: 'Load more', newer: 'Newer', older: 'Older',
     filterCurrent: 'Current', filterRunning: 'Running', filterHistory: 'History', taskProjectFilter: 'Project', taskTagFilter: 'Tag', taskTestTypeFilter: 'Test type', taskOriginFilter: 'Task origin', allProjects: 'All projects', allTags: 'All tags', allTestTypes: 'All test types', allTaskOrigins: 'All origins', standaloneTask: 'Standalone Task', releaseCycleTask: 'Release-cycle Task', featureTest: 'Feature test', regressionTest: 'Regression test', noFilteredTasks: 'No tasks match the current filters.',
@@ -4350,6 +4351,9 @@ function renderOverview() {
   renderHtml('overviewTasks', '#overviewTaskGrid', current.length
     ? overviewTaskGroupsHtml(current)
     : `<div class="empty-state span-all">${escapeHtml(tr('noCurrentTasks'))}</div>`);
+  renderHtml('overviewRecentTasks', '#overviewRecentTaskGrid', current.length
+    ? current.slice(0, 8).map((task) => taskCard(task, 'grid')).join('')
+    : `<div class="empty-state span-all">${escapeHtml(tr('noCurrentTasks'))}</div>`);
   renderHtml('overviewHistory', '#overviewHistoryList', history.length
     ? history.slice(0, 6).map(historyRow).join('')
     : `<div class="empty-state">${escapeHtml(tr('noHistory'))}</div>`);
@@ -5311,6 +5315,7 @@ function closeModal(id) {
     $('#taskForm').innerHTML = '';
     delete $('#taskForm').dataset.createRunKey;
     state.editingTaskId = '';
+    state.newTaskBusiness = '';
   }
   if (id === 'releaseCycleEditorModal') {
     $('#releaseCycleForm').innerHTML = '';
@@ -5350,8 +5355,9 @@ function upsertDashboardTask(task) {
   state.dashboard.sessions = sessions;
 }
 
-function openTaskEditor(task = null) {
+function openTaskEditor(task = null, business = '') {
   state.editingTaskId = task?.id || '';
+  state.newTaskBusiness = business || '';
   delete $('#taskForm').dataset.createRunKey;
   $('#taskEditorTitle').textContent = tr(task ? 'editTask' : 'createTask');
   $('#taskForm').innerHTML = `
@@ -5359,7 +5365,7 @@ function openTaskEditor(task = null) {
     <label class="field"><span>ID</span><input name="id" required maxlength="64" ${task ? 'disabled' : ''} value="${escapeHtml(task?.id || '')}"><small>${escapeHtml(tr('idHint'))}</small></label>
     <label class="field full"><span>${escapeHtml(tr('objective'))}</span><textarea name="objective" required maxlength="262144">${escapeHtml(task?.objective || '')}</textarea></label>
     <label class="field full"><span>${escapeHtml(tr('notes'))}</span><textarea name="notes" maxlength="262144">${escapeHtml(task?.notes || '')}</textarea></label>
-    <label class="field"><span>${escapeHtml(tr('taskProject'))}</span><input name="project" maxlength="100" value="${escapeHtml(task?.project || 'cloudRecord')}"></label>
+    <label class="field"><span>${escapeHtml(tr('taskProject'))}</span><input name="project" maxlength="100" value="${escapeHtml(task?.project || state.newTaskBusiness || 'cloudRecord')}"></label>
     <label class="field"><span>${escapeHtml(tr('taskTestType'))}</span><select name="testType"><option value="regression"${task?.testType !== 'feature' ? ' selected' : ''}>${escapeHtml(tr('regressionTest'))}</option><option value="feature"${task?.testType === 'feature' ? ' selected' : ''}>${escapeHtml(tr('featureTest'))}</option></select></label>
     <label class="field"><span>${escapeHtml(tr('taskTags'))}</span><input name="tags" maxlength="10000" value="${escapeHtml((task?.tags || []).join(', '))}"><small>${escapeHtml(tr('taskTagsHint'))}</small></label>
     <label class="field"><span>${escapeHtml(tr('workspaceMode'))}</span><select name="workspaceMode"${task ? ' disabled' : ''}><option value="shared"${task?.workspaceMode !== 'session-clone' ? ' selected' : ''}>shared</option><option value="session-clone"${task?.workspaceMode === 'session-clone' ? ' selected' : ''}>session-clone</option></select>${task ? `<input type="hidden" name="workspaceMode" value="${escapeHtml(task.workspaceMode || 'shared')}">` : ''}</label>
@@ -6150,7 +6156,7 @@ document.addEventListener('click', async (event) => {
   if (action.dataset.action === 'open-business') openBusinessView(action.dataset.business);
   if (action.dataset.action === 'go-overview') setView('overview');
   if (action.dataset.action === 'copy-report-name') await copyReportFilename(action.dataset.copyText || '');
-  if (action.dataset.action === 'new-task') openTaskEditor();
+  if (action.dataset.action === 'new-task') openTaskEditor(null, action.dataset.business || '');
   if (action.dataset.action === 'new-release-cycle') openReleaseCycleEditor();
   if (action.dataset.action === 'open-task') await openTaskDetail(id);
   if (action.dataset.action === 'open-task-terminal') {
@@ -6224,6 +6230,7 @@ document.addEventListener('click', async (event) => {
     await loadTaskConsole();
   }
   if (action.dataset.action === 'go-audit') setView('audit');
+  if (action.dataset.action === 'go-tasks') setView('tasks');
   if (action.dataset.action === 'go-history') {
     state.taskFilter = 'history';
     $$('#taskFilters button').forEach((button) => button.classList.toggle('active', button.dataset.status === 'history'));

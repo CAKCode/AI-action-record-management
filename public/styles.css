@@ -1662,6 +1662,20 @@ body {
   gap: 0;
   overflow: visible;
 }
+#view-overview .overview-recent-task-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  overflow: visible;
+  border: 0;
+}
+#view-overview .overview-recent-task-grid .task-card-grid {
+  min-width: 0;
+  border-radius: 14px;
+  border-color: var(--line);
+  background: linear-gradient(160deg, rgba(36, 42, 44, .92), rgba(23, 27, 29, .98));
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .12);
+}
+#view-overview .overview-recent-task-grid .task-card-grid:hover { border-color: rgba(72, 214, 173, .62); transform: translateY(-3px); }
 #view-overview .overview-business-list {
   grid-template-columns: minmax(0, 1fr);
   gap: 24px;
@@ -1907,6 +1921,10 @@ body {
 .overview-cycle-task-section-head { align-items: center; padding: 4px 2px; }
 .overview-release-cycle-modal .overview-release-cycle-task-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
+@media (max-width: 900px) {
+  #view-overview .overview-recent-task-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 /* Toasts are transient feedback, so their text must remain readable at a glance. */
 .toast {
   right: 1.75rem;
@@ -1946,6 +1964,7 @@ body {
   .overview-release-cycle-pagination { justify-content: space-between; gap: 8px; }
   .overview-cycle-analysis-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overview-release-cycle-modal .overview-release-cycle-task-grid { grid-template-columns: minmax(0, 1fr); }
+  #view-overview .overview-recent-task-grid { grid-template-columns: minmax(0, 1fr); }
   .toast {
     right: .75rem;
     bottom: .75rem;

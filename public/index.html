@@ -108,12 +108,22 @@
         <section class="workspace-section">
           <div class="section-head">
             <div>
-              <span class="section-label" data-i18n="liveFloor">ACTIVE TASKS</span>
-              <h2 data-i18n="currentSessionsHeading">当前任务 Sessions</h2>
+              <span class="section-label" data-i18n="businessWorkspace">BUSINESS WORKSPACE</span>
+              <h2 data-i18n="businessEntriesHeading">业务入口</h2>
             </div>
-            <button class="button primary" data-action="new-task" data-i18n="newTask">新建任务</button>
           </div>
           <div class="task-grid overview-task-grid" id="overviewTaskGrid"></div>
+        </section>
+
+        <section class="workspace-section overview-recent-tasks-section">
+          <div class="section-head">
+            <div>
+              <span class="section-label" data-i18n="liveFloor">ACTIVE TASKS</span>
+              <h2 data-i18n="recentTasksHeading">近期 Task</h2>
+            </div>
+            <button class="text-button" data-action="go-tasks" data-i18n="viewAllTasks">查看全部</button>
+          </div>
+          <div class="task-grid overview-recent-task-grid" id="overviewRecentTaskGrid"></div>
         </section>
 
         <div class="overview-secondary">
