@@ -5,10 +5,12 @@ const TASK_FIELD_LIMITS = Object.freeze({
   notes: 256 * 1024,
   project: 100,
   tag: 100,
-  tags: 100,
+  tags: 6,
   input: 512 * 1024,
   idempotencyKey: 256,
 });
+
+const TASK_TEST_TYPES = Object.freeze(['feature', 'regression']);
 
 const SKILL_FIELD_LIMITS = Object.freeze({
   name: 200,
@@ -50,6 +52,9 @@ function validateTaskBody(body, options = {}) {
       throw validationError(`${field} must be a string`);
     }
     assertStringLength(field, body[field], TASK_FIELD_LIMITS[field]);
+  }
+  if (body.testType != null && !TASK_TEST_TYPES.includes(String(body.testType).trim())) {
+    throw validationError(`testType must be one of: ${TASK_TEST_TYPES.join(', ')}`);
   }
   for (const field of ['name', 'objective']) {
     if ((creating || body[field] != null) && !String(body[field] || '').trim()) {
@@ -132,6 +137,7 @@ function validateSkillBody(body, options = {}) {
 
 module.exports = {
   TASK_FIELD_LIMITS,
+  TASK_TEST_TYPES,
   SKILL_FIELD_LIMITS,
   assertStringLength,
   validateTaskBody,

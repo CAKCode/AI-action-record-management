@@ -69,6 +69,7 @@ BASE_URL=http://127.0.0.1:8091
 GET  /api/release-cycles
 POST /api/release-cycles
 GET  /api/release-cycles/:id
+GET  /api/release-cycles/:id/analysis?testType=all&stepKey=...
 DELETE /api/release-cycles/:id
 POST /api/release-cycles/:id/schedules
 GET  /api/release-cycles/:id/tasks
@@ -96,6 +97,7 @@ GET  /api/release-cycle-deletions/:deletionId
   "taskTemplate": {
     "name": "Nightly full regression",
     "objective": "拉取最新测试代码，部署最新镜像和 GW，并完成完整云录制回归。",
+    "testType": "regression",
     "workspaceMode": "session-clone",
     "sourceMode": "session-clone",
     "autoResume": true,
@@ -117,6 +119,8 @@ GET  /api/release-cycle-deletions/:deletionId
 ```
 
 `POST /api/release-cycles/:id/tasks` 可立即创建一次该周期的独立 Task；同一请求可通过 `Idempotency-Key` 安全重试。Task 响应会附带 `releaseCycleId`、`releaseKey`、`scheduleId`、`scheduledFor`、`seriesRunId` 和 `seriesRunSequence`，也可以用 `GET /api/release-cycles/:id/tasks` 查看完整系列。
+
+调用周期分析接口可获得原始 initial、rerun 目标 initial 与 `rerun-1` 的 pytest 用例结果比较。`testType` 支持 `all`、`feature` 和 `regression`；结果按 Task 的测试类型分组，并包含全量 initial 通过率、rerun 目标 initial 通过率、rerun-1 通过率、Fail→Pass 恢复数和持续失败数。只完成部分 Step Pair 的 Task 会标记为 `partial`，不会计入周期完整汇总；缺少任一 Run 或报告尚未完整时会保留在 `pending`/`unavailable` 统计中。
 
 `overlapPolicy=queue` 时，每天仍创建独立 Task，后续 Task 等同周期较早的活动 Task 退出后再启动；`waiting_scheduled` 仍视为活动状态。`skip` 在同周期已有活动 Task 时跳过该次触发；`parallel` 保持并行。不属于该周期的 Task 仍可正常并行。`misfirePolicy=once` 恢复后补一次，`skip` 跳过已错过完整周期的触发。
 
@@ -161,7 +165,9 @@ DELETE 支持 `Idempotency-Key`，并可用 `X-Release-Cycle-Created-At` 绑定�
 | `sourceMode` | string | 否 | `shared-repo`（默认）或 `session-clone`；Release Skill 使用后者 |
 | `notes` | string | 否 | 操作备注，不作为本轮运行指令 |
 | `project` | string | 否 | 项目分类；默认 `cloudRecord`，历史任务也按此兼容值返回 |
-| `tags` | string[] 或逗号分隔字符串 | 否 | 自定义标签，最多 100 个，每项最多 100 个字符；平台会去重并保留输入顺序 |
+| `testType` | string | 否 | 测试业务类型：`feature` 或 `regression`；历史 Task 默认 `regression`，周期模板会继承该值。Task 产生测试 Run 后不可再修改 |
+| `taskOrigin` | string | 响应 | `standalone` 表示单次 Task，`release-cycle` 表示版本周期 Task；由 Task 与版本周期的关联关系派生 |
+| `tags` | string[] 或逗号分隔字符串 | 否 | 标准标签，最多 6 个，每项最多 100 个字符；使用 `scope:`、`mode:`、`env:`、`source:`、`exclude:`、`change:`、`version:` 或 `custom:` 前缀。旧标签会在读取/保存时归一化 |
 | `releaseCycleId` | string | 否 | 将原有手动创建的 Task 关联到一个进行中的版本周期；不传时保持原有独立 Task 行为 |
 | `maxRetries` | number | 否 | 瞬时错误重试和中断自动恢复的上限，默认 `2`，范围 `0..20` |
 | `autoResume` | boolean | 否 | Worker 中断或服务重启后是否自动恢复，默认 `true` |
@@ -185,6 +191,7 @@ DELETE 支持 `Idempotency-Key`，并可用 `X-Release-Cycle-Created-At` 绑定�
 | `activeExternalAttempts` | 尚未终止的外部后台执行数 |
 | `activeScheduledJobs` | 未完成的持久化检查数 |
 | `nextScheduledAt` | 最近一次待执行检查时间，没有时为空字符串 |
+| `testProgress` | 首页用例进度摘要；`runs.initial` 和 `runs.rerun1` 分别表示首轮与 `rerun-1`，各自包含 `available`、`total`、`completed`、`passed`、`failed`、`skipped`、`percent` 和 `status`。顶层结果优先使用最新最终汇总的 `final_*` 指标，没有最终汇总时才回退到阶段指标，不读取原始 HTML |
 | `version` | 配置和状态变更版本号 |
 | `sessionRoot` / `sourceRoot` | Session 模式的运行根目录和独立源码目录 |
 | `sourceMode` / `sourceCommit` / `sourceManifestHash` | 实际源码来源、冻结 commit 和 manifest SHA-256 |
@@ -315,7 +322,7 @@ curl -fsS -X POST "$BASE_URL/api/sessions/start" \
 curl -fsS "$BASE_URL/api/sessions?limit=100&offset=0&status=waiting_review,failed"
 ```
 
-返回按 `updatedAt` 倒序排列的完整任务对象数组。`limit` 默认 `100`、最大 `500`，`offset` 默认 `0`；`status` 可传逗号分隔的已定义状态列表，包含未知状态时返回 `400`。不传 `status` 时查询全部状态。如只需首页统计，使用 `GET /api/dashboard`。
+返回按 `createdAt` 倒序排列的完整任务对象数组；创建时间相同时按版本号倒序，再按 Task ID 升序稳定排序。`limit` 默认 `100`、最大 `500`，`offset` 默认 `0`；`status` 可传逗号分隔的已定义状态列表，包含未知状态时返回 `400`。不传 `status` 时查询全部状态。如只需首页统计，使用 `GET /api/dashboard`。
 
 返回对象包含 `project` 和 `tags`；缺省与历史任务使用 `project=cloudRecord`、`tags=[]`。创建、更新和配置导入导出支持这些字段。当前列表 API 不提供服务端项目或标签筛选参数；页面按已加载列表过滤，外部调用方应先分页读取再自行筛选。分类不会改变任务执行流程或 Skill 选择。
 

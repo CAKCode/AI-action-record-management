@@ -114,9 +114,15 @@ const state = {
   taskFilter: 'current',
   taskProjectFilter: '',
   taskTagFilter: '',
+  taskTestTypeFilter: '',
+  taskOriginFilter: '',
   releaseCycles: [],
   selectedReleaseCycleId: '',
   releaseCycleTasks: [],
+  releaseCycleAnalysis: null,
+  releaseCycleAnalysisLoading: false,
+  overviewCycleModal: { cycleId: '', business: '', page: 0, pageSize: 12, tasks: [], hasMore: false, loading: false, analysis: null, analysisLoading: false },
+  overviewCycleModalRequestVersion: 0,
   expandedTaskObjectives: new Set(),
   taskContextExpanded: false,
   detailTab: 'business-summary',
@@ -182,6 +188,7 @@ let bridgeInventoryPollTimer = null;
 let protectionPollTimer = null;
 const API_REQUEST_TIMEOUT_MS = 30000;
 const DASHBOARD_REQUEST_TIMEOUT_MS = 8000;
+const CASE_PROGRESS_POLL_INTERVAL_MS = 5000;
 const INLINE_ATTEMPT_OUTPUT_MAX_BYTES = 5 * 1024 * 1024;
 const CODEX_CLI_INITIAL_REPLAY_MAX_BYTES = 64 * 1024 * 1024;
 const CODEX_CLI_SCROLLBACK_LINES = 100000;
@@ -246,19 +253,19 @@ const messages = {
     reportExecution: '执行信息', reportRelatedDetails: '阶段执行明细', unreportedExecutions: '尚未关联报告的执行',
     actualCommand: '实际执行的命令', rerunResults: 'Rerun 结果', rerunReportsCombined: '已合并 {count} 份重跑报告，展开查看各组结果。',
     workspaceTools: '工具与显示', workbenchGuide: '工作台说明', moreActions: '更多操作', taskReports: '报告', nextInstruction: '下一步指令',
-    taskListDescription: '任务名称与目标', taskListCount: '{count} 个任务', taskObjective: '任务目标',
+    taskListDescription: '任务名称与目标', taskListCount: '{count} 个任务', taskObjective: '任务目标', taskCaseProgress: '用例进度', taskCaseProgressUnavailable: '暂无用例进度', taskCaseProgressUnknown: '已收集 {total} 个，结果待上报', taskCaseProgressCount: '{completed}/{total} 已完成', taskCasePassed: 'Pass {count}', taskCaseFailed: 'Fail {count}', taskCaseSkipped: 'Skip {count}', taskInitialProgress: '首轮 initial', taskRerun1Progress: '失败重跑 rerun-1',
     expandObjective: '展开', collapseObjective: '收起', showTaskContext: '任务信息', hideTaskContext: '收起信息',
     brandSubtitle: '持久任务工作台', navOverview: '总览', navTasks: '任务 Session', navReleaseCycles: '版本周期', navSkills: 'Skills', navAudit: '操作审计',
-    releaseCyclesNote: '按提测版本查看手动和定时创建的独立 Task。关闭版本周期后只停止后续创建，不影响已运行任务。', refreshReleaseCycles: '刷新', releaseCycleTasksLabel: '版本 Task', closeReleaseCycle: '结束版本周期', releaseCycleActive: '进行中', releaseCycleClosed: '已结束', noReleaseCycles: '还没有提测版本周期。', releaseCycleTaskCount: '{count} 个 Task', taskCountLabel: 'Task 数量', nextRun: '下次创建', lastRun: '最近创建', releaseKey: '提测版本',
+    releaseCyclesNote: '按提测版本查看手动和定时创建的独立 Task。关闭版本周期后只停止后续创建，不影响已运行任务。', refreshReleaseCycles: '刷新', releaseCycleTasksLabel: '版本 Task', closeReleaseCycle: '结束版本周期', releaseCycleActive: '进行中', releaseCycleClosed: '已结束', noReleaseCycles: '还没有提测版本周期。', releaseCycleTaskCount: '{count} 个 Task', taskCountLabel: 'Task 数量', nextRun: '下次创建', lastRun: '最近创建', releaseKey: '提测版本', releaseCycleAnalysis: '周期数据分析', releaseCycleAnalysisHint: '比较 initial 与 rerun-1 的 Pass/Fail 变化，按测试类型分组。', releaseCycleAnalysisLoading: '正在计算周期数据分析…', releaseCycleAnalysisUnavailable: '暂无可比较的 initial/rerun-1 结果。', analysisAll: '全部', analysisComparable: '可比较 Task', analysisPartial: '部分可比较', analysisPending: '待完成', analysisUnavailable: '不可统计', analysisInitialPass: 'initial 全量通过率', analysisTargetInitialPass: 'rerun 目标 initial 通过率', analysisTargetInitialFail: 'rerun 目标 initial 失败率', analysisRerunPass: 'rerun-1 通过率', analysisRecovered: 'Fail → Pass', analysisPersistent: '持续失败', analysisRegressed: 'Pass → Fail', analysisTrend: 'Pass/Fail 趋势', analysisChartHint: '每个 Task 分别显示 initial 与 rerun-1 的 Pass/Fail 比例', analysisPass: 'Pass', analysisFail: 'Fail', analysisTask: 'Task', analysisScheduled: '执行时间', analysisInitial: 'Initial', analysisRerun: 'Rerun-1', analysisTransitions: '状态变化', analysisNoTrend: '暂无完整的 rerun-1 数据。',
     fontSize: '文字大小', fontSizeSmall: '小号文字', fontSizeStandard: '标准文字', fontSizeLarge: '大号文字',
     export: '导出', import: '导入', syncRuntime: '同步 Runtime', newTask: '新建任务', executionMode: '执行模式',
-    overviewHeadline: '任务即 Session，持续工作直到确认完成', overviewDescription: '每个任务拥有独立持久 Session；每轮结果可继续处理，确认完成后进入只读历史。',
+    overviewHeadline: '任务即 Session，持续工作直到确认完成', overviewDescription: '每个任务拥有独立持久 Session；每轮结果可继续处理，确认完成后进入只读历史。', overviewCyclePage: '第 {page} 页 · 当前 {count} 个 Task', overviewCyclePrevious: '上一页', overviewCycleNext: '下一页', overviewCycleLoading: '正在加载版本周期 Task…',
     liveFloor: '当前任务', currentSessionsHeading: '任务 Sessions', recentActivity: '最近活动', recentOperations: '最近操作', viewAll: '查看全部',
     completedSessions: '已完成 Sessions', recentHistory: '最近完成记录', viewHistory: '查看历史', loadMore: '加载更多', newer: '较新记录', older: '更早记录',
-    filterCurrent: '当前任务', filterRunning: '工作中', filterHistory: '历史记录', taskProjectFilter: '项目', taskTagFilter: '标签', allProjects: '全部项目', allTags: '全部标签', noFilteredTasks: '没有符合当前筛选条件的任务。',
+    filterCurrent: '当前任务', filterRunning: '工作中', filterHistory: '历史记录', taskProjectFilter: '项目', taskTagFilter: '标签', taskTestTypeFilter: '测试类型', taskOriginFilter: 'Task 来源', allProjects: '全部项目', allTags: '全部标签', allTestTypes: '全部测试类型', allTaskOrigins: '全部来源', standaloneTask: '单次 Task', releaseCycleTask: '版本周期 Task', featureTest: 'Feature 测试', regressionTest: '回归测试', noFilteredTasks: '没有符合当前筛选条件的任务。',
     skillsNote: '任务首次启动时冻结平台 Skill 与 Codex Skill 快照，恢复时保持版本一致。', newSkill: '新建 Skill', importSkillZip: '导入 ZIP',
     taskId: '任务 ID', eventType: '事件类型', searchAudit: '搜索操作内容', filter: '筛选', persistentSession: '持久 Session',
-    businessSummary: '任务摘要', agentRecords: 'Agent 记录', worklog: 'Agent 工作记录', skillInvocations: 'Skill 调用', noSkillInvocations: '本 Session 暂无自动记录的 Skill 调用。', taskTerminal: 'Codex CLI', commands: 'Agent 命令', background: '后台与调度', operations: '操作审计', continuePlaceholder: '输入启动或恢复这个任务的指令',
+    businessSummary: '任务摘要', agentRecords: 'Agent 记录', worklog: 'Agent 工作记录', skillInvocations: 'Skill 调用', noSkillInvocations: '本 Session 暂无自动记录的 Skill 调用。', taskTerminal: 'Codex CLI', commands: 'Agent 命令', background: '后台与调度', operations: '操作审计', continuePlaceholder: '输入启动或恢复这个任务的指令', overviewStandaloneHint: '未归属版本周期的任务', overviewCycleHint: '按版本周期查看任务', overviewMoreTasks: '还有 {count} 个单次 Task，请到任务页面查看全部。',
     cliConnecting: '正在连接', cliConnected: '已连接', cliDisconnected: '连接已断开', cliEnded: 'CLI 已结束', cliReconnect: '重新连接', cliInterrupt: '中断', cliClear: '清屏', cliTerminate: '结束 CLI', cliReadOnly: '只读', cliUnlockInput: '解锁输入', cliInputUnlocked: '允许输入',
     interactiveCliConflict: '该任务仍有正在运行的 Codex CLI。请在任务详情的「Codex CLI」页签点击「结束 CLI」，然后重新{operation}。', taskOperationRunning: '启动任务', taskOperationDeleting: '删除任务', taskOperationCompleting: '完成任务', taskOperationResetting: '重置上下文', taskOperationRetry: '执行此操作',
     businessCommands: '主要执行', businessExecution: '业务执行', executionRuns: '执行记录', repeatedRuns: '重复执行', primarySkill: '实际执行 Skill',
@@ -271,7 +278,7 @@ const messages = {
     idle: '待启动', pending: '待执行', leased: '执行中', queued: '排队中', running: '工作中', recovering: '恢复中', stopping: '停止中', waiting_scheduled: '后台运行中', waiting_review: '待确认', waiting_input: '待输入', completed: '已完成', succeeded: '成功', failed: '失败', lost: '进程失联', cancelled: '已取消', interrupted: '已中断', stopped: '已停止', recoverable: '可恢复', disabled: '已禁用',
     open: '查看', terminal: '终端', start: '启动任务', recover: '恢复任务', restoreArchived: '恢复并继续', resetSession: '重置上下文', continueTask: '继续任务', reviewTask: '查看结果', complete: '确认完成', stop: '停止', edit: '编辑', delete: '删除', close: '关闭', save: '保存', cancel: '取消',
     noCurrentTasks: '当前没有任务。新建任务会创建一个独立 Session。', noHistory: '还没有已完成的 Session。', noAudit: '没有匹配的操作记录。', noSkills: '没有可用 Skill。',
-    taskName: '任务名称', objective: '任务目标 / 首次指令', workingDir: '工作目录', notes: '备注', taskProject: '项目分类', taskTags: '自定义标签（逗号分隔）', enabled: '启用',
+    taskName: '任务名称', objective: '任务目标 / 首次指令', workingDir: '工作目录', notes: '备注', taskProject: '项目分类', taskTestType: '测试类型', taskTags: '标准标签（逗号分隔，最多6个）', taskTagsHint: '使用 scope:/mode:/env:/source:/exclude:/change:/version: 前缀；类型、项目和周期不重复写入标签。', enabled: '启用',
     maxRetries: '中断重试次数', autoResume: '服务重启后自动恢复', createAndStart: '创建并启动', updateTask: '更新任务', createTask: '新建任务 Session', editTask: '编辑任务',
     idHint: '只允许字母、数字、短横线和下划线', pathHint: '相对路径以任务工作区根目录为基准；绝对路径必须位于允许的根目录内。',
     taskContext: '任务上下文', sessionId: 'Session ID', status: '状态', runCount: '执行次数', recoveryAttempts: '自动恢复次数', createdAt: '创建时间', finishedAt: '完成时间', workspace: '工作区', workspaceMode: '工作区模式', sourceMode: '源码模式', sourceCommit: '源码 Commit', archiveState: '源码归档状态', sessionRoot: 'Session 根目录', nextCheck: '下次检查', activeBackground: '活动后台执行', activeSchedules: '活动定时检查',
@@ -311,19 +318,19 @@ const messages = {
     reportExecution: 'Execution evidence', reportRelatedDetails: 'Stage execution details', unreportedExecutions: 'Executions without a linked report',
     actualCommand: 'Executed command', rerunResults: 'Rerun results', rerunReportsCombined: 'Combined {count} rerun reports. Expand to inspect each group.',
     workspaceTools: 'Tools & display', workbenchGuide: 'About this workbench', moreActions: 'More actions', taskReports: 'Reports', nextInstruction: 'Next instruction',
-    taskListDescription: 'Task name & objective', taskListCount: '{count} tasks', taskObjective: 'Objective',
+    taskListDescription: 'Task name & objective', taskListCount: '{count} tasks', taskObjective: 'Objective', taskCaseProgress: 'Case progress', taskCaseProgressUnavailable: 'No case progress yet', taskCaseProgressUnknown: '{total} cases collected; results pending', taskCaseProgressCount: '{completed}/{total} completed', taskCasePassed: 'Pass {count}', taskCaseFailed: 'Fail {count}', taskCaseSkipped: 'Skip {count}', taskInitialProgress: 'Initial run', taskRerun1Progress: 'Failed-case rerun · rerun-1',
     expandObjective: 'Expand', collapseObjective: 'Collapse', showTaskContext: 'Task info', hideTaskContext: 'Hide info',
     brandSubtitle: 'Persistent Task Desk', navOverview: 'Overview', navTasks: 'Task Sessions', navReleaseCycles: 'Release Cycles', navSkills: 'Skills', navAudit: 'Operation Audit',
-    releaseCyclesNote: 'View independent manual and scheduled Tasks by release version. Closing a cycle stops future creation without affecting running Tasks.', refreshReleaseCycles: 'Refresh', releaseCycleTasksLabel: 'RELEASE TASKS', closeReleaseCycle: 'Close Release Cycle', releaseCycleActive: 'Active', releaseCycleClosed: 'Closed', noReleaseCycles: 'No release cycles yet.', releaseCycleTaskCount: '{count} Tasks', taskCountLabel: 'Task count', nextRun: 'Next run', lastRun: 'Last run', releaseKey: 'Release version',
+    releaseCyclesNote: 'View independent manual and scheduled Tasks by release version. Closing a cycle stops future creation without affecting running Tasks.', refreshReleaseCycles: 'Refresh', releaseCycleTasksLabel: 'RELEASE TASKS', closeReleaseCycle: 'Close Release Cycle', releaseCycleActive: 'Active', releaseCycleClosed: 'Closed', noReleaseCycles: 'No release cycles yet.', releaseCycleTaskCount: '{count} Tasks', taskCountLabel: 'Task count', nextRun: 'Next run', lastRun: 'Last run', releaseKey: 'Release version', releaseCycleAnalysis: 'Cycle analytics', releaseCycleAnalysisHint: 'Compare initial and rerun-1 Pass/Fail results by test type.', releaseCycleAnalysisLoading: 'Calculating cycle analytics…', releaseCycleAnalysisUnavailable: 'No comparable initial/rerun-1 results yet.', analysisAll: 'All', analysisComparable: 'Comparable Tasks', analysisPartial: 'Partially comparable', analysisPending: 'Pending', analysisUnavailable: 'Unavailable', analysisInitialPass: 'Initial full pass rate', analysisTargetInitialPass: 'Rerun target initial pass rate', analysisTargetInitialFail: 'Rerun target initial fail rate', analysisRerunPass: 'Rerun-1 pass rate', analysisRecovered: 'Fail → Pass', analysisPersistent: 'Persistent failures', analysisRegressed: 'Pass → Fail', analysisTrend: 'Pass/Fail trend', analysisChartHint: 'Each Task shows its initial and rerun-1 Pass/Fail ratio', analysisPass: 'Pass', analysisFail: 'Fail', analysisTask: 'Task', analysisScheduled: 'Scheduled', analysisInitial: 'Initial', analysisRerun: 'Rerun-1', analysisTransitions: 'Transitions', analysisNoTrend: 'No complete rerun-1 data yet.',
     fontSize: 'Text size', fontSizeSmall: 'Small text', fontSizeStandard: 'Standard text', fontSizeLarge: 'Large text',
     export: 'Export', import: 'Import', syncRuntime: 'Sync Runtime', newTask: 'New Task', executionMode: 'Execution Mode',
-    overviewHeadline: 'A task is a session that persists until completion', overviewDescription: 'Each task owns one persistent session. Review or continue every turn, then explicitly archive the completed task.',
+    overviewHeadline: 'A task is a session that persists until completion', overviewDescription: 'Each task owns one persistent session. Review or continue every turn, then explicitly archive the completed task.', overviewCyclePage: 'Page {page} · {count} Tasks shown', overviewCyclePrevious: 'Previous', overviewCycleNext: 'Next', overviewCycleLoading: 'Loading release cycle Tasks…',
     liveFloor: 'Current Tasks', currentSessionsHeading: 'Task Sessions', recentActivity: 'Recent Activity', recentOperations: 'Recent Operations', viewAll: 'View All',
     completedSessions: 'Completed Sessions', recentHistory: 'Recent History', viewHistory: 'View History', loadMore: 'Load more', newer: 'Newer', older: 'Older',
-    filterCurrent: 'Current', filterRunning: 'Running', filterHistory: 'History', taskProjectFilter: 'Project', taskTagFilter: 'Tag', allProjects: 'All projects', allTags: 'All tags', noFilteredTasks: 'No tasks match the current filters.',
+    filterCurrent: 'Current', filterRunning: 'Running', filterHistory: 'History', taskProjectFilter: 'Project', taskTagFilter: 'Tag', taskTestTypeFilter: 'Test type', taskOriginFilter: 'Task origin', allProjects: 'All projects', allTags: 'All tags', allTestTypes: 'All test types', allTaskOrigins: 'All origins', standaloneTask: 'Standalone Task', releaseCycleTask: 'Release-cycle Task', featureTest: 'Feature test', regressionTest: 'Regression test', noFilteredTasks: 'No tasks match the current filters.',
     skillsNote: 'A versioned snapshot of managed and built-in Codex skills is frozen on the first task turn.', newSkill: 'New Skill', importSkillZip: 'Import ZIP',
     taskId: 'Task ID', eventType: 'Event type', searchAudit: 'Search operations', filter: 'Filter', persistentSession: 'Persistent Session',
-    businessSummary: 'Task Summary', agentRecords: 'Agent Records', worklog: 'Agent Worklog', skillInvocations: 'Skill Invocations', noSkillInvocations: 'No automatically recorded Skill invocation exists for this Session.', taskTerminal: 'Codex CLI', commands: 'Agent Commands', background: 'Background & Schedule', operations: 'Operation Audit', continuePlaceholder: 'Enter instructions to start or recover this task',
+    businessSummary: 'Task Summary', agentRecords: 'Agent Records', worklog: 'Agent Worklog', skillInvocations: 'Skill Invocations', noSkillInvocations: 'No automatically recorded Skill invocation exists for this Session.', taskTerminal: 'Codex CLI', commands: 'Agent Commands', background: 'Background & Schedule', operations: 'Operation Audit', continuePlaceholder: 'Enter instructions to start or recover this task', overviewStandaloneHint: 'Tasks outside a release cycle', overviewCycleHint: 'Tasks grouped by release cycle', overviewMoreTasks: '{count} more standalone Tasks are available in the Tasks view.',
     cliConnecting: 'Connecting', cliConnected: 'Connected', cliDisconnected: 'Disconnected', cliEnded: 'CLI ended', cliReconnect: 'Reconnect', cliInterrupt: 'Interrupt', cliClear: 'Clear', cliTerminate: 'End CLI', cliReadOnly: 'Read only', cliUnlockInput: 'Unlock input', cliInputUnlocked: 'Input enabled',
     interactiveCliConflict: 'This task has an active Codex CLI. Open the Codex CLI tab, select End CLI, then try to {operation} again.', taskOperationRunning: 'start the task', taskOperationDeleting: 'delete the task', taskOperationCompleting: 'complete the task', taskOperationResetting: 'reset the context', taskOperationRetry: 'perform this operation',
     businessCommands: 'Primary Executions', businessExecution: 'Business execution', executionRuns: 'Runs', repeatedRuns: 'Repeated', primarySkill: 'Executing Skill',
@@ -336,7 +343,7 @@ const messages = {
     idle: 'Ready', pending: 'Pending', leased: 'Running', queued: 'Queued', running: 'Running', recovering: 'Recovering', stopping: 'Stopping', waiting_scheduled: 'Background Running', waiting_review: 'Review', waiting_input: 'Needs Input', completed: 'Completed', succeeded: 'Succeeded', failed: 'Failed', lost: 'Process lost', cancelled: 'Cancelled', interrupted: 'Interrupted', stopped: 'Stopped', recoverable: 'Recoverable', disabled: 'Disabled',
     open: 'Open', terminal: 'Terminal', start: 'Start Task', recover: 'Recover Task', restoreArchived: 'Restore & Continue', resetSession: 'Reset Context', continueTask: 'Continue Task', reviewTask: 'Review Result', complete: 'Complete', stop: 'Stop', edit: 'Edit', delete: 'Delete', close: 'Close', save: 'Save', cancel: 'Cancel',
     noCurrentTasks: 'No current task. Create one to start an independent session.', noHistory: 'No completed session yet.', noAudit: 'No matching operation record.', noSkills: 'No skill is available.',
-    taskName: 'Task name', objective: 'Task objective / initial instruction', workingDir: 'Working directory', notes: 'Notes', taskProject: 'Project classification', taskTags: 'Custom tags (comma separated)', enabled: 'Enabled',
+    taskName: 'Task name', objective: 'Task objective / initial instruction', workingDir: 'Working directory', notes: 'Notes', taskProject: 'Project classification', taskTestType: 'Test type', taskTags: 'Standard tags (comma separated, max 6)', taskTagsHint: 'Use scope:/mode:/env:/source:/exclude:/change:/version: prefixes; do not duplicate type, project, or cycle fields.', enabled: 'Enabled',
     maxRetries: 'Interruption retries', autoResume: 'Auto-recover after service restart', createAndStart: 'Create & Start', updateTask: 'Update Task', createTask: 'New Task Session', editTask: 'Edit Task',
     idHint: 'Letters, numbers, hyphens, and underscores only', pathHint: 'Relative paths resolve from the task workspace root; absolute paths must be under an allowed root.',
     taskContext: 'Task Context', sessionId: 'Session ID', status: 'Status', runCount: 'Runs', recoveryAttempts: 'Auto recoveries', createdAt: 'Created', finishedAt: 'Completed', workspace: 'Workspace', workspaceMode: 'Workspace mode', sourceMode: 'Source mode', sourceCommit: 'Source commit', archiveState: 'Source archive', sessionRoot: 'Session root', nextCheck: 'Next check', activeBackground: 'Active background runs', activeSchedules: 'Active scheduled checks',
@@ -935,7 +942,9 @@ function needsTaskRecovery(task) {
 function taskClassification(task, { showProject = true } = {}) {
   const project = String(task?.project || 'cloudRecord').trim() || 'cloudRecord';
   const tags = Array.isArray(task?.tags) ? task.tags : [];
-  return `<span class="task-classification">${showProject ? `<span class="task-project-badge">${escapeHtml(project)}</span>` : ''}${tags.map((tag) => `<span class="task-tag">${escapeHtml(tag)}</span>`).join('')}</span>`;
+  const testType = task?.testType === 'feature' ? 'featureTest' : 'regressionTest';
+  const origin = task?.taskOrigin === 'release-cycle' ? 'releaseCycleTask' : 'standaloneTask';
+  return `<span class="task-classification">${showProject ? `<span class="task-project-badge">${escapeHtml(project)}</span>` : ''}<span class="task-origin-badge ${escapeHtml(task?.taskOrigin === 'release-cycle' ? 'release-cycle' : 'standalone')}">${escapeHtml(tr(origin))}</span><span class="task-test-type ${escapeHtml(task?.testType === 'feature' ? 'feature' : 'regression')}">${escapeHtml(tr(testType))}</span>${tags.map((tag) => `<span class="task-tag">${escapeHtml(tag)}</span>`).join('')}</span>`;
 }
 
 function taskClassificationValues() {
@@ -948,17 +957,79 @@ function taskClassificationValues() {
   return { projects, tags };
 }
 
+function taskVersionTuple(task) {
+  const taggedVersion = (task?.tags || []).find((tag) => /^version:\d+\.\d+\.\d+/i.test(String(tag || '')));
+  const sources = [taggedVersion, task?.releaseKey, task?.releaseCycleName, task?.name, task?.id];
+  for (const source of sources) {
+    const match = String(source || '').match(/(?:^|[^\d])v?(\d+)\.(\d+)\.(\d+)(?=$|[^\d])/i);
+    if (match) return [Number(match[1]), Number(match[2]), Number(match[3])];
+  }
+  return null;
+}
+
+function compareTaskDisplayOrder(left, right) {
+  const createdDifference = Date.parse(right?.createdAt || 0) - Date.parse(left?.createdAt || 0);
+  if (createdDifference) return createdDifference;
+  const leftVersion = taskVersionTuple(left);
+  const rightVersion = taskVersionTuple(right);
+  if (leftVersion && rightVersion) {
+    for (let index = 0; index < leftVersion.length; index += 1) {
+      if (leftVersion[index] !== rightVersion[index]) return rightVersion[index] - leftVersion[index];
+    }
+  } else if (leftVersion || rightVersion) {
+    return leftVersion ? -1 : 1;
+  }
+  return String(left?.id || '').localeCompare(String(right?.id || ''));
+}
+
+function sortTasksForDisplay(tasks) {
+  return [...tasks].sort(compareTaskDisplayOrder);
+}
+
 function renderTaskClassificationFilters() {
   const projectSelect = $('#taskProjectFilter');
   const tagSelect = $('#taskTagFilter');
-  if (!projectSelect || !tagSelect) return;
+  const testTypeSelect = $('#taskTestTypeFilter');
+  const originSelect = $('#taskOriginFilter');
+  if (!projectSelect || !tagSelect || !testTypeSelect || !originSelect) return;
   const { projects, tags } = taskClassificationValues();
   if (state.taskProjectFilter && !projects.includes(state.taskProjectFilter)) state.taskProjectFilter = '';
   if (state.taskTagFilter && !tags.includes(state.taskTagFilter)) state.taskTagFilter = '';
+  if (state.taskTestTypeFilter && !['feature', 'regression'].includes(state.taskTestTypeFilter)) state.taskTestTypeFilter = '';
+  if (state.taskOriginFilter && !['standalone', 'release-cycle'].includes(state.taskOriginFilter)) state.taskOriginFilter = '';
   projectSelect.innerHTML = [`<option value="">${escapeHtml(tr('allProjects'))}</option>`, ...projects.map((project) => `<option value="${escapeHtml(project)}">${escapeHtml(project)}</option>`)].join('');
   tagSelect.innerHTML = [`<option value="">${escapeHtml(tr('allTags'))}</option>`, ...tags.map((tag) => `<option value="${escapeHtml(tag)}">${escapeHtml(tag)}</option>`)].join('');
+  testTypeSelect.innerHTML = `<option value="">${escapeHtml(tr('allTestTypes'))}</option><option value="feature">${escapeHtml(tr('featureTest'))}</option><option value="regression">${escapeHtml(tr('regressionTest'))}</option>`;
+  originSelect.innerHTML = `<option value="">${escapeHtml(tr('allTaskOrigins'))}</option><option value="standalone">${escapeHtml(tr('standaloneTask'))}</option><option value="release-cycle">${escapeHtml(tr('releaseCycleTask'))}</option>`;
   projectSelect.value = state.taskProjectFilter;
   tagSelect.value = state.taskTagFilter;
+  testTypeSelect.value = state.taskTestTypeFilter;
+  originSelect.value = state.taskOriginFilter;
+}
+
+function taskProgressRunHtml(labelKey, progress) {
+  if (!progress?.available) {
+    return `<div class="task-progress-run task-progress-run-empty"><span>${escapeHtml(tr(labelKey))}</span><strong>${escapeHtml(tr('taskCaseProgressUnavailable'))}</strong></div>`;
+  }
+  const total = Math.max(0, Number(progress.total || 0));
+  if (progress.resultKnown === false || progress.status === 'unknown') {
+    return `<div class="task-progress-run task-progress-run-empty"><span>${escapeHtml(tr(labelKey))}</span><strong>${escapeHtml(trf('taskCaseProgressUnknown', { total }))}</strong></div>`;
+  }
+  const completed = Math.min(total, Math.max(0, Number(progress.completed || 0)));
+  const percent = Math.min(100, Math.max(0, Number(progress.percent || (total ? Math.round((completed / total) * 100) : 0))));
+  return `<div class="task-progress-run ${escapeHtml(progress.status || 'partial')}">
+    <div class="task-progress-head"><span>${escapeHtml(tr(labelKey))}</span><strong>${escapeHtml(trf('taskCaseProgressCount', { completed, total }))}</strong></div>
+    <div class="task-progress-track" role="progressbar" aria-label="${escapeHtml(tr('taskCaseProgress'))}" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${completed}"><i style="--progress:${percent}%"></i></div>
+    <div class="task-progress-meta"><span class="task-progress-pass">${escapeHtml(trf('taskCasePassed', { count: Number(progress.passed || 0) }))}</span><span class="task-progress-fail">${escapeHtml(trf('taskCaseFailed', { count: Number(progress.failed || 0) }))}</span>${Number(progress.skipped || 0) ? `<span class="task-progress-skip">${escapeHtml(trf('taskCaseSkipped', { count: Number(progress.skipped || 0) }))}</span>` : ''}</div>
+  </div>`;
+}
+
+function taskTestProgressHtml(task) {
+  const runs = task?.testProgress?.runs;
+  if (!runs?.initial?.available && !runs?.rerun1?.available) {
+    return `<div class="task-progress task-progress-empty"><span>${escapeHtml(tr('taskCaseProgress'))}</span><strong>${escapeHtml(tr('taskCaseProgressUnavailable'))}</strong></div>`;
+  }
+  return `<div class="task-progress"><div class="task-progress-runs">${taskProgressRunHtml('taskInitialProgress', runs.initial)}${taskProgressRunHtml('taskRerun1Progress', runs.rerun1)}</div></div>`;
 }
 
 function taskCard(task, layout = 'list') {
@@ -982,10 +1053,11 @@ function taskCard(task, layout = 'list') {
           </div>
         </div>
         ${taskClassification(task, { showProject: !grid })}
-        <details class="task-description" data-objective-id="${escapeHtml(task.id)}"${state.expandedTaskObjectives.has(task.id) ? ' open' : ''}>
+        ${grid ? taskTestProgressHtml(task) : ''}
+        ${grid ? '' : `<details class="task-description" data-objective-id="${escapeHtml(task.id)}"${state.expandedTaskObjectives.has(task.id) ? ' open' : ''}>
           <summary><span class="task-objective-label">${escapeHtml(tr('taskObjective'))}</span><span class="task-objective-preview">${escapeHtml(task.objective || task.summary || '-')}</span><span class="objective-expand">${escapeHtml(tr('expandObjective'))}</span><span class="objective-collapse">${escapeHtml(tr('collapseObjective'))}</span></summary>
           <p class="task-objective">${escapeHtml(task.objective || task.summary || '-')}</p>
-        </details>
+        </details>`}
       </div>
       <div class="task-row-status">
         ${grid ? '' : badge}
@@ -4065,12 +4137,150 @@ function renderMetrics() {
     <div class="metric"><span>${escapeHtml(tr(label))}</span><strong>${Number(value)}</strong></div>`).join(''));
 }
 
+function overviewBusinessHtml(business, tasks, standaloneLimit) {
+  const standalone = tasks.filter((task) => task.taskOrigin !== 'release-cycle');
+  const cycles = new Map();
+  for (const task of tasks.filter((item) => item.taskOrigin === 'release-cycle')) {
+    const key = task.releaseCycleId || task.releaseKey || 'cycle';
+    if (!cycles.has(key)) cycles.set(key, { name: task.releaseCycleName || task.releaseKey || key, releaseKey: task.releaseKey || '', status: task.releaseCycleStatus || '', tasks: [] });
+    cycles.get(key).tasks.push(task);
+  }
+  const featureCount = tasks.filter((task) => task.testType === 'feature').length;
+  const regressionCount = tasks.length - featureCount;
+  const standaloneHtml = standalone.length
+    ? `<section class="overview-origin-section"><header class="overview-origin-head"><div><span class="section-label">${escapeHtml(tr('standaloneTask'))}</span><h3>${escapeHtml(tr('overviewStandaloneHint'))}</h3></div><span class="overview-section-count">${standalone.length}</span></header><div class="task-grid overview-task-group-grid">${standalone.slice(0, standaloneLimit).map((task) => taskCard(task, 'grid')).join('')}</div>${standalone.length > standaloneLimit ? `<p class="overview-more-note">${escapeHtml(trf('overviewMoreTasks', { count: standalone.length - standaloneLimit }))}</p>` : ''}</section>`
+    : '';
+  const cycleHtml = cycles.size
+    ? `<section class="overview-origin-section"><header class="overview-origin-head"><div><span class="section-label">${escapeHtml(tr('releaseCycleTask'))}</span><h3>${escapeHtml(tr('overviewCycleHint'))}</h3></div><span class="overview-section-count">${cycles.size}</span></header><div class="overview-cycle-list">${[...cycles.values()].map((cycle) => {
+      const cycleFeature = cycle.tasks.filter((task) => task.testType === 'feature').length;
+      const cycleRegression = cycle.tasks.length - cycleFeature;
+      const cycleId = cycle.tasks[0]?.releaseCycleId || cycle.releaseKey;
+      return `<button type="button" class="overview-cycle-card" data-action="open-overview-cycle" data-cycle-id="${escapeHtml(cycleId)}" data-business="${escapeHtml(business)}"><span><strong>${escapeHtml(cycle.name)}</strong><code>${escapeHtml(cycle.releaseKey)}</code></span><span class="overview-cycle-stats"><span class="task-test-type feature">${escapeHtml(tr('featureTest'))} ${cycleFeature}</span><span class="task-test-type regression">${escapeHtml(tr('regressionTest'))} ${cycleRegression}</span><b>${cycle.tasks.length}</b></span><span class="overview-cycle-open">↗</span></button>`;
+    }).join('')}</div></section>`
+    : '';
+  return `<section class="overview-business-group"><header class="overview-business-head"><div><span class="section-label">${escapeHtml(tr('businessResult'))}</span><h2>${escapeHtml(business)}</h2></div><div class="overview-business-stats"><span>${escapeHtml(tr('taskCountLabel'))} ${tasks.length}</span><span class="task-test-type feature">${escapeHtml(tr('featureTest'))} ${featureCount}</span><span class="task-test-type regression">${escapeHtml(tr('regressionTest'))} ${regressionCount}</span></div></header>${standaloneHtml}${cycleHtml}</section>`;
+}
+
+function overviewTaskGroupsHtml(tasks, limit) {
+  const businesses = new Map();
+  for (const task of tasks) {
+    const business = String(task.project || 'cloudRecord');
+    if (!businesses.has(business)) businesses.set(business, []);
+    businesses.get(business).push(task);
+  }
+  return `<div class="overview-business-list">${[...businesses.entries()].map(([business, members]) => overviewBusinessHtml(business, members, limit)).join('')}</div>`;
+}
+
+function overviewCycleLocalTasks(cycleId, business) {
+  return sortTasksForDisplay((state.dashboard.sessions || []).filter((task) => (
+    task.taskOrigin === 'release-cycle'
+      && String(task.project || 'cloudRecord') === String(business || '')
+      && String(task.releaseCycleId || task.releaseKey || '') === String(cycleId || '')
+  )));
+}
+
+function overviewCycleTaskTrend(tasks) {
+  return tasks.flatMap((task, index) => {
+    const initial = task.testProgress?.runs?.initial;
+    const rerun = task.testProgress?.runs?.rerun1;
+    if (!initial?.resultKnown || !rerun?.resultKnown) return [];
+    const initialDenominator = Number(initial.passed || 0) + Number(initial.failed || 0);
+    const rerunDenominator = Number(rerun.passed || 0) + Number(rerun.failed || 0);
+    if (!initialDenominator || !rerunDenominator) return [];
+    return [{
+      taskId: task.id,
+      name: task.name,
+      testType: task.testType || 'regression',
+      analysisStatus: 'comparable',
+      seriesRunSequence: Number(task.seriesRunSequence || index + 1),
+      scheduledFor: task.scheduledFor || task.createdAt,
+      initialPassRate: Number(initial.passed || 0) / initialDenominator,
+      initialFailRate: Number(initial.failed || 0) / initialDenominator,
+      targetInitialPassRate: Number(initial.passed || 0) / initialDenominator,
+      targetInitialFailRate: Number(initial.failed || 0) / initialDenominator,
+      rerunPassRate: Number(rerun.passed || 0) / rerunDenominator,
+      rerunFailRate: Number(rerun.failed || 0) / rerunDenominator,
+    }];
+  });
+}
+
+function overviewCycleAnalysisHtml(tasks, analysis, loading) {
+  if (loading) return `<section class="overview-cycle-analysis-panel is-loading"><span class="section-label">${escapeHtml(tr('releaseCycleAnalysis'))}</span><p>${escapeHtml(tr('releaseCycleAnalysisLoading'))}</p></section>`;
+  const serverTrend = Array.isArray(analysis?.trend) ? analysis.trend : [];
+  const trend = serverTrend.length ? serverTrend : overviewCycleTaskTrend(tasks);
+  const summary = analysis?.summary || {};
+  const comparable = Number(summary.comparableTaskCount || trend.length);
+  const chart = releaseCycleTrendChartHtml(trend);
+  const initialPass = analysisRate(summary.initial?.passRate ?? (trend.length ? trend.reduce((sum, item) => sum + Number(item.initialPassRate || 0), 0) / trend.length : null));
+  const rerunPass = analysisRate(summary.rerun?.passRate ?? (trend.length ? trend.reduce((sum, item) => sum + Number(item.rerunPassRate || 0), 0) / trend.length : null));
+  return `<section class="overview-cycle-analysis-panel"><header class="overview-cycle-analysis-head"><div><span class="section-label">${escapeHtml(tr('releaseCycleAnalysis'))}</span><h3>${escapeHtml(tr('releaseCycleAnalysisHint'))}</h3></div><span class="status-badge ${trend.length ? 'completed' : 'pending'}">${comparable} ${escapeHtml(tr('analysisComparable'))}</span></header><div class="overview-cycle-analysis-metrics"><div><span>${escapeHtml(tr('analysisInitialPass'))}</span><strong>${initialPass}</strong></div><div><span>${escapeHtml(tr('analysisRerunPass'))}</span><strong>${rerunPass}</strong></div><div><span>${escapeHtml(tr('analysisRecovered'))}</span><strong>${analysis?.summary?.transitions?.recovered == null ? '-' : Number(analysis.summary.transitions.recovered)}</strong></div><div><span>${escapeHtml(tr('analysisPersistent'))}</span><strong>${analysis?.summary?.transitions?.persistent == null ? '-' : Number(analysis.summary.transitions.persistent)}</strong></div></div>${chart || `<p class="overview-cycle-analysis-empty">${escapeHtml(tr('analysisNoTrend'))}</p>`}</section>`;
+}
+
+function renderOverviewReleaseCycleModal() {
+  const modal = state.overviewCycleModal;
+  const body = $('#overviewReleaseCycleModalBody');
+  if (!body) return;
+  const tasks = modal.tasks || [];
+  const first = tasks[0] || overviewCycleLocalTasks(modal.cycleId, modal.business)[0];
+  if (first) $('#overviewReleaseCycleModalTitle').textContent = first.releaseCycleName || first.releaseKey || modal.cycleId;
+  if (modal.loading) {
+    body.innerHTML = `<p class="inline-note overview-release-cycle-loading">${escapeHtml(tr('overviewCycleLoading'))}</p>`;
+    return;
+  }
+  if (!tasks.length) {
+    body.innerHTML = `<div class="empty-state">${escapeHtml(tr('noCurrentTasks'))}</div>`;
+    return;
+  }
+  const page = modal.page + 1;
+  const pageControls = `<nav class="overview-release-cycle-pagination" aria-label="${escapeHtml(tr('releaseCycleTask'))}"><button class="button secondary small" type="button" data-action="overview-cycle-page" data-page="${modal.page - 1}"${modal.page === 0 ? ' disabled' : ''}>${escapeHtml(tr('overviewCyclePrevious'))}</button><span>${escapeHtml(trf('overviewCyclePage', { page, count: tasks.length }))}</span><button class="button secondary small" type="button" data-action="overview-cycle-page" data-page="${modal.page + 1}"${modal.hasMore ? '' : ' disabled'}>${escapeHtml(tr('overviewCycleNext'))}</button></nav>`;
+  const featureCount = tasks.filter((task) => task.testType === 'feature').length;
+  const regressionCount = tasks.length - featureCount;
+  body.innerHTML = `<div class="overview-release-cycle-modal-summary"><span>${escapeHtml(first?.releaseKey || '')}</span><span class="task-test-type feature">${escapeHtml(tr('featureTest'))} ${featureCount}</span><span class="task-test-type regression">${escapeHtml(tr('regressionTest'))} ${regressionCount}</span></div>${overviewCycleAnalysisHtml(tasks, modal.analysis, modal.analysisLoading)}<div class="overview-cycle-task-section"><header class="overview-cycle-task-section-head"><div><span class="section-label">${escapeHtml(tr('releaseCycleTask'))}</span><h3>${escapeHtml(tr('overviewCycleHint'))}</h3></div><span class="overview-section-count">${tasks.length}</span></header><div class="task-grid overview-release-cycle-task-grid">${tasks.map((task) => taskCard(task, 'grid')).join('')}</div></div>${pageControls}`;
+}
+
+async function openOverviewReleaseCycle(cycleId, business, page = 0) {
+  const normalizedPage = Math.max(0, Number(page) || 0);
+  const pageSize = state.overviewCycleModal.pageSize;
+  const requestVersion = ++state.overviewCycleModalRequestVersion;
+  state.overviewCycleModal = {
+    ...state.overviewCycleModal,
+    cycleId: String(cycleId || ''), business: String(business || ''), page: normalizedPage,
+    tasks: [], hasMore: false, loading: true, analysis: normalizedPage === 0 ? null : state.overviewCycleModal.analysis, analysisLoading: normalizedPage === 0,
+  };
+  openModal('overviewReleaseCycleModal');
+  renderOverviewReleaseCycleModal();
+  try {
+    const [response, analysis] = await Promise.all([
+      api(`/api/release-cycles/${encodeURIComponent(cycleId)}/tasks?limit=${pageSize + 1}&offset=${normalizedPage * pageSize}`),
+      normalizedPage === 0
+        ? api(`/api/release-cycles/${encodeURIComponent(cycleId)}/analysis?testType=all`).catch(() => null)
+        : Promise.resolve(state.overviewCycleModal.analysis),
+    ]);
+    if (requestVersion !== state.overviewCycleModalRequestVersion) return;
+    const tasks = Array.isArray(response) ? response : [];
+    state.overviewCycleModal.tasks = tasks.slice(0, pageSize);
+    state.overviewCycleModal.hasMore = tasks.length > pageSize;
+    state.overviewCycleModal.analysis = analysis;
+  } catch (error) {
+    if (requestVersion !== state.overviewCycleModalRequestVersion) return;
+    const localTasks = overviewCycleLocalTasks(cycleId, business);
+    state.overviewCycleModal.tasks = localTasks.slice(normalizedPage * pageSize, (normalizedPage + 1) * pageSize);
+    state.overviewCycleModal.hasMore = localTasks.length > (normalizedPage + 1) * pageSize;
+    if (!state.overviewCycleModal.tasks.length) toast(error.message, 'error');
+  } finally {
+    if (requestVersion !== state.overviewCycleModalRequestVersion) return;
+    state.overviewCycleModal.loading = false;
+    state.overviewCycleModal.analysisLoading = false;
+    renderOverviewReleaseCycleModal();
+  }
+}
+
 function renderOverview() {
-  const tasks = state.dashboard.sessions || [];
+  const tasks = sortTasksForDisplay(state.dashboard.sessions || []);
   const current = tasks.filter((task) => task.status !== 'completed');
   const history = tasks.filter((task) => task.status === 'completed');
   renderHtml('overviewTasks', '#overviewTaskGrid', current.length
-    ? current.slice(0, 8).map((task) => taskCard(task, 'grid')).join('')
+    ? overviewTaskGroupsHtml(current, 8)
     : `<div class="empty-state span-all">${escapeHtml(tr('noCurrentTasks'))}</div>`);
   renderHtml('overviewHistory', '#overviewHistoryList', history.length
     ? history.slice(0, 6).map(historyRow).join('')
@@ -4080,14 +4290,16 @@ function renderOverview() {
 
 function filteredTasks() {
   const tasks = state.dashboard.sessions || [];
-  return tasks.filter((task) => {
+  return sortTasksForDisplay(tasks.filter((task) => {
     if (state.taskFilter === 'history' && task.status !== 'completed') return false;
     if (state.taskFilter === 'running' && !isActiveTask(task)) return false;
     if (state.taskFilter === 'current' && task.status === 'completed') return false;
     if (state.taskProjectFilter && (task.project || 'cloudRecord') !== state.taskProjectFilter) return false;
     if (state.taskTagFilter && !(task.tags || []).includes(state.taskTagFilter)) return false;
+    if (state.taskTestTypeFilter && (task.testType || 'regression') !== state.taskTestTypeFilter) return false;
+    if (state.taskOriginFilter && (task.taskOrigin || 'standalone') !== state.taskOriginFilter) return false;
     return true;
-  });
+  }));
 }
 
 function renderTasks() {
@@ -4097,7 +4309,7 @@ function renderTasks() {
   const historyMode = state.taskFilter === 'history';
   $('#taskGrid').classList.toggle('history-mode', historyMode);
   if (!tasks.length) {
-    const emptyKey = state.taskProjectFilter || state.taskTagFilter
+    const emptyKey = state.taskProjectFilter || state.taskTagFilter || state.taskTestTypeFilter || state.taskOriginFilter
       ? 'noFilteredTasks' : (historyMode ? 'noHistory' : 'noCurrentTasks');
     renderHtml('tasks', '#taskGrid', `<div class="empty-state span-all">${escapeHtml(tr(emptyKey))}</div>`);
     $('#loadMoreTasksBtn').classList.add('hidden');
@@ -4569,6 +4781,7 @@ function openReleaseCycleEditor() {
     <label class="field"><span>${escapeHtml(tr('cycleName'))}</span><input name="name" required maxlength="160" placeholder="Cloud Recording v2.8.1"></label>
     <label class="field"><span>${escapeHtml(tr('releaseKey'))}</span><input name="releaseKey" required maxlength="200" placeholder="cloud-recording-v2.8.1"></label>
     <label class="field"><span>${escapeHtml(tr('taskProject'))}</span><input name="project" maxlength="100" value="cloudRecord"></label>
+    <label class="field"><span>${escapeHtml(tr('taskTestType'))}</span><select name="testType"><option value="regression" selected>${escapeHtml(tr('regressionTest'))}</option><option value="feature">${escapeHtml(tr('featureTest'))}</option></select></label>
     <label class="field"><span>${escapeHtml(tr('cycleTaskName'))}</span><input name="taskName" required maxlength="160" value="${escapeHtml(tr('cycleTaskNameDefault'))}"></label>
     <label class="field full"><span>${escapeHtml(tr('cycleTaskObjective'))}</span><textarea name="objective" required maxlength="524288"></textarea></label>
     <label class="field"><span>${escapeHtml(tr('workspace'))}</span><input name="workingDir" value="." maxlength="4096"></label>
@@ -4596,7 +4809,7 @@ function releaseCycleFormPayload(form) {
   const payload = { id: String(form.get('id') || '').trim(), name: String(form.get('name') || '').trim(),
     releaseKey: String(form.get('releaseKey') || '').trim(), project: String(form.get('project') || 'cloudRecord').trim(),
     workflow: String(form.get('workflow') || 'full-release-regression').trim(),
-    taskTemplate: { name: String(form.get('taskName') || '').trim(), objective: String(form.get('objective') || '').trim(),
+    taskTemplate: { name: String(form.get('taskName') || '').trim(), objective: String(form.get('objective') || '').trim(), testType: String(form.get('testType') || 'regression').trim(),
       workingDir: String(form.get('workingDir') || '.').trim() || '.', workspaceMode: mode,
       sourceMode: mode === 'session-clone' ? 'session-clone' : 'shared-repo', autoResume: true, maxRetries: 2 } };
   if (form.get('scheduleEnabled') === 'on') payload.schedule = { cron: String(form.get('cron') || '').trim(),
@@ -4630,17 +4843,126 @@ async function saveReleaseCycle(event) {
   } finally { button.disabled = false; }
 }
 
+function analysisRate(value) {
+  return value == null ? '-' : `${Math.round(Number(value) * 100)}%`;
+}
+
+function releaseCycleAnalysisGroupHtml(type, group) {
+  const summary = group?.summary || {};
+  const labelKey = type === 'feature' ? 'featureTest' : 'regressionTest';
+  return `<article class="release-analysis-group"><header><h4>${escapeHtml(tr(labelKey))}</h4><span>${escapeHtml(trf('releaseCycleTaskCount', { count: summary.taskCount || 0 }))}</span></header><div class="release-analysis-metrics">
+    <div><span>${escapeHtml(tr('analysisInitialPass'))}</span><strong>${analysisRate(summary.initial?.passRate)}</strong></div>
+    <div><span>${escapeHtml(tr('analysisTargetInitialPass'))}</span><strong>${analysisRate(summary.targetInitial?.passRate)}</strong></div>
+    <div><span>${escapeHtml(tr('analysisRerunPass'))}</span><strong>${analysisRate(summary.rerun?.passRate)}</strong></div>
+    <div><span>${escapeHtml(tr('analysisRecovered'))}</span><strong>${Number(summary.transitions?.recovered || 0)}</strong></div>
+    <div><span>${escapeHtml(tr('analysisPersistent'))}</span><strong>${Number(summary.transitions?.persistent || 0)}</strong></div>
+    <div><span>${escapeHtml(tr('analysisRegressed'))}</span><strong>${Number(summary.transitions?.regressed || 0)}</strong></div>
+  </div></article>`;
+}
+
+function releaseCycleTrendChartHtml(trend) {
+  if (!trend.length) return '';
+  const width = 760;
+  const height = 360;
+  const left = 42;
+  const right = 16;
+  const top = 34;
+  const bottom = 40;
+  const chartWidth = width - left - right;
+  const panelHeight = 118;
+  const panelGap = 42;
+  const panels = [
+    { id: 'pass', title: tr('analysisPass'), top, series: [
+      ['initialPassRate', 'pass-initial', `${tr('analysisInitial')} ${tr('analysisPass')}`],
+      ['targetInitialPassRate', 'pass-target', `${tr('analysisTargetInitialPass')} ${tr('analysisPass')}`],
+      ['rerunPassRate', 'pass-rerun', `${tr('analysisRerun')} ${tr('analysisPass')}`],
+    ] },
+    { id: 'fail', title: tr('analysisFail'), top: top + panelHeight + panelGap, series: [
+      ['initialFailRate', 'fail-initial', `${tr('analysisInitial')} ${tr('analysisFail')}`],
+      ['targetInitialFailRate', 'fail-target', `${tr('analysisTargetInitialFail')}`],
+      ['rerunFailRate', 'fail-rerun', `${tr('analysisRerun')} ${tr('analysisFail')}`],
+    ] },
+  ];
+  const xStep = trend.length === 1 ? 0 : chartWidth / (trend.length - 1);
+  const clampRate = (value) => Math.max(0, Math.min(1, Number(value || 0)));
+  const lineFor = (panel, key, className, label) => {
+    const points = trend.map((point, index) => ({
+      x: trend.length === 1 ? left + chartWidth / 2 : left + index * xStep,
+      y: panel.top + panelHeight * (1 - clampRate(point[key])),
+    }));
+    const path = points.map((point, index) => `${index ? 'L' : 'M'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(' ');
+    const markers = points.map((point, index) => {
+      const partial = trend[index].analysisStatus === 'partial' ? ` · ${tr('analysisPartial')}` : '';
+      return `<circle class="release-analysis-point ${className}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="3.5"><title>${escapeHtml(`${trend[index].name || trend[index].taskId}${partial} · ${label}: ${analysisRate(trend[index][key])}`)}</title></circle>`;
+    }).join('');
+    return `<path class="release-analysis-line ${className}" d="${path}"></path>${markers}`;
+  };
+  const panelHtml = panels.map((panel) => {
+    const grid = [0, .5, 1].map((rate) => {
+      const y = panel.top + panelHeight * (1 - rate);
+      return `<line class="release-analysis-grid-line" x1="${left}" y1="${y.toFixed(2)}" x2="${width - right}" y2="${y.toFixed(2)}"></line><text class="release-analysis-axis-label" x="${left - 8}" y="${(y + 4).toFixed(2)}" text-anchor="end">${Math.round(rate * 100)}%</text>`;
+    }).join('');
+    const lines = panel.series.map(([key, className, label]) => lineFor(panel, key, className, label)).join('');
+    return `<rect class="release-analysis-panel" x="${left}" y="${panel.top}" width="${chartWidth}" height="${panelHeight}" rx="10"></rect><text class="release-analysis-panel-title" x="${left + 12}" y="${panel.top + 20}">${escapeHtml(panel.title)}</text>${grid}${lines}`;
+  }).join('');
+  const labels = trend.map((point, index) => {
+    if (index % Math.max(1, Math.ceil(trend.length / 8)) !== 0) return '';
+    const x = trend.length === 1 ? left + chartWidth / 2 : left + index * xStep;
+    return `<text class="release-analysis-axis-label" x="${x.toFixed(2)}" y="${height - 12}" text-anchor="middle">${escapeHtml(String(point.seriesRunSequence || index + 1))}</text>`;
+  }).join('');
+  const legend = [
+    ['pass-initial', `${tr('analysisInitial')} ${tr('analysisPass')}`], ['pass-target', `${tr('analysisTargetInitialPass')}`], ['pass-rerun', `${tr('analysisRerun')} ${tr('analysisPass')}`],
+    ['fail-initial', `${tr('analysisInitial')} ${tr('analysisFail')}`], ['fail-target', `${tr('analysisTargetInitialFail')}`], ['fail-rerun', `${tr('analysisRerun')} ${tr('analysisFail')}`],
+  ].map(([className, label]) => `<span><i class="release-analysis-legend-swatch ${className}"></i>${escapeHtml(label)}</span>`).join('');
+  return `<div class="release-analysis-chart" role="img" aria-label="${escapeHtml(tr('analysisChartHint'))}"><div class="release-analysis-chart-head"><span>${escapeHtml(tr('analysisChartHint'))}</span><span class="release-analysis-legend">${legend}</span></div><svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true"><line class="release-analysis-axis" x1="${left}" y1="${top}" x2="${left}" y2="${height - bottom}"></line>${panelHtml}${labels}</svg></div>`;
+}
+
+function releaseCycleAnalysisHtml(analysis) {
+  if (state.releaseCycleAnalysisLoading) return `<p class="inline-note">${escapeHtml(tr('releaseCycleAnalysisLoading'))}</p>`;
+  if (!analysis) return '';
+  const summary = analysis.summary || {};
+  const trend = analysis.trend || [];
+  const table = trend.length
+    ? `<div class="release-analysis-table-wrap"><table class="release-analysis-table"><thead><tr><th>${escapeHtml(tr('analysisTask'))}</th><th>${escapeHtml(tr('analysisScheduled'))}</th><th>${escapeHtml(tr('analysisInitial'))}</th><th>${escapeHtml(tr('analysisRerun'))}</th><th>${escapeHtml(tr('analysisTransitions'))}</th></tr></thead><tbody>${trend.map((point) => `<tr><td><code>${escapeHtml(point.taskId)}</code><span class="task-test-type ${escapeHtml(point.testType)}">${escapeHtml(tr(point.testType === 'feature' ? 'featureTest' : 'regressionTest'))}</span>${point.analysisStatus === 'partial' ? `<span class="task-test-type partial">${escapeHtml(tr('analysisPartial'))}</span>` : ''}</td><td>${escapeHtml(formatTime(point.scheduledFor))}</td><td>${analysisRate(point.initialPassRate)} / ${analysisRate(point.initialFailRate)}</td><td>${analysisRate(point.rerunPassRate)} / ${analysisRate(point.rerunFailRate)}</td><td><span class="analysis-transition-good">${Number(point.recovered || 0)} ↑</span><span class="analysis-transition-bad">${Number(point.persistent || 0)} · ${Number(point.regressed || 0)} ↓</span></td></tr>`).join('')}</tbody></table></div>`
+    : `<p class="inline-note">${escapeHtml(tr('analysisNoTrend'))}</p>`;
+  return `<section class="release-analysis-card"><header class="release-analysis-head"><div><span class="section-label">${escapeHtml(tr('releaseCycleAnalysis'))}</span><h3>${escapeHtml(tr('releaseCycleAnalysisHint'))}</h3></div><span class="status-badge completed">${Number(summary.comparableTaskCount || 0)} ${escapeHtml(tr('analysisComparable'))}</span></header><div class="release-analysis-summary"><div><span>${escapeHtml(tr('analysisComparable'))}</span><strong>${Number(summary.comparableTaskCount || 0)}</strong></div><div><span>${escapeHtml(tr('analysisPartial'))}</span><strong>${Number(summary.partialTaskCount || 0)}</strong></div><div><span>${escapeHtml(tr('analysisPending'))}</span><strong>${Number(summary.pendingTaskCount || 0)}</strong></div><div><span>${escapeHtml(tr('analysisUnavailable'))}</span><strong>${Number(summary.unavailableTaskCount || 0)}</strong></div></div><div class="release-analysis-groups">${releaseCycleAnalysisGroupHtml('feature', analysis.groups?.feature)}${releaseCycleAnalysisGroupHtml('regression', analysis.groups?.regression)}</div><h4 class="release-analysis-subtitle">${escapeHtml(tr('analysisTrend'))}</h4>${releaseCycleTrendChartHtml(trend)}${table}</section>`;
+}
+
+function renderReleaseCycleTaskGroups(tasks) {
+  const groups = {
+    feature: tasks.filter((task) => (task.testType || 'regression') === 'feature'),
+    regression: tasks.filter((task) => (task.testType || 'regression') === 'regression'),
+  };
+  for (const [type, target, countTarget] of [
+    ['feature', '#releaseCycleFeatureTaskGrid', '#releaseCycleFeatureTaskCount'],
+    ['regression', '#releaseCycleRegressionTaskGrid', '#releaseCycleRegressionTaskCount'],
+  ]) {
+    const members = groups[type];
+    $(countTarget).textContent = String(members.length);
+    renderHtml(`release-cycle-${type}-tasks`, target, members.length
+      ? members.map((task) => taskCard(task)).join('')
+      : `<div class="empty-state span-all">${escapeHtml(tr('noCurrentTasks'))}</div>`);
+  }
+}
+
 function renderReleaseCycles() {
   const grid = $('#releaseCycleGrid');
   if (!grid) return;
+  const sortedCycles = sortTasksForDisplay(state.releaseCycles);
   grid.innerHTML = state.releaseCycles.length
-    ? state.releaseCycles.map(releaseCycleCard).join('')
+    ? sortedCycles.map(releaseCycleCard).join('')
     : `<div class="empty-state span-all">${escapeHtml(tr('noReleaseCycles'))}</div>`;
   const cycle = state.releaseCycles.find((item) => item.id === state.selectedReleaseCycleId);
   const section = $('#releaseCycleTaskSection');
   if (!section || !cycle) {
     section?.classList.add('hidden');
-    if (section) renderHtml('release-cycle-tasks', '#releaseCycleTaskGrid', '');
+    if (section) {
+      renderHtml('release-cycle-feature-tasks', '#releaseCycleFeatureTaskGrid', '');
+      renderHtml('release-cycle-regression-tasks', '#releaseCycleRegressionTaskGrid', '');
+      $('#releaseCycleFeatureTaskCount').textContent = '0';
+      $('#releaseCycleRegressionTaskCount').textContent = '0';
+    }
+    if (section) renderHtml('release-cycle-analysis', '#releaseCycleAnalysis', '');
     return;
   }
   section.classList.remove('hidden');
@@ -4649,9 +4971,8 @@ function renderReleaseCycles() {
   $('#deleteReleaseCycleBtn').dataset.id = cycle.id;
   $('#deleteReleaseCycleBtn').disabled = Boolean(cycle.deletion || releaseCycleDeleteIntents.get(cycle.id)?.running);
   $('#deleteReleaseCycleBtn').textContent = tr(cycle.deletion ? 'cycleDeleting' : 'deleteReleaseCycle');
-  renderHtml('release-cycle-tasks', '#releaseCycleTaskGrid', state.releaseCycleTasks.length
-    ? state.releaseCycleTasks.map((task) => taskCard(task)).join('')
-    : `<div class="empty-state span-all">${escapeHtml(tr('noCurrentTasks'))}</div>`);
+  renderHtml('release-cycle-analysis', '#releaseCycleAnalysis', releaseCycleAnalysisHtml(state.releaseCycleAnalysis));
+  renderReleaseCycleTaskGroups(state.releaseCycleTasks);
 }
 
 async function loadReleaseCycles() {
@@ -4698,7 +5019,10 @@ async function openReleaseCycle(id) {
   const cycle = state.releaseCycles.find(item => item.id === id);
   if (!cycle) return;
   const version = ++releaseCycleTasksRequestVersion;
-  if (state.selectedReleaseCycleId !== id) state.releaseCycleTasks = [];
+  if (state.selectedReleaseCycleId !== id) {
+    state.releaseCycleTasks = [];
+    state.releaseCycleAnalysis = null;
+  }
   state.selectedReleaseCycleId = id;
   renderReleaseCycles();
   try {
@@ -4710,12 +5034,38 @@ async function openReleaseCycle(id) {
   } catch (error) {
     if (version === releaseCycleTasksRequestVersion && state.selectedReleaseCycleId === id) throw error;
   }
+  loadReleaseCycleAnalysis(id, version).catch((error) => {
+    if (version === releaseCycleTasksRequestVersion && state.selectedReleaseCycleId === id) toast(error.message, 'error');
+  });
+}
+
+async function loadReleaseCycleAnalysis(id, version = releaseCycleTasksRequestVersion) {
+  if (state.selectedReleaseCycleId !== id) return;
+  state.releaseCycleAnalysisLoading = true;
+  renderReleaseCycles();
+  try {
+    const analysis = await api(`/api/release-cycles/${encodeURIComponent(id)}/analysis?testType=all`);
+    if (version !== releaseCycleTasksRequestVersion || state.selectedReleaseCycleId !== id) return;
+    state.releaseCycleAnalysis = analysis;
+  } catch (error) {
+    if (version === releaseCycleTasksRequestVersion && state.selectedReleaseCycleId === id) {
+      state.releaseCycleAnalysis = null;
+    }
+    throw error;
+  } finally {
+    if (version === releaseCycleTasksRequestVersion && state.selectedReleaseCycleId === id) {
+      state.releaseCycleAnalysisLoading = false;
+      renderReleaseCycles();
+    }
+  }
 }
 
 function collapseReleaseCycle() {
   releaseCycleTasksRequestVersion++;
   state.selectedReleaseCycleId = '';
   state.releaseCycleTasks = [];
+  state.releaseCycleAnalysis = null;
+  state.releaseCycleAnalysisLoading = false;
   renderReleaseCycles();
 }
 
@@ -4867,6 +5217,11 @@ function closeModal(id) {
     delete $('#releaseCycleForm').dataset.createKey;
     delete $('#releaseCycleForm').dataset.createPayload;
   }
+  if (id === 'overviewReleaseCycleModal') {
+    state.overviewCycleModalRequestVersion += 1;
+    state.overviewCycleModal = { ...state.overviewCycleModal, cycleId: '', business: '', page: 0, tasks: [], hasMore: false, loading: false, analysis: null, analysisLoading: false };
+    $('#overviewReleaseCycleModalBody').innerHTML = '';
+  }
   if (id === 'skillAttributionModal') {
     $('#skillAttributionForm').innerHTML = '';
     state.editingExecutionId = '';
@@ -4905,7 +5260,8 @@ function openTaskEditor(task = null) {
     <label class="field full"><span>${escapeHtml(tr('objective'))}</span><textarea name="objective" required maxlength="262144">${escapeHtml(task?.objective || '')}</textarea></label>
     <label class="field full"><span>${escapeHtml(tr('notes'))}</span><textarea name="notes" maxlength="262144">${escapeHtml(task?.notes || '')}</textarea></label>
     <label class="field"><span>${escapeHtml(tr('taskProject'))}</span><input name="project" maxlength="100" value="${escapeHtml(task?.project || 'cloudRecord')}"></label>
-    <label class="field"><span>${escapeHtml(tr('taskTags'))}</span><input name="tags" maxlength="10000" value="${escapeHtml((task?.tags || []).join(', '))}"></label>
+    <label class="field"><span>${escapeHtml(tr('taskTestType'))}</span><select name="testType"><option value="regression"${task?.testType !== 'feature' ? ' selected' : ''}>${escapeHtml(tr('regressionTest'))}</option><option value="feature"${task?.testType === 'feature' ? ' selected' : ''}>${escapeHtml(tr('featureTest'))}</option></select></label>
+    <label class="field"><span>${escapeHtml(tr('taskTags'))}</span><input name="tags" maxlength="10000" value="${escapeHtml((task?.tags || []).join(', '))}"><small>${escapeHtml(tr('taskTagsHint'))}</small></label>
     <label class="field"><span>${escapeHtml(tr('workspaceMode'))}</span><select name="workspaceMode"${task ? ' disabled' : ''}><option value="shared"${task?.workspaceMode !== 'session-clone' ? ' selected' : ''}>shared</option><option value="session-clone"${task?.workspaceMode === 'session-clone' ? ' selected' : ''}>session-clone</option></select>${task ? `<input type="hidden" name="workspaceMode" value="${escapeHtml(task.workspaceMode || 'shared')}">` : ''}</label>
     <label class="field"><span>${escapeHtml(tr('workingDir'))}</span><input name="workingDir" required maxlength="4096" value="${escapeHtml(task?.workingDir || '.')}"><small>${escapeHtml(tr('pathHint'))}</small></label>
     <label class="field"><span>${escapeHtml(tr('maxRetries'))}</span><input type="number" name="maxRetries" min="0" max="20" value="${Number(task?.maxRetries ?? 2)}"></label>
@@ -4937,6 +5293,7 @@ async function saveTask(event) {
     objective: form.get('objective'),
     notes: form.get('notes'),
     project: form.get('project') || 'cloudRecord',
+    testType: form.get('testType') || 'regression',
     tags: [...new Set(String(form.get('tags') || '').split(',').map((tag) => tag.trim()).filter(Boolean))],
     workspaceMode: form.get('workspaceMode') || 'shared',
     sourceMode: form.get('workspaceMode') === 'session-clone' ? 'session-clone' : 'shared-repo',
@@ -5701,6 +6058,8 @@ document.addEventListener('click', async (event) => {
     await openTaskDetail(id, 'business-reports');
   }
   if (action.dataset.action === 'open-release-cycle') await toggleReleaseCycle(id);
+  if (action.dataset.action === 'open-overview-cycle') await openOverviewReleaseCycle(action.dataset.cycleId, action.dataset.business);
+  if (action.dataset.action === 'overview-cycle-page') await openOverviewReleaseCycle(state.overviewCycleModal.cycleId, state.overviewCycleModal.business, action.dataset.page);
   if (action.dataset.action === 'collapse-release-cycle') collapseReleaseCycle();
   if (action.dataset.action === 'close-release-cycle') await closeReleaseCycle(id || state.selectedReleaseCycleId);
   if (action.dataset.action === 'delete-release-cycle') await deleteReleaseCycle(id || state.selectedReleaseCycleId);
@@ -5796,6 +6155,14 @@ $('#taskTagFilter').addEventListener('change', (event) => {
   state.taskTagFilter = event.target.value;
   renderTasks();
 });
+$('#taskTestTypeFilter').addEventListener('change', (event) => {
+  state.taskTestTypeFilter = event.target.value;
+  renderTasks();
+});
+$('#taskOriginFilter').addEventListener('change', (event) => {
+  state.taskOriginFilter = event.target.value;
+  renderTasks();
+});
 $('#skillForm').addEventListener('submit', saveSkill);
 $('#skillAttributionForm').addEventListener('submit', saveSkillAttribution);
 $('#bridgeReclaimForm').addEventListener('submit', submitBridgeReclaim);
@@ -5868,7 +6235,13 @@ function dashboardPollDelay() {
   if (state.dashboardUnavailable) {
     return Math.min(30000, 1000 * (2 ** Math.min(5, state.dashboardFailureCount)));
   }
-  return (state.dashboard.sessions || []).some(isActiveTask) ? 2000 : 10000;
+  const sessions = state.dashboard.sessions || [];
+  if (sessions.some(isActiveTask)) return 2000;
+  const progressPending = sessions.some((task) => (
+    [task?.testProgress?.runs?.initial, task?.testProgress?.runs?.rerun1]
+      .some((run) => run?.available && !['completed', 'unavailable'].includes(run.status))
+  ));
+  return progressPending ? CASE_PROGRESS_POLL_INTERVAL_MS : 10000;
 }
 
 function scheduleDashboardPoll(delay = dashboardPollDelay()) {

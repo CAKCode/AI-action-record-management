@@ -28,7 +28,7 @@ const {
 } = require('./task-session-workspace');
 const { getDatabase } = require('./database');
 const { pathContains, resolveWorkingDir } = require('./workspaces');
-const { validateTaskBody, validateSkillBody } = require('./validation');
+const { TASK_TEST_TYPES, validateTaskBody, validateSkillBody } = require('./validation');
 const { normalizeArtifactDeclarations, normalizeSkillReport } = require('./skill-report');
 const { measureTaskStorage } = require('./task-storage');
 const { retainTaskSessionHistory } = require('./task-session-history');
@@ -84,9 +84,11 @@ const {
   killVerifiedTaskCgroup,
   inspectVerifiedTaskCgroup,
 } = require('./task-cgroup');
+const { readTaskPytestRunSummaries } = require('./pytest-result-summary');
 
 const SKILL_CACHE_TTL_MS = 15000;
 const MAX_QUERY_LIMIT = 500;
+const SESSION_ENRICH_BATCH_SIZE = 400;
 const MAX_SESSION_PAGE_SIZE = 500;
 const MAX_LATEST_LOG_BYTES = 1024 * 1024;
 const LATEST_LOG_TRIM_THRESHOLD = MAX_LATEST_LOG_BYTES + (256 * 1024);
@@ -125,6 +127,21 @@ const SERIES_QUEUE_BLOCKED_SQL = `EXISTS (
     AND previous_task.status IN ('queued','running','recovering','stopping','waiting_scheduled')
 )`;
 const skillReportResourceVerificationCache = new Map();
+const taskTestProgressCache = new Map();
+const TASK_TEST_PROGRESS_CACHE_MAX = 1000;
+const releaseCycleAnalysisCache = new Map();
+const RELEASE_CYCLE_ANALYSIS_CACHE_MAX = 24;
+const releaseCycleAnalysisHotCache = new Map();
+const RELEASE_CYCLE_ANALYSIS_HOT_TTL_MS = 5000;
+const RELEASE_CYCLE_ANALYSIS_HOT_CACHE_MAX = 24;
+
+function rememberReleaseCycleAnalysisHotCache(key, response) {
+  releaseCycleAnalysisHotCache.delete(key);
+  releaseCycleAnalysisHotCache.set(key, { checkedAt: Date.now(), response });
+  while (releaseCycleAnalysisHotCache.size > RELEASE_CYCLE_ANALYSIS_HOT_CACHE_MAX) {
+    releaseCycleAnalysisHotCache.delete(releaseCycleAnalysisHotCache.keys().next().value);
+  }
+}
 const TASK_RETENTION_STATUS_KEY = 'task_retention_status';
 const TASK_RETENTION_DAYS = 30;
 const TASK_RETENTION_BATCH_SIZE = 50;
@@ -650,6 +667,8 @@ function rowToSession(row) {
     notes: row.notes,
     project: normalizeTaskProject(row.project),
     tags: normalizeTaskTags(parseJson(row.tags_json, [])),
+    testType: normalizeTaskTestType(row.test_type),
+    taskOrigin: 'standalone',
     enabled: Boolean(row.enabled),
     status: row.status,
     summary: row.summary,
@@ -683,11 +702,54 @@ function normalizeTaskProject(value) {
   return String(value ?? 'cloudRecord').trim() || 'cloudRecord';
 }
 
+function normalizeTaskTestType(value) {
+  const normalized = String(value ?? 'regression').trim().toLowerCase();
+  return TASK_TEST_TYPES.includes(normalized) ? normalized : 'regression';
+}
+
+const TASK_TAG_ALIASES = Object.freeze({
+  'cloud-recording': '', 'cloud-recording-release': '', release: 'mode:release', regression: '',
+  'regression-only': 'mode:single', 'single-submission': 'mode:single',
+  'skip-deployment': 'mode:deploy-only', 'no-deploy': 'mode:deploy-only', 'deploy-only': 'mode:deploy-only',
+  'daily-regression': 'mode:nightly', 'full-regression': 'mode:release', 'full-release-regression': 'mode:release',
+  'version-coverage': '', 'session-clone': '', 'video-check': 'mode:video-check', videocheck: 'mode:video-check',
+  staging: 'env:staging', private: 'env:private', gw51: 'scope:gw51', gw53: 'scope:gw53',
+  'exclude-uha': 'exclude:uha', 'exclude-mirror': 'exclude:mirror',
+  'credential-parser-fix': 'change:credential-parser-fix', 'credential-recovered': 'change:credential-recovered',
+  'legacy-worker': 'change:legacy-worker', 'screenshot-release': 'change:screenshot-release',
+});
+
+function normalizeTaskTag(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '';
+  if (Object.prototype.hasOwnProperty.call(TASK_TAG_ALIASES, raw)) return TASK_TAG_ALIASES[raw];
+  if (/^release:/.test(raw) || /^(feature|regression)$/.test(raw)) return '';
+  if (/^confluence-[0-9]+$/.test(raw)) return `source:${raw}`;
+  if (/^\d+\.\d+\.\d+(?:[-.][a-z0-9]+)*$/.test(raw)) return `version:${raw}`;
+  const prefixed = raw.match(/^(scope|mode|env|source|exclude|change|version|custom):(.+)$/);
+  const normalized = (prefixed ? prefixed[2] : raw)
+    .replace(/[_\s]+/g, '-').replace(/[^a-z0-9.-]/g, '').replace(/^-+|-+$/g, '');
+  if (!normalized) return '';
+  return `${prefixed ? prefixed[1] : 'custom'}:${normalized}`;
+}
+
 function normalizeTaskTags(value) {
-  return unique(toArray(value));
+  return unique(toArray(value).map(normalizeTaskTag).filter(Boolean)).slice(0, 6);
 }
 
 function enrichSessionsWithScheduling(db, sessions) {
+  if (sessions.length <= SESSION_ENRICH_BATCH_SIZE) return enrichSessionsWithSchedulingBatch(db, sessions);
+  const enriched = [];
+  for (let offset = 0; offset < sessions.length; offset += SESSION_ENRICH_BATCH_SIZE) {
+    enriched.push(...enrichSessionsWithSchedulingBatch(
+      db,
+      sessions.slice(offset, offset + SESSION_ENRICH_BATCH_SIZE),
+    ));
+  }
+  return enriched;
+}
+
+function enrichSessionsWithSchedulingBatch(db, sessions) {
   if (!sessions.length) return sessions;
   const ids = sessions.map((session) => session.id);
   const placeholders = ids.map(() => '?').join(',');
@@ -721,10 +783,13 @@ function enrichSessionsWithScheduling(db, sessions) {
     if (!map.has(row.task_id)) map.set(row.task_id, row);
     return map;
   }, new Map()));
+  const testProgress = taskTestProgressByTask(db, ids);
   return sessions.map((session) => ({
     ...session,
+    testProgress: testProgress.get(session.id) || emptyTaskTestProgress(),
     activeExternalAttempts: externalCounts.get(session.id) || 0,
     activeScheduledJobs: schedules.get(session.id)?.count || 0,
+    taskOrigin: seriesRuns.has(session.id) ? 'release-cycle' : 'standalone',
     nextScheduledAt: schedules.get(session.id)?.nextDueAt || '',
     ...(seriesRuns.has(session.id) ? {
       releaseCycleId: seriesRuns.get(session.id).release_cycle_id,
@@ -738,6 +803,199 @@ function enrichSessionsWithScheduling(db, sessions) {
       seriesRunSequence: Number(seriesRuns.get(session.id).run_sequence),
     } : {}),
   }));
+}
+
+function emptyTaskTestRunProgress() {
+  return {
+    available: false,
+    resultKnown: false,
+    total: 0,
+    completed: 0,
+    passed: 0,
+    failed: 0,
+    skipped: 0,
+    percent: 0,
+    status: 'unavailable',
+  };
+}
+
+function emptyTaskTestProgress() {
+  return {
+    ...emptyTaskTestRunProgress(),
+    runs: {
+      initial: emptyTaskTestRunProgress(),
+      rerun1: emptyTaskTestRunProgress(),
+    },
+  };
+}
+
+function finiteMetricValue(metrics, keys) {
+  for (const key of keys) {
+    const value = Number(metrics.get(key));
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+  return null;
+}
+
+function taskTestProgressByTask(db, taskIds) {
+  if (!taskIds.length) return new Map();
+  const placeholders = taskIds.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT task_id, report_key, report_type, status, revision, published_at, metrics_json
+    FROM (
+      SELECT task_id, report_key, report_type, status, revision, published_at,
+             json_extract(payload_json, '$.metrics') AS metrics_json,
+             ROW_NUMBER() OVER (PARTITION BY task_id, report_key ORDER BY revision DESC, published_at DESC) AS report_rank
+      FROM skill_reports
+      WHERE task_id IN (${placeholders}) AND report_type IN ('test-result', 'business-result', 'workflow-progress')
+    ) latest_reports
+    WHERE (report_type='workflow-progress' AND report_rank<=3) OR (report_type<>'workflow-progress' AND report_rank=1)
+    ORDER BY task_id, report_key, revision DESC
+  `).all(...taskIds);
+  const latestByTask = new Map();
+  for (const row of rows) {
+    if (!latestByTask.has(row.task_id)) latestByTask.set(row.task_id, new Map());
+    const reports = latestByTask.get(row.task_id);
+    const reportKey = row.report_type === 'workflow-progress'
+      ? `${row.report_key}\0${row.revision}` : row.report_key;
+    reports.set(reportKey, row);
+  }
+  const result = new Map();
+  for (const taskId of taskIds) {
+    const reports = latestByTask.get(taskId) || new Map();
+    const signature = [...reports.values()]
+      .map((row) => `${row.report_type}\0${row.report_key}\0${row.revision}\0${row.published_at || ''}\0${row.status}`)
+      .join('\1');
+    const cached = taskTestProgressCache.get(taskId);
+    if (cached?.signature === signature) {
+      result.set(taskId, cached.value);
+      continue;
+    }
+    const value = calculateTaskTestProgress([...reports.values()]);
+    taskTestProgressCache.set(taskId, { signature, value });
+    result.set(taskId, value);
+  }
+  while (taskTestProgressCache.size > TASK_TEST_PROGRESS_CACHE_MAX) {
+    taskTestProgressCache.delete(taskTestProgressCache.keys().next().value);
+  }
+  return result;
+}
+
+function calculateTaskTestProgress(reports) {
+  const parsedReports = reports.map((report) => {
+    let metrics;
+    try { metrics = JSON.parse(report.metrics_json || '[]'); } catch { metrics = []; }
+    return {
+      ...report,
+      values: new Map(Array.isArray(metrics)
+        ? metrics.filter((metric) => metric && typeof metric.key === 'string')
+          .map((metric) => [metric.key.trim().toLowerCase(), metric.value])
+        : []),
+    };
+  });
+  const workflowSummaries = parsedReports.filter((report) => report.report_type === 'workflow-progress');
+  const finalSummary = workflowSummaries
+    .filter((report) => finiteMetricValue(report.values, ['final_total']) != null)
+    .sort((left, right) => Number(right.revision || 0) - Number(left.revision || 0))[0];
+  const runs = {
+    initial: calculateTaskTestRunProgress(
+      parsedReports.filter((report) => report.report_type !== 'workflow-progress' && taskReportRun(report) === 'initial'),
+      latestWorkflowMetric(workflowSummaries, 'initial_total'),
+    ),
+    rerun1: calculateTaskTestRunProgress(
+      parsedReports.filter((report) => report.report_type !== 'workflow-progress' && taskReportRun(report) === 'rerun1'),
+      latestWorkflowMetric(workflowSummaries, 'rerun1_selected'),
+    ),
+  };
+  const overall = finalSummary
+    ? summaryTaskTestProgress(finalSummary.values)
+    : combineTaskTestRunProgress(runs.initial, runs.rerun1);
+  return { ...overall, runs };
+}
+
+function latestWorkflowMetric(reports, key) {
+  return reports
+    .map((report) => ({ report, value: finiteMetricValue(report.values, [key]) }))
+    .filter((item) => item.value != null)
+    .sort((left, right) => Number(right.report.revision || 0) - Number(left.report.revision || 0))[0]?.value ?? null;
+}
+
+function taskReportRun(report) {
+  const key = String(report.report_key || '').toLowerCase();
+  if (/rerun[-_. ]?1/.test(key)) return 'rerun1';
+  if (/rerun[-_. ]?\d+/.test(key)) return '';
+  if (/(?:manual[-_. ]?rerun|recovery|targeted|retry)/.test(key)) return '';
+  return 'initial';
+}
+
+function calculateTaskTestRunProgress(reports, fallbackTotal = null) {
+  const progress = emptyTaskTestRunProgress();
+  const backfillReports = reports.filter((report) => /^backfill:pytest-progress:(?:initial|rerun-1):/i.test(report.report_key || ''));
+  const stageReports = reports.filter((report) => /(?:^|:)stage:[^:]+$/i.test(report.report_key || ''));
+  const selectedReports = backfillReports.length ? backfillReports : (stageReports.length ? stageReports : reports);
+  let hasMetric = false;
+  let active = false;
+  for (const report of selectedReports) {
+    const { values } = report;
+    const total = finiteMetricValue(values, ['total', 'selected', 'collected']);
+    const passedDirect = finiteMetricValue(values, ['passed', 'pass']);
+    const passed = passedDirect ?? (finiteMetricValue(values, ['flaky_pass', 'recovered']) || 0);
+    const failedDirect = (finiteMetricValue(values, ['failed', 'fail']) || 0)
+      + (finiteMetricValue(values, ['error', 'errors']) || 0);
+    const failed = failedDirect || (finiteMetricValue(values, ['persistent', 'bug', 'environment', 'env_issue', 'case_issue']) || 0);
+    const skipped = finiteMetricValue(values, ['skipped', 'skip']) || 0;
+    const xfailed = finiteMetricValue(values, ['xfailed']) || 0;
+    const xpassed = finiteMetricValue(values, ['xpassed']) || 0;
+    const outcomeCount = passed + failed + skipped + xfailed + xpassed;
+    const executed = finiteMetricValue(values, ['executed', 'business_executed']);
+    if (total == null && executed == null && outcomeCount === 0) continue;
+    hasMetric = true;
+    progress.total += total == null ? outcomeCount : total;
+    progress.completed += outcomeCount || executed || 0;
+    progress.passed += passed;
+    progress.failed += failed;
+    progress.skipped += skipped;
+    active ||= ['pending', 'running'].includes(String(report.status || '').toLowerCase());
+  }
+  if (!hasMetric && fallbackTotal == null) return progress;
+  progress.available = true;
+  progress.total = Math.max(progress.total, Number(fallbackTotal || 0), progress.completed);
+  progress.completed = Math.min(progress.completed, progress.total);
+  progress.resultKnown = progress.completed > 0 || progress.passed > 0 || progress.failed > 0 || progress.skipped > 0;
+  if (!progress.resultKnown) {
+    progress.percent = 0;
+    progress.status = 'unknown';
+    return progress;
+  }
+  progress.percent = progress.total ? Math.round((progress.completed / progress.total) * 100) : 0;
+  progress.status = active && progress.completed < progress.total ? 'running'
+    : (progress.total > 0 && progress.completed >= progress.total ? 'completed' : 'partial');
+  return progress;
+}
+
+function summaryTaskTestProgress(values) {
+  const total = finiteMetricValue(values, ['final_total']) || 0;
+  const passed = finiteMetricValue(values, ['final_passed']) || 0;
+  const failed = (finiteMetricValue(values, ['final_failed']) || 0)
+    + (finiteMetricValue(values, ['final_error', 'final_errors']) || 0);
+  const skipped = finiteMetricValue(values, ['final_skipped', 'final_skip']) || 0;
+  return { available: true, resultKnown: true, total, completed: total, passed, failed, skipped, percent: total ? 100 : 0, status: 'completed' };
+}
+
+function combineTaskTestRunProgress(initial, rerun1) {
+  const progress = emptyTaskTestRunProgress();
+  if (!initial.available && !rerun1.available) return progress;
+  progress.available = true;
+  progress.resultKnown = initial.resultKnown || rerun1.resultKnown;
+  progress.total = initial.total + rerun1.total;
+  progress.completed = initial.completed + rerun1.completed;
+  progress.passed = initial.passed + rerun1.passed;
+  progress.failed = initial.failed + rerun1.failed;
+  progress.skipped = initial.skipped + rerun1.skipped;
+  progress.percent = progress.total ? Math.round((progress.completed / progress.total) * 100) : 0;
+  progress.status = progress.completed >= progress.total ? 'completed'
+    : (initial.status === 'running' || rerun1.status === 'running' ? 'running' : 'partial');
+  return progress;
 }
 
 function rowToSkill(row, content = undefined) {
@@ -1374,29 +1632,23 @@ function importSkillArchive(skills, options = {}, context = {}) {
 
 function listSessions(options = null) {
   const db = ensureStorage();
-  if (!options) {
-    return enrichSessionsWithScheduling(
-      db,
-      db.prepare('SELECT * FROM tasks ORDER BY updated_at DESC, id ASC').all().map(rowToSession),
-    );
-  }
   const clauses = [];
   const params = [];
-  const statuses = Array.isArray(options.statuses)
+  const statuses = Array.isArray(options?.statuses)
     ? options.statuses.filter(Boolean)
-    : String(options.status || '').split(',').map((item) => item.trim()).filter(Boolean);
+    : String(options?.status || '').split(',').map((item) => item.trim()).filter(Boolean);
   if (statuses.length) {
     clauses.push(`status IN (${statuses.map(() => '?').join(',')})`);
     params.push(...statuses);
   }
-  if (options.releaseCycleId) {
+  if (options?.releaseCycleId) {
     clauses.push(`EXISTS (
       SELECT 1 FROM task_series_runs sr
       WHERE sr.task_id=tasks.id AND sr.release_cycle_id=?
     )`);
     params.push(String(options.releaseCycleId));
   }
-  if (options.releaseKey) {
+  if (options?.releaseKey) {
     clauses.push(`EXISTS (
       SELECT 1 FROM task_series_runs sr
       JOIN release_cycles rc ON rc.id=sr.release_cycle_id
@@ -1404,21 +1656,49 @@ function listSessions(options = null) {
     )`);
     params.push(String(options.releaseKey));
   }
-  const maxPageSize = options.internal ? MAX_QUERY_LIMIT : MAX_SESSION_PAGE_SIZE;
-  const limit = Math.min(maxPageSize, boundedLimit(options.limit, 100));
-  const offset = boundedOffset(options.offset);
+  const maxPageSize = options?.internal ? MAX_QUERY_LIMIT : MAX_SESSION_PAGE_SIZE;
+  const limit = Math.min(maxPageSize, boundedLimit(options?.limit, 100));
+  const offset = boundedOffset(options?.offset);
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  return enrichSessionsWithScheduling(
+  const sessions = enrichSessionsWithScheduling(
     db,
-    db.prepare(`SELECT * FROM tasks ${where} ORDER BY updated_at DESC, id ASC LIMIT ? OFFSET ?`)
-      .all(...params, limit, offset)
+    db.prepare(`SELECT * FROM tasks ${where} ORDER BY created_at DESC, id ASC`)
+      .all(...params)
       .map(rowToSession),
   );
+  sessions.sort(compareSessionDisplayOrder);
+  return options ? sessions.slice(offset, offset + limit) : sessions;
+}
+
+function sessionVersionTuple(session) {
+  const taggedVersion = (session?.tags || []).find((tag) => /^version:\d+\.\d+\.\d+/i.test(String(tag || '')));
+  const sources = [taggedVersion, session?.releaseKey, session?.releaseCycleName, session?.name, session?.id];
+  for (const source of sources) {
+    const match = String(source || '').match(/(?:^|[^\d])v?(\d+)\.(\d+)\.(\d+)(?=$|[^\d])/i);
+    if (match) return [Number(match[1]), Number(match[2]), Number(match[3])];
+  }
+  return null;
+}
+
+function compareSessionDisplayOrder(left, right) {
+  const createdDifference = Date.parse(right?.createdAt || 0) - Date.parse(left?.createdAt || 0);
+  if (createdDifference) return createdDifference;
+  const leftVersion = sessionVersionTuple(left);
+  const rightVersion = sessionVersionTuple(right);
+  if (leftVersion && rightVersion) {
+    for (let index = 0; index < leftVersion.length; index += 1) {
+      if (leftVersion[index] !== rightVersion[index]) return rightVersion[index] - leftVersion[index];
+    }
+  } else if (leftVersion || rightVersion) {
+    return leftVersion ? -1 : 1;
+  }
+  return String(left?.id || '').localeCompare(String(right?.id || ''));
 }
 
 function rowToReleaseCycle(row, schedules = []) {
   if (!row) return null;
   const config = parseJson(row.config_json, {});
+  const rawTemplate = config.taskTemplate && typeof config.taskTemplate === 'object' ? config.taskTemplate : {};
   return {
     id: row.id,
     name: row.name,
@@ -1426,7 +1706,7 @@ function rowToReleaseCycle(row, schedules = []) {
     releaseKey: row.release_key,
     workflow: row.workflow,
     status: row.status,
-    taskTemplate: config.taskTemplate || {},
+    taskTemplate: { ...rawTemplate, tags: normalizeTaskTags(rawTemplate.tags || []), testType: normalizeTaskTestType(rawTemplate.testType) },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     closedAt: row.closed_at || '',
@@ -1465,6 +1745,7 @@ function releaseCycleTaskTemplate(data, project) {
     notes: String(template.notes || '').trim(),
     project: normalizeTaskProject(template.project || project),
     tags: normalizeTaskTags(template.tags || []),
+    testType: normalizeTaskTestType(template.testType),
     enabled: template.enabled !== false,
     autoResume: template.autoResume !== false,
     maxRetries: template.maxRetries == null ? 2 : Number(template.maxRetries),
@@ -1504,7 +1785,7 @@ function listReleaseCycles(options = {}) {
     FROM release_cycles c
     LEFT JOIN task_series_runs r ON r.release_cycle_id=c.id
     ${where}
-    GROUP BY c.id ORDER BY c.updated_at DESC, c.id`).all(...params);
+    GROUP BY c.id ORDER BY c.created_at DESC, c.id`).all(...params);
   const scheduleRows = db.prepare(`SELECT * FROM task_series_schedules
     WHERE release_cycle_id IN (${rows.length ? rows.map(() => '?').join(',') : "''"})
     ORDER BY created_at`).all(...rows.map((row) => row.id));
@@ -1940,7 +2221,7 @@ function createReleaseCycleTaskInTransaction(db, cycle, options = {}, context = 
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'created', ?)`)
     .run(runId, cycle.id, scheduleId, taskId, scheduledFor, triggerType, sequence,
       options.overlapPolicy || 'parallel', nowIso());
-  return { session: enrichSessionsWithScheduling(db, [rowToSession(session)])[0], created: true, runId };
+  return { session: enrichSessionsWithScheduling(db, [session])[0], created: true, runId };
 }
 
 function createReleaseCycleTask(cycleId, data = {}, context = {}) {
@@ -2250,6 +2531,11 @@ function saveSessionInTransaction(db, id, data, context = {}) {
   if (existing) assertTaskNotInCycleDeletion(db, normalizedId);
   const workspaceMode = normalizeWorkspaceMode(data.workspaceMode ?? existing?.workspace_mode);
   validateTaskBody({ ...data, id: normalizedId }, { creating: !existing, requireId: true });
+  if (existing && data.testType != null
+    && normalizeTaskTestType(data.testType) !== normalizeTaskTestType(existing.test_type)
+    && db.prepare('SELECT 1 FROM step_runs WHERE task_id=? LIMIT 1').get(normalizedId)) {
+    throw statusError('testType cannot change after the Task has test results', 409);
+  }
   if (existing?.status === 'completed') throw statusError('Completed sessions are immutable history records', 409);
   if (existing && ACTIVE_STATUSES.includes(existing.status)) throw statusError('Active sessions cannot be edited', 409);
   if (existing && workspaceMode !== existing.workspace_mode) {
@@ -2280,7 +2566,7 @@ function saveSessionInTransaction(db, id, data, context = {}) {
     resolveWorkingDir(effectiveWorkingDir);
     db.prepare(`
       UPDATE tasks SET
-        name = ?, objective = ?, working_dir = ?, notes = ?, project = ?, tags_json = ?, enabled = ?,
+        name = ?, objective = ?, working_dir = ?, notes = ?, project = ?, tags_json = ?, test_type = ?, enabled = ?,
         auto_resume = ?, max_retries = ?, workspace_mode = ?, session_root = ?, source_root = ?,
         source_mode = ?, source_commit = ?, source_manifest_hash = ?, archive_mode = ?, archive_state = ?,
         version = version + 1, updated_at = ?
@@ -2292,6 +2578,7 @@ function saveSessionInTransaction(db, id, data, context = {}) {
       String(data.notes ?? existing.notes).trim(),
       normalizeTaskProject(data.project ?? existing.project),
       JSON.stringify(normalizeTaskTags(data.tags ?? parseJson(existing.tags_json, []))),
+      normalizeTaskTestType(data.testType ?? existing.test_type),
       (data.enabled ?? Boolean(existing.enabled)) ? 1 : 0,
       (data.autoResume ?? Boolean(existing.auto_resume)) ? 1 : 0,
       Math.min(MAX_TASK_RETRIES, Math.max(0, Number(data.maxRetries ?? existing.max_retries ?? 2))),
@@ -2309,17 +2596,18 @@ function saveSessionInTransaction(db, id, data, context = {}) {
     resolveWorkingDir(effectiveWorkingDir);
     db.prepare(`
       INSERT INTO tasks (
-        id, name, objective, working_dir, notes, project, tags_json, enabled, status, summary,
+        id, name, objective, working_dir, notes, project, tags_json, test_type, enabled, status, summary,
         last_run_at, last_finished_at, archived_at, run_count, current_pid,
         persistent_session_key, auto_resume, max_retries, retry_count, recovery_count,
         last_brief, last_error, recovery_state, workspace_mode, session_root, source_root,
         source_mode, source_commit, source_manifest_hash, archive_mode, archive_state,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       normalizedId, String(data.name || normalizedId).trim(), String(data.objective || '').trim(),
       effectiveWorkingDir, String(data.notes || '').trim(),
       normalizeTaskProject(data.project), JSON.stringify(normalizeTaskTags(data.tags)),
+      normalizeTaskTestType(data.testType),
       data.enabled === false ? 0 : 1,
       status, String(data.summary || ''), String(data.lastRunAt || ''), String(data.lastFinishedAt || ''),
       status === 'completed' ? String(data.archivedAt || data.lastFinishedAt || now) : '', Number(data.runCount || 0),
@@ -2347,6 +2635,7 @@ function saveSessionInTransaction(db, id, data, context = {}) {
       ...(data.notes != null ? { notes: data.notes } : {}),
       ...(data.project != null ? { project: normalizeTaskProject(data.project) } : {}),
       ...(data.tags != null ? { tags: normalizeTaskTags(data.tags) } : {}),
+      ...(data.testType != null ? { testType: normalizeTaskTestType(data.testType) } : {}),
       ...(data.enabled != null ? { enabled: data.enabled } : {}),
       ...(data.autoResume != null ? { autoResume: data.autoResume } : {}),
       ...(data.maxRetries != null ? { maxRetries: data.maxRetries } : {}),
@@ -2499,7 +2788,7 @@ function updateSession(session, expectedWorkerId = '') {
   const changed = db.prepare(`
     UPDATE tasks SET
       name=@name, objective=@objective, working_dir=@workingDir, notes=@notes,
-      project=@project, tags_json=@tagsJson, enabled=@enabled,
+      project=@project, tags_json=@tagsJson, test_type=@testType, enabled=@enabled,
       status=@status, summary=@summary, last_run_at=@lastRunAt, last_finished_at=@lastFinishedAt,
       archived_at=@archivedAt, run_count=@runCount, current_pid=@currentPid,
       current_pid_start_ticks=@currentPidStartTicks, current_process_group_id=@currentProcessGroupId,
@@ -2528,6 +2817,7 @@ function updateSession(session, expectedWorkerId = '') {
     currentProcessGroupId: merged.currentPid ? (merged.currentProcessGroupId || null) : null,
     project: normalizeTaskProject(merged.project),
     tagsJson: JSON.stringify(normalizeTaskTags(merged.tags)),
+    testType: normalizeTaskTestType(merged.testType),
     leaseOwner: merged.leaseOwner || null,
     leaseExpiresAt: merged.leaseExpiresAt || null,
     persistentSessionKey: merged.persistentSessionKey || merged.bridgeSessionKey || '',
@@ -7430,11 +7720,248 @@ function listTaskPytestReports(sessionId) {
       id: artifact.id || `${report.id}:${artifact.key}`, filePath: artifact.managed_path || '',
       sha256: artifact.sha256 || '', bytes: Number(artifact.bytes || 0), scope, rerun,
       executionKey: attempt?.id || run?.id || report.report_key,
+      runId: run?.id || '', runKey: run?.run_key || '', runKind: run?.run_kind || '',
+      runNumber: run?.run_number == null ? null : Number(run.run_number), stepKey: run?.step_key || scope,
       at: run?.finished_at || attempt?.finished_at || run?.started_at || report.published_at,
       running: ['pending', 'running'].includes(attempt?.status || run?.status || report.status),
     });
   }
   return descriptors;
+}
+
+const PYTEST_ANALYSIS_OUTCOMES = Object.freeze(['passed', 'failed', 'error', 'skipped', 'xfailed', 'xpassed', 'unknown']);
+
+function emptyPytestAnalysisCounts() {
+  return Object.fromEntries(['total', ...PYTEST_ANALYSIS_OUTCOMES].map((key) => [key, 0]));
+}
+
+function addPytestAnalysisCounts(target, source) {
+  for (const key of Object.keys(target)) target[key] += Number(source?.[key] || 0);
+  return target;
+}
+
+function isPytestPass(outcome) {
+  return outcome === 'passed' || outcome === 'xpassed';
+}
+
+function isPytestFail(outcome) {
+  return outcome === 'failed' || outcome === 'error';
+}
+
+function passFailRate(counts) {
+  const denominator = Number(counts?.passed || 0) + Number(counts?.failed || 0) + Number(counts?.error || 0);
+  return {
+    denominator,
+    pass: Number(counts?.passed || 0),
+    fail: Number(counts?.failed || 0) + Number(counts?.error || 0),
+    passRate: denominator ? Number((Number(counts.passed || 0) / denominator).toFixed(4)) : null,
+    failRate: denominator ? Number(((Number(counts.failed || 0) + Number(counts.error || 0)) / denominator).toFixed(4)) : null,
+  };
+}
+
+function taskPytestAnalysis(task, runSummaries, options = {}) {
+  const requestedStepKey = String(options.stepKey || '').trim();
+  const summariesByStep = new Map();
+  for (const summary of runSummaries) {
+    if (requestedStepKey && summary.stepKey !== requestedStepKey) continue;
+    if (!summariesByStep.has(summary.stepKey)) summariesByStep.set(summary.stepKey, new Map());
+    const byRunKey = summariesByStep.get(summary.stepKey);
+    const current = byRunKey.get(summary.runKey);
+    if (!current || Number(summary.runNumber || 0) > Number(current.runNumber || 0)) {
+      byRunKey.set(summary.runKey, summary);
+    }
+  }
+
+  const initialCounts = emptyPytestAnalysisCounts();
+  const rerunCounts = emptyPytestAnalysisCounts();
+  const targetInitialCounts = emptyPytestAnalysisCounts();
+  const initialCases = new Map();
+  const rerunCases = new Map();
+  const transitions = { recovered: 0, persistent: 0, regressed: 0, stablePassed: 0, unmatched: 0 };
+  const steps = [];
+  let hasMissingRun = false;
+  let hasPendingRun = false;
+  let hasParseFailure = false;
+  let comparableStepCount = 0;
+
+  for (const [stepKey, byRunKey] of summariesByStep) {
+    const initial = byRunKey.get('initial');
+    const rerun = byRunKey.get('rerun-1');
+    const initialStepCases = new Map(initial?.cases?.map((item) => [item.key || `${item.scope || ''}\0${item.nodeid}`, item.outcome]) || []);
+    const rerunStepCases = new Map(rerun?.cases?.map((item) => [item.key || `${item.scope || ''}\0${item.nodeid}`, item.outcome]) || []);
+    if (!initial || !rerun) {
+      hasMissingRun = true;
+      steps.push({ stepKey, status: 'pending', initialAvailable: Boolean(initial?.available), rerunAvailable: Boolean(rerun?.available) });
+      continue;
+    }
+    if (!initial.complete || !rerun.complete) {
+      const pending = initial.pendingReports > 0 || rerun.pendingReports > 0 || !initial.available || !rerun.available;
+      if (pending) hasPendingRun = true;
+      else hasParseFailure = true;
+      steps.push({ stepKey, status: pending ? 'pending' : 'unavailable',
+        initialAvailable: initial.available, rerunAvailable: rerun.available });
+      continue;
+    }
+    comparableStepCount++;
+    addPytestAnalysisCounts(initialCounts, initial.counts);
+    addPytestAnalysisCounts(rerunCounts, rerun.counts);
+    for (const [caseKey, outcome] of initialStepCases) initialCases.set(`${stepKey}\0${caseKey}`, outcome);
+    for (const [caseKey, outcome] of rerunStepCases) rerunCases.set(`${stepKey}\0${caseKey}`, outcome);
+    steps.push({ stepKey, status: 'comparable', initialAvailable: initial.available, rerunAvailable: rerun.available });
+  }
+
+  for (const [caseKey, rerunOutcome] of rerunCases) {
+    const initialOutcome = initialCases.get(caseKey);
+    if (!initialOutcome) {
+      transitions.unmatched++;
+      continue;
+    }
+    targetInitialCounts.total++;
+    if (Object.prototype.hasOwnProperty.call(targetInitialCounts, initialOutcome)) targetInitialCounts[initialOutcome]++;
+    else targetInitialCounts.unknown++;
+    if (isPytestFail(initialOutcome) && isPytestPass(rerunOutcome)) transitions.recovered++;
+    else if (isPytestFail(initialOutcome) && isPytestFail(rerunOutcome)) transitions.persistent++;
+    else if (isPytestPass(initialOutcome) && isPytestFail(rerunOutcome)) transitions.regressed++;
+    else if (isPytestPass(initialOutcome) && isPytestPass(rerunOutcome)) transitions.stablePassed++;
+  }
+
+  const initialRate = passFailRate(initialCounts);
+  const rerunRate = passFailRate(rerunCounts);
+  const targetInitialRate = passFailRate(targetInitialCounts);
+  const status = hasParseFailure ? 'unavailable'
+    : (comparableStepCount ? (hasMissingRun || hasPendingRun ? 'partial' : 'comparable') : 'pending');
+  return {
+    taskId: task.id, name: task.name, status: task.status, testType: task.testType,
+    seriesRunSequence: Number(task.seriesRunSequence || 0), scheduledFor: task.scheduledFor || '',
+    analysisStatus: status, comparableStepCount, steps,
+    initial: { counts: initialCounts, ...initialRate },
+    targetInitial: { counts: targetInitialCounts, ...targetInitialRate },
+    rerun: { counts: rerunCounts, ...rerunRate },
+    transitions,
+  };
+}
+
+function aggregatePytestAnalysis(tasks) {
+  const aggregate = {
+    taskCount: tasks.length, comparableTaskCount: 0, partialTaskCount: 0, pendingTaskCount: 0, unavailableTaskCount: 0,
+    initial: { counts: emptyPytestAnalysisCounts() },
+    targetInitial: { counts: emptyPytestAnalysisCounts() },
+    rerun: { counts: emptyPytestAnalysisCounts() },
+    transitions: { recovered: 0, persistent: 0, regressed: 0, stablePassed: 0, unmatched: 0 },
+  };
+  for (const task of tasks) {
+    if (task.analysisStatus === 'comparable') aggregate.comparableTaskCount++;
+    else if (task.analysisStatus === 'partial') aggregate.partialTaskCount++;
+    else if (task.analysisStatus === 'unavailable') aggregate.unavailableTaskCount++;
+    else aggregate.pendingTaskCount++;
+    if (task.analysisStatus !== 'comparable') continue;
+    addPytestAnalysisCounts(aggregate.initial.counts, task.initial.counts);
+    addPytestAnalysisCounts(aggregate.targetInitial.counts, task.targetInitial.counts);
+    addPytestAnalysisCounts(aggregate.rerun.counts, task.rerun.counts);
+    for (const key of Object.keys(aggregate.transitions)) aggregate.transitions[key] += task.transitions[key];
+  }
+  aggregate.initial = { counts: aggregate.initial.counts, ...passFailRate(aggregate.initial.counts) };
+  aggregate.targetInitial = { counts: aggregate.targetInitial.counts, ...passFailRate(aggregate.targetInitial.counts) };
+  aggregate.rerun = { counts: aggregate.rerun.counts, ...passFailRate(aggregate.rerun.counts) };
+  return aggregate;
+}
+
+function releaseCycleAnalysisCacheKey(db, cycle, rows, requestedType, stepKey) {
+  const taskIds = rows.map((row) => row.id);
+  const reportRows = taskIds.length
+    ? db.prepare(`SELECT task_id, COUNT(*) AS report_count, MAX(published_at) AS latest_published_at,
+        MAX(sequence) AS latest_sequence
+      FROM skill_reports WHERE task_id IN (${taskIds.map(() => '?').join(',')}) GROUP BY task_id`).all(...taskIds)
+    : [];
+  const stepRunRows = taskIds.length
+    ? db.prepare(`SELECT task_id, id, run_key, run_kind, status, started_at, finished_at, updated_at
+        FROM step_runs WHERE task_id IN (${taskIds.map(() => '?').join(',')}) ORDER BY task_id, id`).all(...taskIds)
+    : [];
+  const externalRows = taskIds.length
+    ? db.prepare(`SELECT task_id, id, generation, step_run_id, status, started_at, finished_at, updated_at
+        FROM external_attempts WHERE task_id IN (${taskIds.map(() => '?').join(',')}) ORDER BY task_id, id, generation`).all(...taskIds)
+    : [];
+  const artifactRows = taskIds.length
+    ? db.prepare(`SELECT task_id, id, report_id, managed_path, bytes, sha256, created_at
+        FROM skill_report_artifacts WHERE task_id IN (${taskIds.map(() => '?').join(',')}) ORDER BY task_id, id`).all(...taskIds)
+    : [];
+  return JSON.stringify({
+    cycleId: cycle.id, cycleUpdatedAt: cycle.updated_at, requestedType, stepKey,
+    tasks: rows.map((row) => [row.id, row.test_type, row.updated_at, row.scheduled_for, row.run_sequence]),
+    reports: reportRows.map((row) => [row.task_id, row.report_count, row.latest_published_at, row.latest_sequence]),
+    stepRuns: stepRunRows.map((row) => [row.task_id, row.id, row.run_key, row.run_kind, row.status, row.started_at, row.finished_at, row.updated_at]),
+    externalAttempts: externalRows.map((row) => [row.task_id, row.id, row.generation, row.step_run_id, row.status, row.started_at, row.finished_at, row.updated_at]),
+    artifacts: artifactRows.map((row) => {
+      let stamp = '';
+      try {
+        const stat = fs.lstatSync(row.managed_path, { bigint: true });
+        stamp = [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+      } catch (error) { if (error.code !== 'ENOENT') stamp = `error:${error.code || 'unknown'}`; }
+      return [row.task_id, row.id, row.report_id, row.managed_path, row.bytes, row.sha256, row.created_at, stamp];
+    }),
+  });
+}
+
+async function listReleaseCycleAnalysis(cycleId, options = {}) {
+  const normalizedCycleId = normalizeSeriesId(cycleId);
+  const requestedType = String(options.testType || 'all').trim().toLowerCase();
+  const requestedStepKey = String(options.stepKey || '').trim();
+  if (requestedType !== 'all' && !TASK_TEST_TYPES.includes(requestedType)) {
+    throw statusError(`testType must be one of: all, ${TASK_TEST_TYPES.join(', ')}`, 400);
+  }
+  const db = ensureStorage();
+  const cycle = db.prepare('SELECT * FROM release_cycles WHERE id=?').get(normalizedCycleId);
+  if (!cycle) throw statusError(`Release cycle ${normalizedCycleId} not found`, 404);
+  const hotKey = `${normalizedCycleId}\0${requestedType}\0${requestedStepKey}`;
+  const hotEntry = releaseCycleAnalysisHotCache.get(hotKey);
+  if (hotEntry && Date.now() - hotEntry.checkedAt < RELEASE_CYCLE_ANALYSIS_HOT_TTL_MS) {
+    return hotEntry.response;
+  }
+  const rows = db.prepare(`
+    SELECT tasks.*, series.scheduled_for, series.run_sequence
+    FROM task_series_runs series
+    JOIN tasks ON tasks.id=series.task_id
+    WHERE series.release_cycle_id=?
+      AND (?='all' OR tasks.test_type=?)
+    ORDER BY series.run_sequence, series.scheduled_for, tasks.id
+  `).all(normalizedCycleId, requestedType, requestedType);
+  const cacheKey = releaseCycleAnalysisCacheKey(db, cycle, rows, requestedType, requestedStepKey);
+  if (releaseCycleAnalysisCache.has(cacheKey)) {
+    const cached = releaseCycleAnalysisCache.get(cacheKey);
+    releaseCycleAnalysisCache.delete(cacheKey);
+    releaseCycleAnalysisCache.set(cacheKey, cached);
+    rememberReleaseCycleAnalysisHotCache(hotKey, cached);
+    return cached;
+  }
+  const taskResults = [];
+  for (const row of rows) {
+    const task = { ...rowToSession(row), scheduledFor: row.scheduled_for, seriesRunSequence: Number(row.run_sequence) };
+    const runSummaries = await readTaskPytestRunSummaries(listTaskPytestReports(task.id));
+    taskResults.push(taskPytestAnalysis(task, runSummaries, options));
+  }
+  const groups = Object.fromEntries(TASK_TEST_TYPES.map((type) => {
+    const groupTasks = taskResults.filter((task) => task.testType === type);
+    return [type, { summary: aggregatePytestAnalysis(groupTasks), tasks: groupTasks }];
+  }));
+  const response = {
+    cycle: rowToReleaseCycle(cycle), testType: requestedType, runKey: 'rerun-1',
+    summary: aggregatePytestAnalysis(taskResults),
+    groups,
+    trend: taskResults.filter((task) => task.analysisStatus === 'comparable').map((task) => ({
+      taskId: task.taskId, name: task.name, testType: task.testType, analysisStatus: task.analysisStatus,
+      seriesRunSequence: task.seriesRunSequence,
+      scheduledFor: task.scheduledFor, initialPassRate: task.initial.passRate,
+      rerunPassRate: task.rerun.passRate, initialFailRate: task.initial.failRate,
+      rerunFailRate: task.rerun.failRate, targetInitialPassRate: task.targetInitial.passRate,
+      targetInitialFailRate: task.targetInitial.failRate, ...task.transitions,
+    })),
+  };
+  releaseCycleAnalysisCache.set(cacheKey, response);
+  while (releaseCycleAnalysisCache.size > RELEASE_CYCLE_ANALYSIS_CACHE_MAX) {
+    releaseCycleAnalysisCache.delete(releaseCycleAnalysisCache.keys().next().value);
+  }
+  rememberReleaseCycleAnalysisHotCache(hotKey, response);
+  return response;
 }
 
 function listSkillReports(sessionId, options = {}) {
@@ -10874,6 +11401,7 @@ function sessionMatchesCreateRequest(task, taskId, data) {
     && normalizeTaskProject(task.project) === normalizeTaskProject(data.project)
     && JSON.stringify(normalizeTaskTags(parseJson(task.tags_json, [])))
       === JSON.stringify(normalizeTaskTags(data.tags))
+    && normalizeTaskTestType(task.test_type) === normalizeTaskTestType(data.testType)
     && Boolean(task.enabled) === true
     && Boolean(task.auto_resume) === (data.autoResume !== false)
     && Number(task.max_retries) === Math.min(
@@ -12252,6 +12780,7 @@ function exportConfigBundle() {
       notes: session.notes,
       project: session.project,
       tags: session.tags,
+      testType: session.testType,
       enabled: session.enabled,
       autoResume: session.autoResume,
       maxRetries: session.maxRetries,
@@ -12486,6 +13015,7 @@ module.exports = {
   deleteSkill,
   listSessions,
   listReleaseCycles,
+  listReleaseCycleAnalysis,
   getReleaseCycle,
   createReleaseCycle,
   createTaskSeriesSchedule,

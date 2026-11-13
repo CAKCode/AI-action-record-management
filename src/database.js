@@ -139,6 +139,8 @@ function schema(db) {
       notes TEXT NOT NULL DEFAULT '',
       project TEXT NOT NULL DEFAULT 'cloudRecord',
       tags_json TEXT NOT NULL DEFAULT '[]',
+      test_type TEXT NOT NULL DEFAULT 'regression'
+        CHECK(test_type IN ('feature', 'regression')),
       enabled INTEGER NOT NULL DEFAULT 1,
       status TEXT NOT NULL DEFAULT 'idle',
       summary TEXT NOT NULL DEFAULT '',
@@ -849,7 +851,11 @@ function schema(db) {
   if (!taskColumns.has('tags_json')) {
     db.exec("ALTER TABLE tasks ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'");
   }
+  if (!taskColumns.has('test_type')) {
+    db.exec("ALTER TABLE tasks ADD COLUMN test_type TEXT NOT NULL DEFAULT 'regression'");
+  }
   db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_project_updated ON tasks(project, updated_at DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_test_type_updated ON tasks(test_type, updated_at DESC)');
   const attemptColumns = new Set(db.pragma('table_info(attempts)').map((column) => column.name));
   if (!attemptColumns.has('pid_start_ticks')) {
     db.exec("ALTER TABLE attempts ADD COLUMN pid_start_ticks TEXT NOT NULL DEFAULT ''");

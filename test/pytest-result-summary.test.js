@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { readTaskPytestSummary } = require('../src/pytest-result-summary');
+const { readTaskPytestRunSummaries, readTaskPytestSummary } = require('../src/pytest-result-summary');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pytest-result-summary-'));
 let sequence = 0;
@@ -88,4 +88,19 @@ test('an empty business Task has no pytest statistics', async () => {
   const result = await readTaskPytestSummary([]);
   assert.equal(result.available, false);
   assert.equal(result.final.total, 0);
+});
+
+test('groups pytest results by initial and rerun-1 Step Run', async () => {
+  const initial = report('step-a', { caseA: 'Failed', caseB: 'Passed' }, {
+    runId: 'run-initial', runKey: 'initial', runKind: 'initial', runNumber: 1, stepKey: 'step-a',
+  });
+  const rerun = report('step-a', { caseA: 'Passed' }, {
+    runId: 'run-rerun-1', runKey: 'rerun-1', runKind: 'rerun', runNumber: 2, stepKey: 'step-a',
+  });
+  const result = await readTaskPytestRunSummaries([initial, rerun]);
+  assert.equal(result.length, 2);
+  assert.deepEqual(result.find((run) => run.runKey === 'initial').counts, {
+    total: 2, passed: 1, failed: 1, error: 0, skipped: 0, xfailed: 0, xpassed: 0, unknown: 0,
+  });
+  assert.deepEqual(result.find((run) => run.runKey === 'rerun-1').cases, [{ key: 'step-a\0caseA', nodeid: 'caseA', scope: 'step-a', outcome: 'passed' }]);
 });

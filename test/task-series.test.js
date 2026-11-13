@@ -22,7 +22,7 @@ test('release cycle schedules create independent Tasks and close stops future cr
       releaseKey: 'cloud-recording-v2.8.1', project: 'cloudRecord',
       taskTemplate: {
         name: 'Nightly full regression', objective: 'Run the full cloud recording workflow',
-        workingDir: '.', workspaceMode: 'shared', sourceMode: 'shared-repo', tags: ['nightly'],
+        workingDir: '.', workspaceMode: 'shared', sourceMode: 'shared-repo', tags: ['nightly'], testType: 'feature',
       },
     });
     const schedule = createTaskSeriesSchedule(cycle.id, {
@@ -33,7 +33,7 @@ test('release cycle schedules create independent Tasks and close stops future cr
     const dispatched = claimDueTaskSeriesSchedules('test-worker', 10);
     if (dispatched.length !== 1) throw new Error('expected one scheduled Task');
     const tasks = listReleaseCycleTasks(cycle.id, { limit: 20, offset: 0 });
-    if (tasks.length !== 1 || tasks[0].releaseKey !== cycle.releaseKey) throw new Error('Task was not linked to the cycle');
+    if (tasks.length !== 1 || tasks[0].releaseKey !== cycle.releaseKey || tasks[0].testType !== 'feature' || tasks[0].taskOrigin !== 'release-cycle') throw new Error('Task was not linked to the cycle');
     if (listSessions({ releaseKey: cycle.releaseKey, limit: 20, offset: 0 }).length !== 1) throw new Error('release filter failed');
     const manualA = createReleaseCycleTask(cycle.id, {}, { idempotencyKey: 'manual-series-key' });
     const manualB = createReleaseCycleTask(cycle.id, {}, { idempotencyKey: 'manual-series-key' });

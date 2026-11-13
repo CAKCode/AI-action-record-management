@@ -7,8 +7,9 @@
 | 能力 | 已实现行为 | 使用边界 |
 | --- | --- | --- |
 | 持久任务 | New、连续 Turn、停止、Resume、Reset、Complete、Restore；保留执行与审计历史 | 平台只运行 Codex；继续和恢复跟随 Task 当前最新 Session |
-| 项目与标签 | 创建、编辑和 API 支持 `project`、`tags`；历史任务默认 `cloudRecord`；列表可同时选一个项目和一个标签 | 分类属于任务元数据，不自动选择业务 Skill、测试范围或部署流程；筛选作用于页面已加载的任务 |
+| Task 业务分类 | 创建、编辑和 API 支持 `project`、`testType`、`tags`；`testType` 区分 Feature 测试和回归测试；历史任务默认 `regression` | 分类属于任务元数据，不自动选择业务 Skill、测试范围或部署流程；筛选作用于页面已加载的任务 |
 | 版本周期与 Cron 系列 | API 创建提测版本周期和 Cron；每天生成独立 Task；版本页按周期查看 Task；关闭周期停止后续创建 | 每个 Task 在启动时自行拉取最新代码、镜像和环境；周期不冻结测试快照，已创建 Task 不因关闭周期而停止 |
+| 版本周期数据分析 | 按 Feature/回归分组比较原始 initial、rerun 目标 initial 与 `rerun-1` 的 Pass/Fail、恢复、持续失败和回归趋势 | 部分 Step Pair 的 Task 单独标记为 partial，不计入完整周期汇总 |
 | 并发 | 不同 Task 和同一工作目录内的多个 pytest 可并行 | 业务侧必须为每个 Run 分配独立日志、HTML、视频和下载路径；平台隔离托管资源，不能修复源文件互相覆盖 |
 | 后台推进 | 登记 PID/LOG/DONE/STATE/META；运行期间 Worker 轻量观察，终态后恢复 Session 执行结果收集 Turn | 下一步部署、测试、业务 Rerun 和失败分析由任务指令与业务 Skill 决定；轻量检查本身不调用模型 |
 | 执行归因 | `codex-skill-use` 自动记录真实调用、Skill 冻结版本、退出状态；后台和调度继承关联 Skill | 未通过包装器声明的调用不靠命令关键字猜测；可用 Skill 快照不等于实际使用记录 |

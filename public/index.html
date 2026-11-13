@@ -150,6 +150,8 @@
           <div class="task-classification-filters">
             <label class="task-filter-field"><span data-i18n="taskProjectFilter">项目</span><select id="taskProjectFilter" aria-label="项目"></select></label>
             <label class="task-filter-field"><span data-i18n="taskTagFilter">标签</span><select id="taskTagFilter" aria-label="标签"></select></label>
+            <label class="task-filter-field"><span data-i18n="taskTestTypeFilter">测试类型</span><select id="taskTestTypeFilter" aria-label="测试类型"></select></label>
+            <label class="task-filter-field"><span data-i18n="taskOriginFilter">Task 来源</span><select id="taskOriginFilter" aria-label="Task 来源"></select></label>
           </div>
           <button class="button primary" data-action="new-task" data-i18n="newTask">新建任务</button>
         </div>
@@ -169,7 +171,17 @@
             <div><span class="section-label" data-i18n="releaseCycleTasksLabel">RELEASE TASKS</span><h2 id="releaseCycleTaskTitle"></h2></div>
             <div class="toolbar-actions"><button class="button secondary" data-action="collapse-release-cycle" data-i18n="collapseReleaseCycle">收起</button><button class="button secondary" data-action="close-release-cycle" id="closeReleaseCycleBtn" data-i18n="closeReleaseCycle">结束版本周期</button><button class="button danger" data-action="delete-release-cycle" id="deleteReleaseCycleBtn" data-i18n="deleteReleaseCycle">删除版本周期</button></div>
           </div>
-          <div class="task-grid large" id="releaseCycleTaskGrid"></div>
+          <section class="release-cycle-analysis" id="releaseCycleAnalysis" aria-live="polite"></section>
+          <div class="release-cycle-task-groups">
+            <section class="release-cycle-task-list" aria-labelledby="releaseCycleFeatureTaskTitle">
+              <div class="release-cycle-task-list-head"><h3 id="releaseCycleFeatureTaskTitle"><span data-i18n="featureTest">Feature 测试</span> <span data-i18n="task">任务</span></h3><span class="task-test-type feature" id="releaseCycleFeatureTaskCount">0</span></div>
+              <div class="task-grid large" id="releaseCycleFeatureTaskGrid"></div>
+            </section>
+            <section class="release-cycle-task-list" aria-labelledby="releaseCycleRegressionTaskTitle">
+              <div class="release-cycle-task-list-head"><h3 id="releaseCycleRegressionTaskTitle"><span data-i18n="regressionTest">回归测试</span> <span data-i18n="task">任务</span></h3><span class="task-test-type regression" id="releaseCycleRegressionTaskCount">0</span></div>
+              <div class="task-grid large" id="releaseCycleRegressionTaskGrid"></div>
+            </section>
+          </div>
         </section>
       </section>
 
@@ -249,6 +261,13 @@
     <div class="modal-card form-modal wide-modal">
       <div class="modal-head"><div><span class="section-label">RELEASE CYCLE</span><h2 id="releaseCycleEditorTitle" data-i18n="newReleaseCycle">新建版本周期</h2></div><button class="icon-button" data-close="releaseCycleEditorModal" aria-label="Close">&#215;</button></div>
       <form class="modal-body form-grid" id="releaseCycleForm"></form>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="overviewReleaseCycleModal" role="dialog" aria-modal="true" aria-labelledby="overviewReleaseCycleModalTitle">
+    <div class="modal-card overview-release-cycle-modal">
+      <div class="modal-head"><div><span class="section-label" data-i18n="releaseCycleTask">版本周期 Task</span><h2 id="overviewReleaseCycleModalTitle"></h2></div><button class="icon-button" data-close="overviewReleaseCycleModal" aria-label="Close">&#215;</button></div>
+      <div class="overview-release-cycle-modal-body" id="overviewReleaseCycleModalBody"></div>
     </div>
   </div>
 

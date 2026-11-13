@@ -563,6 +563,16 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   `, context);
   assert.equal(vm.runInContext("filteredTasks().map((task) => task.id).join(',')", context), 'done');
   assert.equal(vm.runInContext('dashboardPollDelay()', context), 2000);
+  vm.runInContext(`
+    state.dashboard.sessions = [{
+      id: 'progress-pending', status: 'waiting_review',
+      testProgress: { runs: {
+        initial: { available: true, status: 'unknown' },
+        rerun1: { available: false, status: 'unavailable' }
+      } }
+    }];
+  `, context);
+  assert.equal(vm.runInContext('dashboardPollDelay()', context), 5000);
   assert.equal(vm.runInContext("formatTime('not-a-timestamp')", context), 'not-a-timestamp');
   assert.equal(vm.runInContext("statusLabel({ enabled: false, status: 'idle' })", context), '已禁用');
   assert.equal(vm.runInContext("statusClass({ enabled: false, status: 'idle' })", context), 'disabled');
@@ -2924,7 +2934,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   assert.match(STYLES_SOURCE, /\.tabs\s*\{[^}]*height:\s*46px[^}]*flex-wrap:\s*nowrap[^}]*overflow-x:\s*auto/s);
   assert.match(STYLES_SOURCE, /\.tabs button\s*\{[^}]*flex:\s*0 0 auto[^}]*white-space:\s*nowrap/s);
   assert.match(STYLES_SOURCE, /\.toast\s*\{[^}]*height:\s*auto[^}]*max-height:\s*min\(12rem, calc\(100dvh - 3rem\)\)[^}]*grid-template-columns:\s*minmax\(0, 1fr\)[^}]*overflow-x:\s*hidden[^}]*overflow-y:\s*auto[^}]*padding:\s*1\.25rem 1\.5rem/s);
-  assert.match(STYLES_SOURCE, /@media \(max-width:\s*860px\)[\s\S]*\.toast\s*\{[^}]*right:\s*0\.625rem[^}]*left:\s*0\.625rem[^}]*width:\s*auto[^}]*min-width:\s*0[^}]*height:\s*auto[^}]*max-height:\s*min\(10rem, calc\(100dvh - 1\.25rem\)\)[^}]*padding:\s*1rem 1\.125rem/s);
+  assert.match(STYLES_SOURCE, /@media \(max-width:\s*768px\)[\s\S]*\.toast\s*\{[^}]*right:\s*0\.625rem[^}]*left:\s*0\.625rem[^}]*width:\s*auto[^}]*min-width:\s*0[^}]*height:\s*auto[^}]*max-height:\s*min\(12rem, calc\(100dvh - 1\.25rem\)\)[^}]*padding:\s*1\.2rem 1\.3rem/s);
   assert.match(STYLES_SOURCE, /\.toast-message\s*\{[^}]*width:\s*auto[^}]*min-width:\s*0[^}]*white-space:\s*pre-wrap[^}]*overflow-wrap:\s*anywhere[^}]*word-break:\s*break-word/s);
   assert.match(INDEX_SOURCE, /data-view="runtime"[\s\S]*id="view-runtime"[\s\S]*id="bridgeInventoryList"/);
   assert.match(INDEX_SOURCE, /id="view-runtime"[\s\S]*id="protectionGrid"[\s\S]*id="bridgeInventoryList"/);

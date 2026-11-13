@@ -22,6 +22,7 @@ const {
   deleteSkill,
   listSessions,
   listReleaseCycles,
+  listReleaseCycleAnalysis,
   getReleaseCycle,
   createReleaseCycle,
   createTaskSeriesSchedule,
@@ -2344,7 +2345,24 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     {
+      const params = routeParams(/^\/api\/release-cycles\/([^/]+)\/analysis$/, pathname);
+      if (params && req.method === 'GET') {
+        json(res, await listReleaseCycleAnalysis(params[0], {
+          testType: url.searchParams.get('testType') || 'all',
+          stepKey: url.searchParams.get('stepKey') || '',
+        }));
+        return;
+      }
+    }
+    {
       const params = routeParams(/^\/api\/release-cycles\/([^/]+)$/, pathname);
+      if (params && req.method === 'GET' && url.searchParams.get('analysis') === '1') {
+        json(res, await listReleaseCycleAnalysis(params[0], {
+          testType: url.searchParams.get('testType') || 'all',
+          stepKey: url.searchParams.get('stepKey') || '',
+        }));
+        return;
+      }
       if (params && req.method === 'GET') {
         const cycle = getReleaseCycle(params[0]);
         json(res, cycle || { error: 'Not found' }, cycle ? 200 : 404);

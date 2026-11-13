@@ -102,26 +102,30 @@ test('tasks persist project classification and custom tags with legacy defaults'
   });
   assert.equal(legacy.project, 'cloudRecord');
   assert.deepEqual(legacy.tags, []);
+  assert.equal(legacy.testType, 'regression');
+  assert.equal(legacy.taskOrigin, 'standalone');
 
   const taskId = 'task-classification-roundtrip';
   const created = store.saveSession(taskId, {
     name: 'Task classification', objective: 'Persist project and tags.', workingDir: workspaceRoot,
-    project: 'media-platform', tags: ['h265', 'nightly', 'h265'],
+    project: 'media-platform', tags: ['h265', 'nightly', 'h265'], testType: 'feature',
   });
   assert.equal(created.project, 'media-platform');
-  assert.deepEqual(created.tags, ['h265', 'nightly']);
+  assert.deepEqual(created.tags, ['custom:h265', 'custom:nightly']);
+  assert.equal(created.testType, 'feature');
 
   const updated = store.saveSession(taskId, {
     name: created.name, objective: created.objective, workingDir: workspaceRoot,
-    project: 'cloudRecord', tags: 'rerun, nightly',
+    project: 'cloudRecord', tags: 'rerun, nightly', testType: 'regression',
   });
   assert.equal(updated.project, 'cloudRecord');
-  assert.deepEqual(updated.tags, ['rerun', 'nightly']);
+  assert.deepEqual(updated.tags, ['custom:rerun', 'custom:nightly']);
+  assert.equal(updated.testType, 'regression');
 
   const exported = store.exportConfigBundle();
   const entry = exported.sessions.find((session) => session.id === taskId);
   assert.deepEqual({ project: entry.project, tags: entry.tags }, {
-    project: 'cloudRecord', tags: ['rerun', 'nightly'],
+    project: 'cloudRecord', tags: ['custom:rerun', 'custom:nightly'],
   });
 });
 
@@ -2428,7 +2432,7 @@ test('configuration export contains portable configuration only', () => {
   const bundle = store.exportConfigBundle();
   const task = bundle.sessions.find((session) => session.id === 'ownership-task');
   assert.deepEqual(Object.keys(task).sort(), [
-    'autoResume', 'enabled', 'id', 'maxRetries', 'name', 'notes', 'objective', 'project', 'tags', 'workingDir',
+    'autoResume', 'enabled', 'id', 'maxRetries', 'name', 'notes', 'objective', 'project', 'tags', 'testType', 'workingDir',
   ].sort());
   assert.equal(JSON.stringify(task).includes('single:ownership-task'), false);
   assert.equal(bundle.sessions.some((session) => session.id === 'completed-audit-history'), false);
