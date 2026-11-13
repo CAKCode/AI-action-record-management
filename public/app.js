@@ -4997,7 +4997,7 @@ function releaseCycleAnalysisHtml(analysis) {
   if (state.releaseCycleAnalysisLoading) return `<p class="inline-note">${escapeHtml(tr('releaseCycleAnalysisLoading'))}</p>`;
   if (!analysis) return '';
   const summary = analysis.summary || {};
-  const trend = analysis.trend || [];
+  const trend = analysis.trend?.length ? analysis.trend : overviewCycleTaskTrend(state.releaseCycleTasks || []);
   const table = trend.length
     ? `<div class="release-analysis-table-wrap"><table class="release-analysis-table"><thead><tr><th>${escapeHtml(tr('analysisTask'))}</th><th>${escapeHtml(tr('analysisScheduled'))}</th><th>${escapeHtml(tr('analysisInitial'))}</th><th>${escapeHtml(tr('analysisRerun'))}</th><th>${escapeHtml(tr('analysisTransitions'))}</th></tr></thead><tbody>${trend.map((point) => `<tr><td><code>${escapeHtml(point.taskId)}</code><span class="task-test-type ${escapeHtml(point.testType)}">${escapeHtml(tr(point.testType === 'feature' ? 'featureTest' : 'regressionTest'))}</span>${point.analysisStatus === 'partial' ? `<span class="task-test-type partial">${escapeHtml(tr('analysisPartial'))}</span>` : ''}</td><td>${escapeHtml(formatTime(point.scheduledFor))}</td><td>${analysisRate(point.initialPassRate)} / ${analysisRate(point.initialFailRate)}</td><td>${analysisRate(point.rerunPassRate)} / ${analysisRate(point.rerunFailRate)}</td><td><span class="analysis-transition-good">${Number(point.recovered || 0)} ↑</span><span class="analysis-transition-bad">${Number(point.persistent || 0)} · ${Number(point.regressed || 0)} ↓</span></td></tr>`).join('')}</tbody></table></div>`
     : `<p class="inline-note">${escapeHtml(tr('analysisNoTrend'))}</p>`;
