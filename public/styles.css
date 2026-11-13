@@ -1511,6 +1511,7 @@ code.report-value { font: 0.625rem var(--mono); }
 .overview-business-entry-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr)); gap: 16px; }
 .overview-business-entry-list {
   display: flex;
+  grid-column: 1 / -1;
   gap: 16px;
   width: 100%;
   min-width: 0;
