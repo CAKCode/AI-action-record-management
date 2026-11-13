@@ -122,7 +122,7 @@ const state = {
   releaseCycleTasks: [],
   releaseCycleAnalysis: null,
   releaseCycleAnalysisLoading: false,
-  overviewCycleModal: { cycleId: '', business: '', page: 0, pageSize: 12, tasks: [], hasMore: false, loading: false, analysis: null, analysisLoading: false },
+  overviewCycleModal: { cycleId: '', business: '', page: 0, pageSize: 12, tasks: [], analysisTasks: [], hasMore: false, loading: false, analysis: null, analysisLoading: false },
   overviewCycleModalRequestVersion: 0,
   expandedTaskObjectives: new Set(),
   taskContextExpanded: false,
@@ -4273,10 +4273,10 @@ function overviewCycleTaskTrend(tasks) {
   });
 }
 
-function overviewCycleAnalysisHtml(tasks, analysis, loading) {
+function overviewCycleAnalysisHtml(tasks, analysis, loading, analysisTasks = tasks) {
   if (loading) return `<section class="overview-cycle-analysis-panel is-loading"><span class="section-label">${escapeHtml(tr('releaseCycleAnalysis'))}</span><p>${escapeHtml(tr('releaseCycleAnalysisLoading'))}</p></section>`;
   const serverTrend = Array.isArray(analysis?.trend) ? analysis.trend : [];
-  const trend = serverTrend.length ? serverTrend : overviewCycleTaskTrend(tasks);
+  const trend = serverTrend.length ? serverTrend : overviewCycleTaskTrend(analysisTasks);
   const summary = analysis?.summary || {};
   const comparable = Number(summary.comparableTaskCount || trend.length);
   const chart = releaseCycleTrendChartHtml(trend);
@@ -4304,7 +4304,7 @@ function renderOverviewReleaseCycleModal() {
   const pageControls = `<nav class="overview-release-cycle-pagination" aria-label="${escapeHtml(tr('releaseCycleTask'))}"><button class="button secondary small" type="button" data-action="overview-cycle-page" data-page="${modal.page - 1}"${modal.page === 0 ? ' disabled' : ''}>${escapeHtml(tr('overviewCyclePrevious'))}</button><span>${escapeHtml(trf('overviewCyclePage', { page, count: tasks.length }))}</span><button class="button secondary small" type="button" data-action="overview-cycle-page" data-page="${modal.page + 1}"${modal.hasMore ? '' : ' disabled'}>${escapeHtml(tr('overviewCycleNext'))}</button></nav>`;
   const featureCount = tasks.filter((task) => task.testType === 'feature').length;
   const regressionCount = tasks.length - featureCount;
-  body.innerHTML = `<div class="overview-release-cycle-modal-summary"><span>${escapeHtml(first?.releaseKey || '')}</span><span class="task-test-type feature">${escapeHtml(tr('featureTest'))} ${featureCount}</span><span class="task-test-type regression">${escapeHtml(tr('regressionTest'))} ${regressionCount}</span></div>${overviewCycleAnalysisHtml(tasks, modal.analysis, modal.analysisLoading)}<div class="overview-cycle-task-section"><header class="overview-cycle-task-section-head"><div><span class="section-label">${escapeHtml(tr('releaseCycleTask'))}</span><h3>${escapeHtml(tr('overviewCycleHint'))}</h3></div><span class="overview-section-count">${tasks.length}</span></header><div class="task-grid overview-release-cycle-task-grid">${tasks.map((task) => taskCard(task, 'grid')).join('')}</div></div>${pageControls}`;
+  body.innerHTML = `<div class="overview-release-cycle-modal-summary"><span>${escapeHtml(first?.releaseKey || '')}</span><span class="task-test-type feature">${escapeHtml(tr('featureTest'))} ${featureCount}</span><span class="task-test-type regression">${escapeHtml(tr('regressionTest'))} ${regressionCount}</span></div>${overviewCycleAnalysisHtml(tasks, modal.analysis, modal.analysisLoading, modal.analysisTasks.length ? modal.analysisTasks : tasks)}<div class="overview-cycle-task-section"><header class="overview-cycle-task-section-head"><div><span class="section-label">${escapeHtml(tr('releaseCycleTask'))}</span><h3>${escapeHtml(tr('overviewCycleHint'))}</h3></div><span class="overview-section-count">${tasks.length}</span></header><div class="task-grid overview-release-cycle-task-grid">${tasks.map((task) => taskCard(task, 'grid')).join('')}</div></div>${pageControls}`;
 }
 
 async function openOverviewReleaseCycle(cycleId, business, page = 0) {
@@ -4314,26 +4314,31 @@ async function openOverviewReleaseCycle(cycleId, business, page = 0) {
   state.overviewCycleModal = {
     ...state.overviewCycleModal,
     cycleId: String(cycleId || ''), business: String(business || ''), page: normalizedPage,
-    tasks: [], hasMore: false, loading: true, analysis: normalizedPage === 0 ? null : state.overviewCycleModal.analysis, analysisLoading: normalizedPage === 0,
+    tasks: [], analysisTasks: normalizedPage === 0 ? [] : state.overviewCycleModal.analysisTasks, hasMore: false, loading: true, analysis: normalizedPage === 0 ? null : state.overviewCycleModal.analysis, analysisLoading: normalizedPage === 0,
   };
   openModal('overviewReleaseCycleModal');
   renderOverviewReleaseCycleModal();
   try {
-    const [response, analysis] = await Promise.all([
+    const [response, analysis, allCycleTasks] = await Promise.all([
       api(`/api/release-cycles/${encodeURIComponent(cycleId)}/tasks?limit=${pageSize + 1}&offset=${normalizedPage * pageSize}`),
       normalizedPage === 0
         ? api(`/api/release-cycles/${encodeURIComponent(cycleId)}/analysis?testType=all`).catch(() => null)
         : Promise.resolve(state.overviewCycleModal.analysis),
+      normalizedPage === 0
+        ? api(`/api/release-cycles/${encodeURIComponent(cycleId)}/tasks?limit=500&offset=0`).catch(() => [])
+        : Promise.resolve(state.overviewCycleModal.analysisTasks),
     ]);
     if (requestVersion !== state.overviewCycleModalRequestVersion) return;
     const tasks = Array.isArray(response) ? response : [];
     state.overviewCycleModal.tasks = tasks.slice(0, pageSize);
     state.overviewCycleModal.hasMore = tasks.length > pageSize;
     state.overviewCycleModal.analysis = analysis;
+    state.overviewCycleModal.analysisTasks = Array.isArray(allCycleTasks) && allCycleTasks.length ? allCycleTasks : tasks;
   } catch (error) {
     if (requestVersion !== state.overviewCycleModalRequestVersion) return;
     const localTasks = overviewCycleLocalTasks(cycleId, business);
     state.overviewCycleModal.tasks = localTasks.slice(normalizedPage * pageSize, (normalizedPage + 1) * pageSize);
+    if (!state.overviewCycleModal.analysisTasks.length) state.overviewCycleModal.analysisTasks = localTasks;
     state.overviewCycleModal.hasMore = localTasks.length > (normalizedPage + 1) * pageSize;
     if (!state.overviewCycleModal.tasks.length) toast(error.message, 'error');
   } finally {
@@ -5324,7 +5329,7 @@ function closeModal(id) {
   }
   if (id === 'overviewReleaseCycleModal') {
     state.overviewCycleModalRequestVersion += 1;
-    state.overviewCycleModal = { ...state.overviewCycleModal, cycleId: '', business: '', page: 0, tasks: [], hasMore: false, loading: false, analysis: null, analysisLoading: false };
+    state.overviewCycleModal = { ...state.overviewCycleModal, cycleId: '', business: '', page: 0, tasks: [], analysisTasks: [], hasMore: false, loading: false, analysis: null, analysisLoading: false };
     $('#overviewReleaseCycleModalBody').innerHTML = '';
   }
   if (id === 'skillAttributionModal') {
