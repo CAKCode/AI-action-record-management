@@ -4,6 +4,7 @@
 
 const { registerExternalAttempt } = require('../../src/store');
 const { closeDatabase } = require('../../src/database');
+const { registrationEnvelope, writeRegistrationResult } = require('../../src/registration-contract');
 
 function fail(message, code = 64) {
   process.stderr.write(`codex-background-track: ${message}\n`);
@@ -12,12 +13,16 @@ function fail(message, code = 64) {
 
 function parseArguments(values) {
   if (values[0] !== 'register') {
-    fail('usage: codex-background-track register --pid PID --log PATH (--step-run-id ID | --step-key KEY --step-label LABEL --run-key KEY --run-kind initial|rerun [--source-run-key KEY]) [--artifact KIND:KEY:PATH] [options]');
+    fail('usage: codex-background-track register --pid PID --log PATH (--step-run-id ID | --step-key KEY --step-label LABEL --run-key KEY --run-kind initial|rerun [--source-run-key KEY]) [--artifact KIND:KEY:PATH] [--json] [options]');
   }
   const result = { '--artifact': [] };
   for (let index = 1; index < values.length; index += 2) {
     const key = values[index];
     const value = values[index + 1];
+    if (key === '--json') {
+      result[key] = true;
+      continue;
+    }
     if (!key?.startsWith('--') || value == null) fail(`missing value for ${key || 'argument'}`);
     if (key === '--artifact') {
       result[key].push(value);
@@ -31,7 +36,7 @@ function parseArguments(values) {
     '--check-after-seconds', '--interval-seconds', '--chain-key',
     '--step-run-id', '--step-key', '--step-label', '--run-key', '--run-kind',
     '--source-run-key', '--selection-mode', '--target-count',
-    '--artifact',
+    '--artifact', '--json',
   ]);
   const unknown = Object.keys(result).filter((key) => !allowed.has(key));
   if (unknown.length) fail(`unsupported option ${unknown.join(', ')}`);
@@ -90,14 +95,25 @@ try {
     checkAfterSeconds: options['--check-after-seconds'],
     checkIntervalSeconds: options['--interval-seconds'],
   });
-  process.stdout.write([
+  const legacyLines = [
     `STEP_ID=${attempt.stepId}`,
     `STEP_RUN_ID=${attempt.stepRunId}`,
     `TRACKING_ID=${attempt.id}`,
     `GENERATION=${attempt.generation}`,
     `ARTIFACTS=${attempt.artifactDeclarations.length}`,
     `NEXT_CHECK_SECONDS=${attempt.checkIntervalSeconds}`,
-  ].join('\n') + '\n');
+  ];
+  writeRegistrationResult(registrationEnvelope('external-attempt', {
+    json: Boolean(options['--json']),
+    taskId: attempt.sessionId,
+    stepId: attempt.stepId || '',
+    stepRunId: attempt.stepRunId || '',
+    externalAttemptId: attempt.id,
+    trackingId: attempt.id,
+    generation: attempt.generation,
+    artifactCount: attempt.artifactDeclarations.length,
+    nextCheckSeconds: attempt.checkIntervalSeconds,
+  }), legacyLines);
 } catch (error) {
   fail(error.message, Number(error.statusCode) === 400 ? 64 : 1);
 } finally {

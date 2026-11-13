@@ -10,6 +10,7 @@ const { processSkillReportArtifactJob, publishSkillReport } = require('../../src
 const { closeDatabase } = require('../../src/database');
 const { MAX_REPORT_BYTES } = require('../../src/skill-report');
 const { createTemplate, cardCatalog } = require('../../public/report-cards');
+const { registrationEnvelope, writeRegistrationResult } = require('../../src/registration-contract');
 
 const TEMPLATE_OPTIONS = new Map([
   ['--type', 'type'], ['--skill-id', 'skillId'], ['--report-key', 'reportKey'],
@@ -39,16 +40,22 @@ function parseArguments(values) {
     return options;
   }
   if (values[0] !== 'publish') {
-    throw new Error('usage: codex-skill-report publish --file REPORT.json|REPORT.yaml');
+    throw new Error('usage: codex-skill-report publish --file REPORT.json|REPORT.yaml [--json]');
   }
   const options = {};
-  for (let index = 1; index < values.length; index += 2) {
+  for (let index = 1; index < values.length;) {
     const key = values[index];
+    if (key === '--json') {
+      options.json = true;
+      index += 1;
+      continue;
+    }
     const value = values[index + 1];
     if (key !== '--file' || value == null || options.file) {
-      throw new Error('usage: codex-skill-report publish --file REPORT.json|REPORT.yaml');
+      throw new Error('usage: codex-skill-report publish --file REPORT.json|REPORT.yaml [--json]');
     }
     options.file = value;
+    index += 2;
   }
   if (!options.file) throw new Error('--file is required');
   return options;
@@ -115,7 +122,7 @@ async function main() {
       if (!result.ok) throw new Error(result.error || 'Skill report artifact archival failed');
       report = result.report;
     }
-    process.stdout.write([
+    const legacyLines = [
       `SKILL_REPORT_ID=${report.id}`,
       `STEP_RUN_ID=${report.stepRunId}`,
       `REPORT_KEY=${report.reportKey}`,
@@ -123,7 +130,18 @@ async function main() {
       `STATUS=${report.status}`,
       `IDEMPOTENT=${published.idempotent}`,
       `ARTIFACTS=${report.artifacts.length}`,
-    ].join('\n') + '\n');
+    ];
+    writeRegistrationResult(registrationEnvelope('skill-report', {
+      json: Boolean(options.json),
+      taskId,
+      reportId: report.id,
+      stepRunId: report.stepRunId || '',
+      reportKey: report.reportKey,
+      revision: report.revision,
+      status: report.status,
+      idempotent: published.idempotent,
+      artifactCount: report.artifacts.length,
+    }), legacyLines);
   } catch (error) {
     fail(error.message, Number(error.code || error.statusCode) || 64);
   } finally {
