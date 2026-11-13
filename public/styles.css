@@ -1509,6 +1509,25 @@ code.report-value { font: 0.625rem var(--mono); }
 .business-nav-count { min-width: 22px; color: var(--dim); text-align: center; font: .625rem var(--mono); }
 
 .overview-business-entry-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr)); gap: 16px; }
+.overview-business-entry-list {
+  display: flex;
+  gap: 16px;
+  max-width: 100%;
+  padding: 2px 2px 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  scroll-snap-type: x proximity;
+  scrollbar-color: rgba(120, 169, 229, .55) rgba(36, 42, 44, .7);
+  scrollbar-width: thin;
+}
+.overview-business-entry-list::-webkit-scrollbar { height: 8px; }
+.overview-business-entry-list::-webkit-scrollbar-track { border-radius: 999px; background: rgba(36, 42, 44, .7); }
+.overview-business-entry-list::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(120, 169, 229, .55); }
+.overview-business-entry-list .overview-business-entry {
+  flex: 0 0 min(390px, calc(100vw - 72px));
+  scroll-snap-align: start;
+}
 .overview-business-entry {
   position: relative;
   min-width: 0;
