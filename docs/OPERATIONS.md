@@ -253,6 +253,7 @@ node --test test/skill-report-artifact-http.test.js test/frontend-performance.te
 | `BRIDGE_CHATFILE_ROOT` | `<runtime>/bridge-chatfiles` | 平台管理的 Bridge chatfile 根目录 |
 | `CODEX_TASK_CGROUP_ROOT` | 从 `/proc/self/cgroup` 自动定位 | 可选的 cgroup v2 委派根；仅在自动定位不适用时覆盖 |
 | `CODEX_INTERACTIVE_DISCONNECT_TIMEOUT_MS` | `60000` | 最后一个交互终端连接断开后的保留时间；`0` 表示禁用自动结束 |
+| `CODEX_INTERACTIVE_MAX_OPEN_TERMINALS` | `CODEX_INTERACTIVE_MAX_TERMINALS` | 同时打开的交互终端数量；断线保留的 CLI 进程仍受 `CODEX_INTERACTIVE_MAX_TERMINALS` 保护 |
 | `CODEX_INTERACTIVE_REPLAY_BYTES` | `67108864` | 交互式 Codex CLI 断线重连的内存回放窗口，范围 `65536..134217728` 字节；完整历史仍由 transcript 保留 |
 | `SOURCE_CODEX_HOME` | 部署环境提供 | Codex Skill 来源 |
 | `WORKSPACE_CODEX_SKILLS_DIR` | `<项目>/.codex/skills` | 项目级 Codex Skill 来源 |

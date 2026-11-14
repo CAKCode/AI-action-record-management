@@ -472,6 +472,23 @@ test('exited terminals release capacity while their browser connections remain o
   assert.equal(manager.isRunning('new-task'), true);
 });
 
+test('detached CLI retains process safety while releasing the open terminal slot', async t => {
+  const { manager, processes } = terminalFixture(t, {
+    maxTerminals: 2,
+    maxOpenTerminals: 1,
+    disconnectTimeoutMs: 0,
+  });
+  const firstSocket = new FakeSocket();
+  manager.attach('detached-task', firstSocket);
+  firstSocket.emit('close');
+
+  const secondSocket = new FakeSocket();
+  manager.attach('new-open-task', secondSocket);
+  assert.equal(processes.length, 2);
+  assert.equal(manager.isRunning('detached-task'), true);
+  assert.equal(manager.isRunning('new-open-task'), true);
+});
+
 test('shutdown waits for CLI exit and helper release and refuses late reconnects', async t => {
   let finishRelease;
   const { manager, processes, runtime } = terminalFixture(t, { releaseRuntime: target => {

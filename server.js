@@ -1474,7 +1474,7 @@ function authorize(req, res, pathname, searchParams) {
     // Refresh the HttpOnly session when the embedded-browser fallback sends
     // Basic credentials. WebSocket upgrades then authenticate via the cookie,
     // without putting the password into a ws:// URL.
-    if (basicCredentialsValid(req)) issueAuthSession(res);
+    if (basicCredentialsValid(req) && req.method !== 'HEAD') issueAuthSession(res);
     return true;
   }
   const hasCredentials = String(req.headers.authorization || '').startsWith('Basic ');

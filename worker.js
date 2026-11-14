@@ -41,6 +41,7 @@ const { resolveWorkingDir } = require('./src/workspaces');
 
 const WORKER_ID = `${os.hostname()}:${process.pid}:${Date.now().toString(36)}`;
 const COMMAND_CLAIM_BATCH_SIZE = 64;
+const COMMAND_START_CONCURRENCY = 4;
 const MAX_CONSECUTIVE_POLL_FAILURES = 20;
 const MAX_CONSECUTIVE_CONTROL_FAILURES = 5;
 const TASK_RETENTION_INTERVAL_MS = 60 * 60 * 1000;
@@ -140,36 +141,46 @@ async function tick() {
         reportTimerFailure('scheduler-dispatch', error);
       }
     }
-    const commands = claimPendingCommands(WORKER_ID, COMMAND_CLAIM_BATCH_SIZE);
-    for (const command of commands) {
+    // Claim only one startup window so the 15-second command lease cannot
+    // expire while later commands wait behind slow Bridge launches.
+    const commands = claimPendingCommands(WORKER_ID, COMMAND_START_CONCURRENCY);
+    const processClaimedCommand = async (command) => {
       const task = getSession(command.task_id);
       if (!task || task.status === 'stopping' || task.status === 'stopped') {
         finishClaimedCommand(command.id, WORKER_ID, 'cancelled', 'Task was stopped before execution');
-        continue;
+        return;
       }
       try {
         resolveWorkingDir(task.workingDir);
       } catch (error) {
         if (acquireTaskLease(command.task_id, WORKER_ID)) failCommand(command, error);
         else deferClaimedCommand(command.id, WORKER_ID, 'Waiting for the previous task lease to expire');
-        continue;
+        return;
       }
       if (!acquireTaskLease(command.task_id, WORKER_ID)) {
         deferClaimedCommand(command.id, WORKER_ID, 'Waiting for the previous task lease to expire');
-        continue;
+        return;
       }
       try {
         const runtime = getRuntimeStatus();
         if (!runtime.ready) {
           releaseTaskLease(command.task_id, WORKER_ID);
           deferClaimedCommand(command.id, WORKER_ID, `Execution readiness degraded: ${runtime.degradedReasons.join(', ')}`);
-          continue;
+          return;
         }
         await startSession(command, WORKER_ID);
         heartbeatActive(WORKER_ID);
       } catch (error) {
         failCommand(command, error);
       }
+    };
+    const processCommand = command => processClaimedCommand(command).catch(error => {
+      failCommand(command, error);
+    });
+    // Keep startup bounded so one slow Bridge launch does not block every other
+    // Task, while avoiding an unbounded burst of new process groups.
+    for (let offset = 0; offset < commands.length; offset += COMMAND_START_CONCURRENCY) {
+      await Promise.all(commands.slice(offset, offset + COMMAND_START_CONCURRENCY).map(processCommand));
     }
     heartbeatActive(WORKER_ID);
   } finally {
@@ -263,6 +274,11 @@ function runTaskSeriesSchedulingCycle() {
   }
 }
 
+function controlCyclesIdle() {
+  return !ticking && !cleanupTicking && !archiveTicking
+    && !reconciliationTicking && !retentionTicking && !seriesSchedulingTicking;
+}
+
 const pollTimer = setInterval(runPoll, 250);
 const heartbeatTimer = setInterval(() => runTimer('heartbeat', () => heartbeatActive(WORKER_ID)), 2000);
 const bridgeCleanupTimer = setInterval(() => runTimer('bridge-cleanup', runBridgeCleanupCycle), 1000);
@@ -305,7 +321,7 @@ function shutdown(exitCode = 0, force = false) {
   shutdownWorker(force);
   const deadline = Date.now() + 4000;
   const shutdownTimer = setInterval(() => {
-    if (!listActiveSessions().length && !archiveTicking && !cleanupTicking) {
+    if (!listActiveSessions().length && controlCyclesIdle()) {
       clearInterval(shutdownTimer);
       exitWorker(exitCode);
     }

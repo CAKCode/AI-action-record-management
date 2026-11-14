@@ -78,6 +78,12 @@ function createCodexTerminalManager(options) {
     32,
     DEFAULT_MAX_TERMINALS,
   );
+  const maxOpenTerminals = boundedInteger(
+    options.maxOpenTerminals ?? environment.CODEX_INTERACTIVE_MAX_OPEN_TERMINALS,
+    1,
+    32,
+    maxTerminals,
+  );
   const maxReplayBytes = boundedInteger(
     options.maxReplayBytes ?? environment.CODEX_INTERACTIVE_REPLAY_BYTES,
     64 * 1024,
@@ -242,6 +248,11 @@ function createCodexTerminalManager(options) {
     }
     if ([...terminals.values()].filter(terminalHasLiveProcesses).length >= maxTerminals) {
       throw terminalError('Interactive terminal capacity has been reached', 503);
+    }
+    const openTerminalCount = [...terminals.values()]
+      .filter(entry => terminalHasLiveProcesses(entry) && entry.clients.size > 0).length;
+    if (openTerminalCount >= maxOpenTerminals) {
+      throw terminalError('Interactive terminal connection capacity has been reached', 503);
     }
     const runtime = launchContext(task);
     const environment = {

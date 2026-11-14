@@ -191,6 +191,7 @@ Shell 中遗留的任务级路径继承给新服务。每个 Task 仍会在
 | `CODEX_API_MAX_CONCURRENCY` | `64` | 普通 API 同时占用的响应槽数，范围 `1..256`；Health/Ready 使用独立诊断通道 |
 | `CODEX_API_IDLE_TIMEOUT_MS` | `30000` | 非日志 API 请求体或响应无网络进展超时，范围 `1000..3600000` 毫秒 |
 | `CODEX_INTERACTIVE_REPLAY_BYTES` | `67108864` | 交互式 Codex CLI 断线重连的内存回放窗口，范围 `65536..134217728` 字节；完整历史仍从 transcript 回放 |
+| `CODEX_INTERACTIVE_MAX_OPEN_TERMINALS` | `CODEX_INTERACTIVE_MAX_TERMINALS` | 同时打开的交互终端数量；断线保留的 CLI 进程仍受进程容量保护 |
 | `SOURCE_CODEX_HOME` | 部署环境的 Codex Home | 只读发现 Codex Skill |
 | `WORKSPACE_CODEX_SKILLS_DIR` | `<项目>/.codex/skills` | 只读发现项目级 Codex Skill |
 | `CODEX_DESK_AUTH_USER` | 空 | 远程监听时必填 |
