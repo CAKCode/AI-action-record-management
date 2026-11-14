@@ -25,7 +25,7 @@ async function waitForService(url, child) {
     if (child.exitCode != null) throw new Error(`server exited with ${child.exitCode}`);
     try {
       const response = await fetch(url);
-      if (response.status === 200) return;
+      if ([200, 401].includes(response.status)) return;
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -75,19 +75,13 @@ test('authenticated deployments keep the application page and bundles behind the
 
   const baseUrl = `http://127.0.0.1:${port}`;
   await waitForService(baseUrl, child);
-  const unauthenticatedShell = await fetch(`${baseUrl}/`);
-  const shellText = await unauthenticatedShell.text();
-  assert.equal(unauthenticatedShell.status, 200);
-  assert.match(shellText, /<script src="\/login\.js"><\/script>/);
-  assert.doesNotMatch(shellText, /<script src="\/app\.js"><\/script>/);
-
-  for (const pathname of ['/index.html', '/app.js', '/vendor/xterm/xterm.js']) {
+  for (const pathname of ['/', '/index.html', '/boot.js', '/app.js', '/vendor/xterm/xterm.js']) {
     const response = await fetch(`${baseUrl}${pathname}`);
     assert.equal(response.status, 401, pathname);
     assert.match(response.headers.get('www-authenticate') || '', /Basic/);
+    assert.match(response.headers.get('content-type') || '', /application\/json/);
+    assert.doesNotMatch(await response.text(), /<html|<script|<body/i);
   }
-  assert.equal((await fetch(`${baseUrl}/boot.js`)).status, 200);
-  assert.equal((await fetch(`${baseUrl}/login.js`)).status, 200);
 
   const authorization = `Basic ${Buffer.from('test-user:test-password').toString('base64')}`;
   const login = await fetch(`${baseUrl}/api/auth/session`, {

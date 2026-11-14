@@ -202,16 +202,6 @@ const ATTEMPT_TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', '
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 const AUTH_SESSION_COOKIE_SECURE = !LOOPBACK_HOSTS.has(HOST);
 const API_RESPONSE_IDLE_GUARD = Symbol('apiResponseIdleGuard');
-const PUBLIC_BOOTSTRAP_PATHS = new Set([
-  '/',
-  '/login.html',
-  '/login.js',
-  '/index.html',
-  '/boot.js',
-  '/styles.css',
-  '/vendor/xterm/xterm.css',
-  '/fonts/NotoSansCJK-Regular.ttc',
-]);
 let shuttingDown = false;
 let activeApiRequests = 0;
 let apiRequestRejectedCount = 0;
@@ -1498,10 +1488,8 @@ function authorize(req, res, pathname, searchParams) {
   return false;
 }
 
-function staticResourceIsPublic(pathname) {
-  const value = String(pathname || '');
-  if (value === '/index.html') return !AUTH_USER || !AUTH_PASSWORD;
-  return PUBLIC_BOOTSTRAP_PATHS.has(value);
+function staticResourceIsPublic() {
+  return !AUTH_USER || !AUTH_PASSWORD;
 }
 
 function sameOrigin(req, pathname = '', searchParams = null) {
@@ -1538,11 +1526,9 @@ function summarizeDashboard(taskLimit = 100) {
 }
 
 function serveStatic(req, res, pathname) {
-  const target = pathname === '/'
-    ? (AUTH_USER && AUTH_PASSWORD && !authSessionFromRequest(req) ? '/login.html' : '/index.html')
-    : pathname;
+  const target = pathname === '/' ? '/index.html' : pathname;
   const protectedResource = Boolean(AUTH_USER && AUTH_PASSWORD)
-    && (target === '/index.html' || !staticResourceIsPublic(pathname));
+    && !staticResourceIsPublic(pathname);
   const filePath = path.normalize(path.join(PUBLIC_DIR, target));
   const relative = path.relative(PUBLIC_DIR, filePath);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {

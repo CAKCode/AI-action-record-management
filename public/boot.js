@@ -1,6 +1,6 @@
-// Keep the application bundle behind the server's authentication boundary.
-// This small bootstrap is intentionally public so an unauthenticated browser
-// can show the existing login form without exposing task functionality.
+// Load the application bundle only after the server has authenticated the page.
+// The same bootstrap also handles session re-authentication without reloading
+// duplicate application listeners.
 (() => {
   const AUTH_STORAGE_KEY = 'codex-tasks-auth-v1';
   const PROTECTED_SCRIPTS = [
