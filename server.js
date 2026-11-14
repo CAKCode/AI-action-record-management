@@ -1311,6 +1311,23 @@ function secureEqual(left, right) {
   return crypto.timingSafeEqual(leftDigest, rightDigest);
 }
 
+function normalizedRequestHost(value) {
+  const first = String(value || '').split(',', 1)[0].trim().toLowerCase();
+  if (first.startsWith('[')) {
+    const closingBracket = first.indexOf(']');
+    return closingBracket > 0 ? first.slice(1, closingBracket) : first;
+  }
+  return first.split(':', 1)[0];
+}
+
+function requestAuthenticationRequired(req) {
+  if (AUTH_USER && AUTH_PASSWORD) return true;
+  const forwardedHost = normalizedRequestHost(req.headers['x-forwarded-host']);
+  const requestHost = forwardedHost || normalizedRequestHost(req.headers.host);
+  if (!requestHost) return !LOOPBACK_HOSTS.has(HOST);
+  return !LOOPBACK_HOSTS.has(requestHost);
+}
+
 function requestCookie(req, name) {
   const header = String(req.headers.cookie || '');
   for (const part of header.split(';')) {
@@ -1462,7 +1479,8 @@ function basicCredentialsValid(req) {
 }
 
 function requestCredentialsValid(req, pathname = '', searchParams = null) {
-  if (!AUTH_USER && !AUTH_PASSWORD) return true;
+  if (!requestAuthenticationRequired(req)) return true;
+  if (!AUTH_USER || !AUTH_PASSWORD) return false;
   if (basicCredentialsValid(req)) return true;
   if (authSessionFromRequest(req)) return true;
   return artifactResourceAccessValid(req, pathname, searchParams)
@@ -1488,8 +1506,8 @@ function authorize(req, res, pathname, searchParams) {
   return false;
 }
 
-function staticResourceIsPublic() {
-  return !AUTH_USER || !AUTH_PASSWORD;
+function staticResourceIsPublic(req) {
+  return !requestAuthenticationRequired(req);
 }
 
 function sameOrigin(req, pathname = '', searchParams = null) {
@@ -1528,7 +1546,7 @@ function summarizeDashboard(taskLimit = 100) {
 function serveStatic(req, res, pathname) {
   const target = pathname === '/' ? '/index.html' : pathname;
   const protectedResource = Boolean(AUTH_USER && AUTH_PASSWORD)
-    && !staticResourceIsPublic(pathname);
+    && !staticResourceIsPublic(req);
   const filePath = path.normalize(path.join(PUBLIC_DIR, target));
   const relative = path.relative(PUBLIC_DIR, filePath);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
@@ -2069,7 +2087,7 @@ const server = http.createServer(async (req, res) => {
     json(res, { error: 'Cross-origin write requests are forbidden' }, 403);
     return;
   }
-  if (!isApiRoute && !staticResourceIsPublic(pathname)
+  if (!isApiRoute && !staticResourceIsPublic(req)
     && !authorize(req, res, pathname, url.searchParams)) return;
   if (shuttingDown) {
     res.setHeader('Connection', 'close');
@@ -2113,7 +2131,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'GET') {
-        res.setHeader('X-Codex-Auth-Required', AUTH_USER && AUTH_PASSWORD ? '1' : '0');
+        res.setHeader('X-Codex-Auth-Required', requestAuthenticationRequired(req) ? '1' : '0');
         json(res, { ok: Boolean(authSessionFromRequest(req)) });
         return;
       }

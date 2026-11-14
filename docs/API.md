@@ -44,7 +44,7 @@ BASE_URL=http://127.0.0.1:8091
 
 ## 浏览器会话认证
 
-远程部署仍以 HTTP Basic Authentication 作为凭据校验和命令行兼容方式。浏览器登录覆盖层会用一次 Basic Auth 请求建立 HttpOnly、`SameSite=Strict` 的 `codex_task_session` Cookie，有效期为 12 小时；远程监听时 Cookie 同时带有 `Secure` 属性，密码不会写入 Cookie。会话 Cookie 可用于 API、原生 artifact 导航、HTML iframe、媒体资源和 WebSocket。
+远程部署仍以 HTTP Basic Authentication 作为凭据校验和命令行兼容方式。浏览器首次访问受保护页面时通过 Basic Auth 建立 HttpOnly、`SameSite=Strict` 的 `codex_task_session` Cookie，有效期为 12 小时；远程监听时 Cookie 同时带有 `Secure` 属性，密码不会写入 Cookie。会话 Cookie 可用于 API、原生 artifact 导航、HTML iframe、媒体资源和 WebSocket。
 
 ### `POST /api/auth/session`
 

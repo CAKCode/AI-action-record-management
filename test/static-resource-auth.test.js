@@ -41,7 +41,7 @@ async function stop(child) {
   ]);
 }
 
-test('authenticated deployments keep the application page and bundles behind the login shell', async (t) => {
+test('authenticated deployments keep the application page and bundles behind the auth boundary', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-static-auth-'));
   const port = await availablePort();
   for (const name of ['data', 'runtime', 'workspaces', 'source', 'skills']) {
@@ -97,4 +97,44 @@ test('authenticated deployments keep the application page and bundles behind the
   assert.equal(bundle.status, 200);
   assert.equal(bundle.headers.get('cache-control'), 'private, no-store');
   assert.match(bundle.headers.get('vary') || '', /Cookie/);
+});
+
+test('a loopback process still rejects externally addressed pages without credentials', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-host-auth-'));
+  const port = await availablePort();
+  for (const name of ['data', 'runtime', 'workspaces', 'source', 'skills']) {
+    fs.mkdirSync(path.join(root, name), { recursive: true });
+  }
+  const environment = {
+    ...process.env,
+    HOST: '127.0.0.1',
+    PORT: String(port),
+    CODEX_DESK_DATA_DIR: path.join(root, 'data'),
+    CODEX_DESK_RUNTIME_DIR: path.join(root, 'runtime'),
+    CODEX_TASK_WORKSPACE_ROOTS: path.join(root, 'workspaces'),
+    SOURCE_CODEX_HOME: path.join(root, 'source'),
+    WORKSPACE_CODEX_SKILLS_DIR: path.join(root, 'skills'),
+    CODEX_ALLOW_ROOT_EXECUTION: '1',
+    CODEX_DISABLE_WORKER: '1',
+    CODEX_DB_BACKUP_INTERVAL_HOURS: '0',
+    CODEX_RECOVERY_CHECKPOINT_INTERVAL_HOURS: '0',
+  };
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: ROOT_DIR,
+    env: environment,
+    stdio: ['ignore', 'ignore', 'ignore'],
+  });
+  t.after(async () => {
+    await stop(child);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const baseUrl = `http://127.0.0.1:${port}`;
+  await waitForService(baseUrl, child);
+  const local = await fetch(baseUrl);
+  assert.equal(local.status, 200);
+  const external = await fetch(baseUrl, { headers: { 'x-forwarded-host': 'public.example.test' } });
+  assert.equal(external.status, 401);
+  assert.match(external.headers.get('content-type') || '', /application\/json/);
+  assert.doesNotMatch(await external.text(), /<html|<script|<body/i);
 });
