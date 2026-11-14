@@ -841,13 +841,13 @@ function taskTestProgressByTask(db, taskIds) {
   if (!taskIds.length) return new Map();
   const placeholders = taskIds.map(() => '?').join(',');
   const rows = db.prepare(`
-    SELECT task_id, report_key, report_type, status, revision, published_at, metrics_json
+    SELECT task_id, report_key, report_type, status, revision, published_at, metrics_json, payload_json
     FROM (
       SELECT task_id, report_key, report_type, status, revision, published_at,
-             json_extract(payload_json, '$.metrics') AS metrics_json,
+             json_extract(payload_json, '$.metrics') AS metrics_json, payload_json,
              ROW_NUMBER() OVER (PARTITION BY task_id, report_key ORDER BY revision DESC, published_at DESC) AS report_rank
       FROM skill_reports
-      WHERE task_id IN (${placeholders}) AND report_type IN ('test-result', 'business-result', 'workflow-progress')
+      WHERE task_id IN (${placeholders}) AND report_type IN ('test-result', 'workflow-progress')
     ) latest_reports
     WHERE (report_type='workflow-progress' AND report_rank<=3) OR (report_type<>'workflow-progress' AND report_rank=1)
     ORDER BY task_id, report_key, revision DESC
@@ -897,18 +897,26 @@ function calculateTaskTestProgress(reports) {
   const finalSummary = workflowSummaries
     .filter((report) => finiteMetricValue(report.values, ['final_total']) != null)
     .sort((left, right) => Number(right.revision || 0) - Number(left.revision || 0))[0];
+  const testReports = parsedReports.filter((report) => report.report_type !== 'workflow-progress');
+  const aggregateParents = testReports.filter((report) => (
+    reportRelatedKeys(report).length && reportHasProgressMetrics(report.values)
+  ));
+  const relatedChildKeys = new Set(aggregateParents.flatMap(report => reportRelatedKeys(report)));
+  const independentReports = aggregateParents.length
+    ? testReports.filter(report => !relatedChildKeys.has(report.report_key))
+    : testReports;
   const runs = {
     initial: calculateTaskTestRunProgress(
-      parsedReports.filter((report) => report.report_type !== 'workflow-progress' && taskReportRun(report) === 'initial'),
+      independentReports.filter((report) => taskReportRun(report) === 'initial'),
       latestWorkflowMetric(workflowSummaries, 'initial_total'),
     ),
     rerun1: calculateTaskTestRunProgress(
-      parsedReports.filter((report) => report.report_type !== 'workflow-progress' && taskReportRun(report) === 'rerun1'),
+      independentReports.filter((report) => taskReportRun(report) === 'rerun1'),
       latestWorkflowMetric(workflowSummaries, 'rerun1_selected'),
     ),
   };
   const overall = finalSummary
-    ? summaryTaskTestProgress(finalSummary.values)
+    ? summaryTaskTestProgress(finalSummary.values, reportCompleteness(finalSummary))
     : combineTaskTestRunProgress(runs.initial, runs.rerun1);
   return { ...overall, runs };
 }
@@ -922,10 +930,35 @@ function latestWorkflowMetric(reports, key) {
 
 function taskReportRun(report) {
   const key = String(report.report_key || '').toLowerCase();
-  if (/rerun[-_. ]?1/.test(key)) return 'rerun1';
-  if (/rerun[-_. ]?\d+/.test(key)) return '';
   if (/(?:manual[-_. ]?rerun|recovery|targeted|retry)/.test(key)) return '';
+  const rerun = /(?:^|[:._ -])rerun[-_. ]?(\d+)(?=$|[:._ -])/.exec(key);
+  if (rerun) return rerun[1] === '1' ? 'rerun1' : '';
   return 'initial';
+}
+
+function reportRelatedKeys(report) {
+  const payload = parseJson(report.payload_json, {});
+  return Array.isArray(payload.relatedReportKeys)
+    ? payload.relatedReportKeys.map(String)
+    : [];
+}
+
+function reportHasProgressMetrics(values) {
+  return [
+    'total', 'selected', 'collected', 'passed', 'pass', 'failed', 'fail', 'error', 'errors',
+    'skipped', 'skip', 'xfailed', 'xpassed', 'executed', 'business_executed', 'persistent',
+    'bug', 'environment', 'env_issue', 'case_issue',
+  ].some(key => finiteMetricValue(values, [key]) != null);
+}
+
+function reportCompleteness(report) {
+  const payload = parseJson(report.payload_json, {});
+  if (typeof payload.complete === 'boolean') return payload.complete;
+  const source = Array.isArray(payload.sections)
+    ? payload.sections.find((section) => section?.id === 'count-source')
+    : null;
+  const field = source?.fields?.find((item) => ['统计完整', 'Complete'].includes(String(item?.label || '')));
+  return typeof field?.value === 'boolean' ? field.value : null;
 }
 
 function calculateTaskTestRunProgress(reports, fallbackTotal = null) {
@@ -969,17 +1002,31 @@ function calculateTaskTestRunProgress(reports, fallbackTotal = null) {
   }
   progress.percent = progress.total ? Math.round((progress.completed / progress.total) * 100) : 0;
   progress.status = active && progress.completed < progress.total ? 'running'
-    : (progress.total > 0 && progress.completed >= progress.total ? 'completed' : 'partial');
+    : (progress.failed > 0 ? 'failed'
+      : (progress.total > 0 && progress.completed >= progress.total ? 'completed' : 'partial'));
   return progress;
 }
 
-function summaryTaskTestProgress(values) {
+function summaryTaskTestProgress(values, complete = null) {
   const total = finiteMetricValue(values, ['final_total']) || 0;
   const passed = finiteMetricValue(values, ['final_passed']) || 0;
   const failed = (finiteMetricValue(values, ['final_failed']) || 0)
     + (finiteMetricValue(values, ['final_error', 'final_errors']) || 0);
   const skipped = finiteMetricValue(values, ['final_skipped', 'final_skip']) || 0;
-  return { available: true, resultKnown: true, total, completed: total, passed, failed, skipped, percent: total ? 100 : 0, status: 'completed' };
+  const completeReport = complete !== false;
+  const observed = Math.min(total, passed + failed + skipped);
+  return {
+    available: true,
+    resultKnown: true,
+    total,
+    completed: completeReport ? total : observed,
+    passed,
+    failed,
+    skipped,
+    percent: completeReport && total ? 100 : 0,
+    complete: completeReport,
+    status: completeReport ? (failed > 0 ? 'failed' : 'completed') : 'partial',
+  };
 }
 
 function combineTaskTestRunProgress(initial, rerun1) {
@@ -993,8 +1040,9 @@ function combineTaskTestRunProgress(initial, rerun1) {
   progress.failed = initial.failed + rerun1.failed;
   progress.skipped = initial.skipped + rerun1.skipped;
   progress.percent = progress.total ? Math.round((progress.completed / progress.total) * 100) : 0;
-  progress.status = progress.completed >= progress.total ? 'completed'
-    : (initial.status === 'running' || rerun1.status === 'running' ? 'running' : 'partial');
+  progress.status = initial.status === 'running' || rerun1.status === 'running' ? 'running'
+    : (initial.status === 'failed' || rerun1.status === 'failed' ? 'failed'
+      : (progress.completed >= progress.total ? 'completed' : 'partial'));
   return progress;
 }
 

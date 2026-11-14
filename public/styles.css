@@ -1825,6 +1825,7 @@ body {
 .task-progress-track i { display: block; width: var(--progress); height: 100%; border-radius: inherit; background: var(--green); transition: width .22s ease; }
 .task-progress-run.running .task-progress-track i { background: var(--blue); }
 .task-progress-run.partial .task-progress-track i { background: var(--amber); }
+.task-progress-run.failed .task-progress-track i { background: var(--red); }
 .task-progress-run.completed .task-progress-track i { background: var(--green); }
 .task-progress-empty { grid-template-columns: auto 1fr; align-items: center; }
 .task-progress-empty strong { color: var(--dim); font-size: .6875rem; font-weight: 500; text-align: right; }
