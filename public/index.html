@@ -384,9 +384,10 @@
   </div>
   <input class="hidden" type="file" id="importInput" accept="application/json,.json">
   <input class="hidden" type="file" id="skillZipInput" accept="application/zip,application/x-zip-compressed,.zip">
-  <script src="/vendor/xterm/xterm.js"></script>
-  <script src="/vendor/xterm/addon-fit.js"></script>
-  <script src="/report-cards.js"></script>
-  <script src="/app.js"></script>
+  <!-- The bootstrap script is the only public application JavaScript resource. It loads the
+       application bundle after the server has established an authenticated
+       session. Protected runtime assets: /vendor/xterm/xterm.js,
+       /vendor/xterm/addon-fit.js. -->
+  <script src="/boot.js"></script>
 </body>
 </html>

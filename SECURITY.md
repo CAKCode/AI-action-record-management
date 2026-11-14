@@ -14,6 +14,7 @@
 ## 部署边界
 
 - 监听非回环地址时必须同时配置 `CODEX_DESK_AUTH_USER` 和 `CODEX_DESK_AUTH_PASSWORD`。
+- 配置认证后，未登录 URL 只会返回登录启动壳；完整页面、应用脚本、终端库、报表脚本、API 和 WebSocket 都需要认证。已授权浏览器仍然必须接收客户端代码才能运行，因此无法从技术上阻止授权用户保存或复刻浏览器收到的内容。
 - 生产环境应使用专用非 root 服务账户，并限制 data、runtime、backup 和 task workspace 的访问权限。
 - Task 指令、命令、终端 transcript、后台日志、Skill 报告和 pytest artifact 按原始证据保存，可能包含凭据或业务数据。它们必须按高敏感数据管理。
 - 数据库备份和恢复检查点不等同于脱敏副本。传输、存放和销毁都必须遵循与在线数据相同的访问控制要求。

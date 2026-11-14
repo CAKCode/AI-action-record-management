@@ -8,7 +8,8 @@
 - 错误响应格式为 `{"error":"错误说明"}`。
 - 每个响应包含 `X-Request-Id`；调用方也可以传入该请求头用于链路定位。
 - 写操作会把 `X-Request-Id` 和当前认证用户名写入审计；未配置认证时操作者记为 `operator`。
-- 配置 HTTP Basic Authentication 后，所有请求都必须携带认证信息。浏览器可先用 Basic Auth 调用 `POST /api/auth/session` 建立 12 小时的 HttpOnly 会话 Cookie，之后 artifact、iframe、媒体资源和 WebSocket 会自动复用 Cookie；命令行仍可直接使用 Basic Auth。
+- 配置 HTTP Basic Authentication 后，API、WebSocket 和功能静态资源都必须携带认证信息；未登录的 `/` 只返回登录启动壳，登录启动脚本和样式资源保持公开。浏览器可先用 Basic Auth 调用 `POST /api/auth/session` 建立 12 小时的 HttpOnly 会话 Cookie，之后 artifact、iframe、媒体资源和 WebSocket 会自动复用 Cookie；命令行仍可直接使用 Basic Auth。
+- `app.js`、终端库、报表脚本以及其他静态功能资源也要求 Basic Auth 或会话 Cookie；仅拿到 URL 不能下载前端功能代码或调用 API。
 - 带 `Origin` 的写请求必须与当前 Host 同源。
 - 平台不接受或保存 Agent、模型或编排配置。
 - 任务指令、执行命令、命令输出和运行事件按执行端返回的原文保存，不做字段级脱敏。
@@ -51,7 +52,7 @@ BASE_URL=http://127.0.0.1:8091
 
 ### `GET /api/auth/session`
 
-检查当前会话是否有效，返回 `{"ok":true}` 或 `{"ok":false}`。
+检查当前会话是否有效，返回 `{"ok":true}` 或 `{"ok":false}`；响应头 `X-Codex-Auth-Required: 1` 表示当前服务要求登录。
 
 ### `DELETE /api/auth/session`
 

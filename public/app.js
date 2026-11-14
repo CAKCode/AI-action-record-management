@@ -42,7 +42,7 @@ function hideAuthOverlay() {
 
 function initAuthForm() {
   const form = document.getElementById('authForm');
-  if (form) {
+  if (form && !globalThis.__CODEX_AUTH_BOOT__) {
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const user = document.getElementById('authUser').value.trim();
@@ -6451,5 +6451,6 @@ async function initialize() {
   scheduleDashboardPoll();
 }
 
+globalThis.__CODEX_REAUTH__ = initialize;
 initAuthForm();
 initialize();

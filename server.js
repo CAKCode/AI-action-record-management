@@ -202,6 +202,16 @@ const ATTEMPT_TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', '
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 const AUTH_SESSION_COOKIE_SECURE = !LOOPBACK_HOSTS.has(HOST);
 const API_RESPONSE_IDLE_GUARD = Symbol('apiResponseIdleGuard');
+const PUBLIC_BOOTSTRAP_PATHS = new Set([
+  '/',
+  '/login.html',
+  '/login.js',
+  '/index.html',
+  '/boot.js',
+  '/styles.css',
+  '/vendor/xterm/xterm.css',
+  '/fonts/NotoSansCJK-Regular.ttc',
+]);
 let shuttingDown = false;
 let activeApiRequests = 0;
 let apiRequestRejectedCount = 0;
@@ -1488,6 +1498,12 @@ function authorize(req, res, pathname, searchParams) {
   return false;
 }
 
+function staticResourceIsPublic(pathname) {
+  const value = String(pathname || '');
+  if (value === '/index.html') return !AUTH_USER || !AUTH_PASSWORD;
+  return PUBLIC_BOOTSTRAP_PATHS.has(value);
+}
+
 function sameOrigin(req, pathname = '', searchParams = null) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return true;
   const origin = req.headers.origin;
@@ -1522,7 +1538,11 @@ function summarizeDashboard(taskLimit = 100) {
 }
 
 function serveStatic(req, res, pathname) {
-  const target = pathname === '/' ? '/index.html' : pathname;
+  const target = pathname === '/'
+    ? (AUTH_USER && AUTH_PASSWORD && !authSessionFromRequest(req) ? '/login.html' : '/index.html')
+    : pathname;
+  const protectedResource = Boolean(AUTH_USER && AUTH_PASSWORD)
+    && (target === '/index.html' || !staticResourceIsPublic(pathname));
   const filePath = path.normalize(path.join(PUBLIC_DIR, target));
   const relative = path.relative(PUBLIC_DIR, filePath);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
@@ -1540,7 +1560,8 @@ function serveStatic(req, res, pathname) {
     const ext = path.extname(filePath);
     res.writeHead(200, {
       'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
-      'Cache-Control': 'no-cache',
+      'Cache-Control': protectedResource ? 'private, no-store' : 'no-store',
+      Vary: 'Cookie, Authorization',
     });
     if (req.method === 'HEAD') {
       res.end();
@@ -1550,7 +1571,11 @@ function serveStatic(req, res, pathname) {
     pipeResponseStream(res, stream);
     return;
   }
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+  res.writeHead(200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': protectedResource ? 'private, no-store' : 'no-store',
+    Vary: 'Cookie, Authorization',
+  });
   if (req.method === 'HEAD') {
     res.end();
     return;
@@ -2058,6 +2083,8 @@ const server = http.createServer(async (req, res) => {
     json(res, { error: 'Cross-origin write requests are forbidden' }, 403);
     return;
   }
+  if (!isApiRoute && !staticResourceIsPublic(pathname)
+    && !authorize(req, res, pathname, url.searchParams)) return;
   if (shuttingDown) {
     res.setHeader('Connection', 'close');
     json(res, { error: 'Service is shutting down' }, 503);
@@ -2100,6 +2127,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'GET') {
+        res.setHeader('X-Codex-Auth-Required', AUTH_USER && AUTH_PASSWORD ? '1' : '0');
         json(res, { ok: Boolean(authSessionFromRequest(req)) });
         return;
       }
