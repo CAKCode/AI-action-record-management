@@ -94,6 +94,7 @@ const MAX_SESSION_PAGE_SIZE = 500;
 const MAX_LATEST_LOG_BYTES = 1024 * 1024;
 const LATEST_LOG_TRIM_THRESHOLD = MAX_LATEST_LOG_BYTES + (256 * 1024);
 const COMMAND_CLAIM_TTL_MS = 15000;
+const TASK_LEASE_TTL_MS = Number(process.env.CODEX_TASK_LEASE_TTL_MS ?? 60000);
 const MAX_TASK_RETRIES = 20;
 const MAX_SKILL_FILES = 256;
 const MAX_SKILL_FILE_BYTES = 4 * 1024 * 1024;
@@ -127,6 +128,12 @@ const SERIES_QUEUE_BLOCKED_SQL = `EXISTS (
   WHERE current_run.task_id=tasks.id AND current_run.overlap_policy='queue'
     AND previous_task.status IN ('queued','running','recovering','stopping','waiting_scheduled')
 )`;
+
+if (!Number.isInteger(TASK_LEASE_TTL_MS)
+  || TASK_LEASE_TTL_MS < 15000 || TASK_LEASE_TTL_MS > 600000) {
+  throw new Error('CODEX_TASK_LEASE_TTL_MS must be an integer between 15000 and 600000');
+}
+
 const skillReportResourceVerificationCache = new Map();
 const releaseCycleAnalysisCache = new Map();
 const RELEASE_CYCLE_ANALYSIS_CACHE_MAX = 24;
@@ -11463,7 +11470,7 @@ function failClaimedCommand(commandId, workerId, error) {
   return handled;
 }
 
-function acquireTaskLease(taskId, workerId, ttlMs = 15000) {
+function acquireTaskLease(taskId, workerId, ttlMs = TASK_LEASE_TTL_MS) {
   const db = ensureStorage();
   const now = nowIso();
   const expires = new Date(Date.now() + ttlMs).toISOString();
@@ -11480,7 +11487,7 @@ function acquireTaskLease(taskId, workerId, ttlMs = 15000) {
   return result.changes === 1;
 }
 
-function renewTaskLease(taskId, workerId, ttlMs = 15000) {
+function renewTaskLease(taskId, workerId, ttlMs = TASK_LEASE_TTL_MS) {
   const expires = new Date(Date.now() + ttlMs).toISOString();
   return ensureStorage().prepare('UPDATE tasks SET lease_expires_at=? WHERE id=? AND lease_owner=?')
     .run(expires, safeId(taskId), workerId).changes === 1;

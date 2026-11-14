@@ -245,6 +245,7 @@ node --test test/skill-report-artifact-http.test.js test/frontend-performance.te
 | `CODEX_ROLLING_RESTART_DRAIN_MS` | `500` | 取得维护租约后等待迟到请求进入事务门禁的排空时间，范围 `0..10000` 毫秒 |
 | `CODEX_ALLOW_ROOT_EXECUTION` | 未启用 | 仅供本地开发验证；设为 `1` 才允许 root 进程执行任务，生产环境禁止配置 |
 | `CODEX_TASK_REAL_CODEX_BIN` | 从服务 `PATH` 查找 `codex` | 真实 Codex CLI 绝对路径；平台包装器会固定追加最高权限参数 |
+| `CODEX_TASK_LEASE_TTL_MS` | `60000` | Task Worker lease 有效期，范围 `15000..600000` 毫秒；Worker 每 2 秒续租，短暂 SQLite 锁等待或主机调度抖动不应直接中断长任务 |
 | `CODEX_SOURCE_HOME` | `$HOME/.codex` | 为每个 Task 隔离 Home 提供认证和配置；不要指向某个 Task 的隔离目录 |
 | `CODEX_TASK_BRIDGE_ROOT` | `/home/jenkins/connect2cli-bridge` | 包含 `workspace_bridge` Python 包的 Bridge 源目录；非默认部署必须显式配置 |
 | `BRIDGE_PYTHON` | `python3` | 运行 Bridge runner 和 execution gate 的 Python `3.11+` 解释器 |
@@ -262,7 +263,7 @@ node --test test/skill-report-artifact-http.test.js test/frontend-performance.te
 
 监听非回环地址时，用户名和密码必须同时配置，否则服务拒绝启动。仍建议在外层配置 TLS 和网络访问控制。
 
-认证用户名和密码必须成对设置，即使只监听回环地址也不允许空密码配置。`CODEX_LOG_STREAM_MAX_CONCURRENCY` 必须是 `1..64` 的整数，`CODEX_API_MAX_CONCURRENCY` 必须是 `1..256` 的整数，两个网络空闲超时必须是 `1000..3600000` 的整数；容量字节门槛必须是非负安全整数，百分比门槛必须在 `0..100`；数据库备份和恢复检查点间隔必须是 `0..8760` 的整数，对应保留数必须分别是 `1..365` 和 `1..30`；受管日志上限和保留数必须满足表中范围。非法端口、并发值、容量值、备份值、检查点值、日志值或认证配置会在启动服务树前直接报错退出并释放 Launcher 锁。
+认证用户名和密码必须成对设置，即使只监听回环地址也不允许空密码配置。`CODEX_LOG_STREAM_MAX_CONCURRENCY` 必须是 `1..64` 的整数，`CODEX_API_MAX_CONCURRENCY` 必须是 `1..256` 的整数，两个网络空闲超时必须是 `1000..3600000` 的整数；Task lease 必须是 `15000..600000` 的整数；容量字节门槛必须是非负安全整数，百分比门槛必须在 `0..100`；数据库备份和恢复检查点间隔必须是 `0..8760` 的整数，对应保留数必须分别是 `1..365` 和 `1..30`；受管日志上限和保留数必须满足表中范围。非法端口、并发值、Task lease、容量值、备份值、检查点值、日志值或认证配置会在启动服务树前直接报错退出并释放 Launcher 锁。
 
 生产服务必须由专用、非 root、最小权限账户运行。以 root 启动时控制面仍可查询，但 `executionUserSafe=false` 且任务启动返回 `503`；`CODEX_ALLOW_ROOT_EXECUTION=1` 只用于隔离开发环境的临时验证。任务目录白名单不能替代 OS 沙箱，任务输入或 Skill 来源不可信时必须另加容器、虚拟机或等价隔离。
 

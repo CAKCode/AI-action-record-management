@@ -184,6 +184,7 @@ Shell 中遗留的任务级路径继承给新服务。每个 Task 仍会在
 | `CODEX_TASK_SESSIONS_DIR` | 第一个 workspace root 下的 `codex-task-sessions` | 完整提测的独立源码与原地归档父目录；与 Bridge Runtime 分开保留 |
 | `CODEX_ALLOW_ROOT_EXECUTION` | 未启用 | 仅供隔离开发验证，生产环境禁止配置 |
 | `CODEX_TASK_REAL_CODEX_BIN` | 从 `PATH` 查找 `codex` | 真实 Codex CLI 的绝对路径 |
+| `CODEX_TASK_LEASE_TTL_MS` | `60000` | Task Worker lease 的有效期，范围 `15000..600000` 毫秒；Worker 每 2 秒续租，用于吸收短暂 SQLite 锁等待和主机调度抖动 |
 | `CODEX_SOURCE_HOME` | `$HOME/.codex` | 任务隔离 Codex Home 的认证/配置来源；服务启动时不会继承外部任务级 `CODEX_HOME` |
 | `CODEX_TASK_BRIDGE_ROOT` | `/home/jenkins/connect2cli-bridge` | 包含 `workspace_bridge` 的 Bridge 源目录 |
 | `BRIDGE_PYTHON` | `python3` | Python `3.11+` 解释器 |

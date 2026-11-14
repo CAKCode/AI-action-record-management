@@ -32,6 +32,16 @@ function idleTask(id, status = 'waiting_review') {
 }
 test.after(() => { closeDatabase(); fs.rmSync(root, { recursive: true, force: true }); });
 
+test('Task leases keep a recovery window for transient SQLite or host scheduling delays', () => {
+  idleTask('lease-window', 'queued');
+  const before = Date.now();
+  assert.equal(store.acquireTaskLease('lease-window', 'lease-worker'), true);
+  const lease = getDatabase().prepare('SELECT lease_expires_at FROM tasks WHERE id=?').get('lease-window');
+  const expiresAt = Date.parse(lease.lease_expires_at);
+  assert.ok(expiresAt - before >= 45000);
+  assert.ok(expiresAt - before <= 65000);
+});
+
 test('queue policy serializes a series while unrelated tasks remain runnable', () => {
   const schedule = cycle('serial');
   due(schedule.id, 2000); store.claimDueTaskSeriesSchedules('worker');
