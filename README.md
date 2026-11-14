@@ -150,6 +150,7 @@ Shell 中遗留的任务级路径继承给新服务。每个 Task 仍会在
 | [部署与运维](docs/OPERATIONS.md) | 运行依赖、目录权限、配置、升级、健康检查和故障处理 |
 | [架构设计](docs/ARCHITECTURE.md) | 组件职责、状态机、不变量和一致性策略 |
 | [API 参考](docs/API.md) | HTTP API、请求约束、响应字段和操作语义 |
+| [Task 平台登记与卡片指南](docs/TASK_PLATFORM_REPORTING.md) | External Attempt 登记、五种卡片、报告修订、artifact 和多阶段流程接入 |
 | [固定上报卡片](docs/REPORT_CARD_TEMPLATES.md) | 五类卡片、重跑与最终汇总预设、固定字段及完整示例 |
 | [Skill 结构化报告](docs/SKILL_REPORTS.md) | 报告 Schema、发布协议和 artifact 规则 |
 | [数据与恢复](docs/DATA_AND_RECOVERY.md) | 数据布局、保留、备份、检查点和恢复步骤 |

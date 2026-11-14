@@ -76,12 +76,6 @@ function initAuthForm() {
   }
 }
 
-function wsAuthPrefix() {
-  const c = getStoredCredentials();
-  if (!c) return '';
-  return `${encodeURIComponent(c.user)}:${encodeURIComponent(c.pass)}@`;
-}
-
 function storedLanguage() {
   try {
     const value = localStorage.getItem('codex-tasks-lang-v1');
@@ -2797,7 +2791,7 @@ function attemptOutputUrl(attemptId, stream, taskId = state.currentTaskId) {
 function attemptOutputWebSocketUrl(attemptId, stream, offset, taskId = state.currentTaskId) {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const path = `${attemptOutputUrl(attemptId, stream, taskId)}/live?offset=${offset}`;
-  return `${protocol}//${wsAuthPrefix()}${location.host}${path}`;
+  return `${protocol}//${location.host}${path}`;
 }
 
 function externalOutputUrl(attemptId, taskId = state.currentTaskId) {
@@ -2806,7 +2800,7 @@ function externalOutputUrl(attemptId, taskId = state.currentTaskId) {
 
 function externalOutputWebSocketUrl(attemptId, offset, taskId = state.currentTaskId) {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${wsAuthPrefix()}${location.host}${externalOutputUrl(attemptId, taskId)}/live?offset=${offset}`;
+  return `${protocol}//${location.host}${externalOutputUrl(attemptId, taskId)}/live?offset=${offset}`;
 }
 
 function terminalViewer({ outputKind, stream, streamLabel, status, url }) {
@@ -3665,7 +3659,7 @@ function codexTerminalPage(managed = false) {
 function codexTerminalSocketUrl(taskId, terminal) {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const params = new URLSearchParams({ cols: terminal.cols, rows: terminal.rows });
-  return `${protocol}//${wsAuthPrefix()}${location.host}/api/sessions/${encodeURIComponent(taskId)}/codex-terminal/live?${params}`;
+  return `${protocol}//${location.host}/api/sessions/${encodeURIComponent(taskId)}/codex-terminal/live?${params}`;
 }
 
 function updateCodexTerminalStatus(view, stateName, text) {

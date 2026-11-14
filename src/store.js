@@ -1660,14 +1660,16 @@ function listSessions(options = null) {
   const limit = Math.min(maxPageSize, boundedLimit(options?.limit, 100));
   const offset = boundedOffset(options?.offset);
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const pagination = options ? ' LIMIT ? OFFSET ?' : '';
+  const queryParams = options ? [...params, limit, offset] : params;
   const sessions = enrichSessionsWithScheduling(
     db,
-    db.prepare(`SELECT * FROM tasks ${where} ORDER BY created_at DESC, id ASC`)
-      .all(...params)
+    db.prepare(`SELECT * FROM tasks ${where} ORDER BY created_at DESC, id ASC${pagination}`)
+      .all(...queryParams)
       .map(rowToSession),
   );
   sessions.sort(compareSessionDisplayOrder);
-  return options ? sessions.slice(offset, offset + limit) : sessions;
+  return sessions;
 }
 
 function sessionVersionTuple(session) {

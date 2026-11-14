@@ -200,6 +200,7 @@ const ATTEMPT_OUTPUT_SOCKET_POLL_MS = 250;
 const ATTEMPT_OUTPUT_SOCKET_MAX_BUFFERED_BYTES = 1024 * 1024;
 const ATTEMPT_TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
+const AUTH_SESSION_COOKIE_SECURE = !LOOPBACK_HOSTS.has(HOST);
 const API_RESPONSE_IDLE_GUARD = Symbol('apiResponseIdleGuard');
 let shuttingDown = false;
 let activeApiRequests = 0;
@@ -1358,9 +1359,10 @@ function authSessionFromRequest(req) {
 }
 
 function setAuthSessionCookie(res, value, maxAgeSeconds) {
+  const secureAttribute = AUTH_SESSION_COOKIE_SECURE ? '; Secure' : '';
   res.setHeader(
     'Set-Cookie',
-    `${AUTH_SESSION_COOKIE}=${value}; Max-Age=${maxAgeSeconds}; Path=/; HttpOnly; SameSite=Strict`,
+    `${AUTH_SESSION_COOKIE}=${value}; Max-Age=${maxAgeSeconds}; Path=/; HttpOnly; SameSite=Strict${secureAttribute}`,
   );
 }
 
@@ -1445,26 +1447,36 @@ function artifactResourceAccessValid(req, pathname, searchParams) {
   return Boolean(supplied) && secureEqual(supplied, reportResourceAccessToken(pathname));
 }
 
-function requestCredentialsValid(req, pathname = '', searchParams = null) {
+function basicCredentialsValid(req) {
   if (!AUTH_USER && !AUTH_PASSWORD) return true;
   const value = String(req.headers.authorization || '');
-  if (value.startsWith('Basic ')) {
-    let decoded = '';
-    try {
-      decoded = Buffer.from(value.slice(6), 'base64').toString('utf8');
-    } catch {}
-    const separator = decoded.indexOf(':');
-    const user = separator === -1 ? decoded : decoded.slice(0, separator);
-    const password = separator === -1 ? '' : decoded.slice(separator + 1);
-    if (secureEqual(user, AUTH_USER) && secureEqual(password, AUTH_PASSWORD)) return true;
-  }
+  if (!value.startsWith('Basic ')) return false;
+  let decoded = '';
+  try {
+    decoded = Buffer.from(value.slice(6), 'base64').toString('utf8');
+  } catch {}
+  const separator = decoded.indexOf(':');
+  const user = separator === -1 ? decoded : decoded.slice(0, separator);
+  const password = separator === -1 ? '' : decoded.slice(separator + 1);
+  return secureEqual(user, AUTH_USER) && secureEqual(password, AUTH_PASSWORD);
+}
+
+function requestCredentialsValid(req, pathname = '', searchParams = null) {
+  if (!AUTH_USER && !AUTH_PASSWORD) return true;
+  if (basicCredentialsValid(req)) return true;
   if (authSessionFromRequest(req)) return true;
   return artifactResourceAccessValid(req, pathname, searchParams)
     || artifactMediaViewAccessValid(req, pathname, searchParams);
 }
 
 function authorize(req, res, pathname, searchParams) {
-  if (requestCredentialsValid(req, pathname, searchParams)) return true;
+  if (requestCredentialsValid(req, pathname, searchParams)) {
+    // Refresh the HttpOnly session when the embedded-browser fallback sends
+    // Basic credentials. WebSocket upgrades then authenticate via the cookie,
+    // without putting the password into a ws:// URL.
+    if (basicCredentialsValid(req)) issueAuthSession(res);
+    return true;
+  }
   const hasCredentials = String(req.headers.authorization || '').startsWith('Basic ');
   if (!hasCredentials) {
     res.setHeader('WWW-Authenticate', 'Basic realm="Codex Task Sessions", charset="UTF-8"');
@@ -3289,7 +3301,9 @@ server.on('error', (error) => {
   process.exitCode = 1;
 });
 
-server.requestTimeout = 30000;
+// Match Node's total request deadline to the configured API progress timeout.
+// Body readers still enforce the same timeout between successive chunks.
+server.requestTimeout = API_IDLE_TIMEOUT_MS;
 server.headersTimeout = 10000;
 server.keepAliveTimeout = 5000;
 server.maxRequestsPerSocket = 1000;

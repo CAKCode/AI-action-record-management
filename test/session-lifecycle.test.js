@@ -2398,6 +2398,7 @@ test('authentication and same-origin checks protect remote-capable deployments',
   const remotePort = port + 2;
   const authRoot = path.join(tempDir, 'auth');
   const child = spawnServer({
+    host: '0.0.0.0',
     port: remotePort,
     dataDir: path.join(authRoot, 'data'),
     runtimeDir: path.join(authRoot, 'runtime'),
@@ -2426,6 +2427,7 @@ test('authentication and same-origin checks protect remote-capable deployments',
       return result.payload.runtime.workerAvailable ? result : null;
     });
     assert.equal(authorized.response.status, 200);
+    assert.match(authorized.response.headers.get('set-cookie') || '', /Secure/);
 
     const login = await fetch(`${root}/api/auth/session`, {
       method: 'POST',
@@ -2435,6 +2437,7 @@ test('authentication and same-origin checks protect remote-capable deployments',
     assert.match(login.headers.get('set-cookie') || '', /codex_task_session=[^;]+/);
     assert.match(login.headers.get('set-cookie') || '', /HttpOnly/);
     assert.match(login.headers.get('set-cookie') || '', /SameSite=Strict/);
+    assert.match(login.headers.get('set-cookie') || '', /Secure/);
     const sessionCookie = (login.headers.get('set-cookie') || '').split(';', 1)[0];
     const cookieAuthorized = await fetch(`${root}/api/health`, {
       headers: { cookie: sessionCookie },

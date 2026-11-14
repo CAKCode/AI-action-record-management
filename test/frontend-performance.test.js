@@ -26,7 +26,7 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
   const timers = new Map();
   const requests = [];
   const requestDetails = [];
-  const authenticatedWebSocketOrigin = 'ws://test-user:test-password@localhost';
+  const authenticatedWebSocketOrigin = 'ws://localhost';
   const sessionValues = new Map([
     ['codex-tasks-auth-v1', JSON.stringify({ user: 'test-user', pass: 'test-password' })],
   ]);

@@ -35,6 +35,8 @@ test('Task progress separates initial and rerun-1 and keeps unknown results expl
     insertReport(db, 'progress-unknown', 'stage:initial', 'test-result', [{ key: 'total', value: 10 }]);
     const tasks = listSessions({ limit: 20, internal: true });
     if (tasks.findIndex(task => task.id === 'progress-v3-19-1') > tasks.findIndex(task => task.id === 'progress-v3-18-0')) throw new Error('creation order was not applied');
+    const page = listSessions({ limit: 1, offset: 1, internal: true });
+    if (page.length !== 1 || page[0].id !== 'progress-v3-18-0') throw new Error('unexpected task page: ' + JSON.stringify(page));
     const progress = tasks.find(task => task.id === 'progress-v3-19-1').testProgress;
     if (progress.runs.initial.completed !== 4 || progress.runs.rerun1.completed !== 1) throw new Error(JSON.stringify(progress));
     if (progress.runs.rerun1.passed !== 1 || progress.runs.rerun1.failed !== 0) throw new Error(JSON.stringify(progress));
