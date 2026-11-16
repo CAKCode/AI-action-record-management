@@ -78,7 +78,7 @@ let childEnvironment = {
   CODEX_ACTIVE_SKILL_IDS: skillIds.join(','),
   ...(invocationId ? { CODEX_SKILL_INVOCATION_ID: invocationId } : {}),
 };
-if (managedInvocation && skillIds.includes('codex-task-platform-api')) {
+if (skillIds.includes('codex-task-platform-api')) {
   try { childEnvironment = require('../../src/task-api-auth').taskApiEnvironment(childEnvironment, args); }
   catch (error) { finishInvocation(78); fail(error.message, 78); }
 }
