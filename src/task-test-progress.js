@@ -1,7 +1,22 @@
 'use strict';
 
+const fs = require('node:fs');
+const { readLivePytestProgressAsync } = require('./pytest-result-summary');
+
 const TASK_TEST_PROGRESS_CACHE_MAX = 1000;
+const LIVE_PROGRESS_DIAGNOSTIC_MAX = 1000;
+const LIVE_PROGRESS_FAILURE_MAX = 1000;
 const taskTestProgressCache = new Map();
+const liveProgressCache = new Map();
+const liveProgressFailures = new Map();
+let liveProgressRefresh = null;
+const liveProgressDiagnostics = new Map();
+
+function setBoundedMapValue(map, key, value, maximum) {
+  if (map.has(key)) map.delete(key);
+  map.set(key, value);
+  while (map.size > maximum) map.delete(map.keys().next().value);
+}
 
 function parseJson(value, fallback = null) {
   if (value == null || value === '') return fallback;
@@ -44,8 +59,112 @@ function finiteMetricValue(metrics, keys) {
   return null;
 }
 
+function liveReportRows(db, taskIds) {
+  if (!taskIds.length) return [];
+  const placeholders = taskIds.map(() => '?').join(',');
+  return db.prepare(`
+    SELECT task_id, report_key, revision, payload_json, artifact_declarations_json
+    FROM (
+      SELECT report.task_id, report.report_key, report.revision, report.payload_json,
+             report.status AS report_status,
+             external.artifact_declarations_json,
+             ROW_NUMBER() OVER (
+               PARTITION BY report.task_id, report.report_key
+               ORDER BY report.revision DESC, report.published_at DESC
+             ) AS report_rank
+      FROM skill_reports report
+      JOIN external_attempts external
+        ON external.id=json_extract(report.payload_json, '$.executionEvidence.externalAttemptId')
+        AND external.task_id=report.task_id
+      WHERE report.task_id IN (${placeholders})
+        AND report.report_type='test-result'
+        AND external.status='running'
+    ) live_reports
+    WHERE report_rank=1
+      AND report_status IN ('pending', 'running', 'partial')
+  `).all(...taskIds);
+}
+
+function liveFileSignature(filePath) {
+  try {
+    const stat = fs.lstatSync(filePath, { bigint: true });
+    if (!stat.isFile() || stat.isSymbolicLink()) return '';
+    return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+  } catch {
+    return '';
+  }
+}
+
+function liveReportGroups(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const declarations = parseJson(row.artifact_declarations_json, []);
+    const filePaths = [...new Set(declarations
+      .filter(declaration => declaration?.kind === 'pytest-html' && declaration.path)
+      .map(declaration => String(declaration.path)))];
+    if (!filePaths.length) continue;
+    const id = `${row.task_id}\0${row.report_key}`;
+    groups.set(id, {
+      id,
+      taskId: row.task_id,
+      filePaths,
+      sourceSignature: filePaths.map(liveFileSignature).join('\0'),
+    });
+  }
+  return [...groups.values()];
+}
+
+function refreshLiveTaskProgress(db, taskIds) {
+  const rows = liveReportRows(db, taskIds);
+  const groups = liveReportGroups(rows);
+  const pendingGroups = groups.filter(group => group.sourceSignature
+    && liveProgressCache.get(group.id)?.sourceSignature !== group.sourceSignature
+    && liveProgressFailures.get(group.id) !== group.sourceSignature);
+  if (!pendingGroups.length) return Promise.resolve(false);
+  if (liveProgressRefresh) return liveProgressRefresh;
+  const refreshingAt = new Date().toISOString();
+  for (const group of pendingGroups) {
+    setBoundedMapValue(liveProgressDiagnostics, group.taskId,
+      { status: 'refreshing', code: '', updatedAt: refreshingAt }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
+  }
+  liveProgressRefresh = readLivePytestProgressAsync(pendingGroups)
+    .then(results => {
+      const updatedAt = new Date().toISOString();
+      for (const group of pendingGroups) {
+        const value = results[group.id];
+        if (value) {
+          liveProgressCache.set(group.id, { ...value, sourceSignature: group.sourceSignature });
+          liveProgressFailures.delete(group.id);
+          setBoundedMapValue(liveProgressDiagnostics, group.taskId,
+            { status: 'ready', code: '', updatedAt }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
+        } else {
+          setBoundedMapValue(liveProgressFailures, group.id, group.sourceSignature, LIVE_PROGRESS_FAILURE_MAX);
+          setBoundedMapValue(liveProgressDiagnostics, group.taskId, {
+            status: 'error', code: 'LIVE_PROGRESS_REFRESH_FAILED', updatedAt,
+          }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
+        }
+      }
+      while (liveProgressCache.size > 128) liveProgressCache.delete(liveProgressCache.keys().next().value);
+      return true;
+    })
+    .catch((error) => {
+      const updatedAt = new Date().toISOString();
+      console.error(`[task-test-progress] live pytest progress refresh failed: ${error.message}`);
+      for (const group of pendingGroups) {
+        setBoundedMapValue(liveProgressFailures, group.id, group.sourceSignature, LIVE_PROGRESS_FAILURE_MAX);
+        setBoundedMapValue(liveProgressDiagnostics, group.taskId, {
+          status: 'error', code: 'LIVE_PROGRESS_REFRESH_FAILED', updatedAt,
+        }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
+      }
+      return false;
+    })
+    .finally(() => { liveProgressRefresh = null; });
+  return liveProgressRefresh;
+}
+
 function taskTestProgressByTask(db, taskIds) {
   if (!taskIds.length) return new Map();
+  refreshLiveTaskProgress(db, taskIds).catch(() => {});
   const placeholders = taskIds.map(() => '?').join(',');
   const rows = db.prepare(`
     SELECT task_id, report_key, report_type, status, revision, published_at, metrics_json, payload_json
@@ -67,18 +186,56 @@ function taskTestProgressByTask(db, taskIds) {
       ? `${row.report_key}\0${row.revision}` : row.report_key;
     reports.set(reportKey, row);
   }
+  const liveRows = liveReportRows(db, taskIds);
+  const liveGroups = new Map(liveReportGroups(liveRows).map(group => [group.id, group]));
+  const liveSignatures = new Map();
+  for (const row of liveRows) {
+    const payload = parseJson(row.payload_json, {});
+    const fallbackMetrics = new Map((Array.isArray(payload.metrics) ? payload.metrics : [])
+      .filter(metric => metric && typeof metric.key === 'string')
+      .map(metric => [metric.key.trim().toLowerCase(), Number(metric.value)]));
+    const group = liveGroups.get(`${row.task_id}\0${row.report_key}`);
+    const live = group ? liveProgressCache.get(group.id) : null;
+    if (!live || live.sourceSignature !== group.sourceSignature) continue;
+    const liveCounts = live.counts;
+    const liveSignature = live.signature;
+    liveSignatures.set(`${row.task_id}\0${row.report_key}`, liveSignature);
+    const metrics = [
+      { key: 'total', value: Math.max(liveCounts.total, finiteMetricValue(fallbackMetrics, ['total', 'selected']) || 0) },
+      { key: 'passed', value: liveCounts.passed },
+      { key: 'failed', value: liveCounts.failed },
+      { key: 'error', value: liveCounts.error },
+      { key: 'skipped', value: liveCounts.skipped },
+      { key: 'xfailed', value: liveCounts.xfailed },
+      { key: 'xpassed', value: liveCounts.xpassed },
+      { key: 'executed', value: liveCounts.total - liveCounts.skipped },
+    ];
+    if (!latestByTask.has(row.task_id)) latestByTask.set(row.task_id, new Map());
+    latestByTask.get(row.task_id).set(row.report_key, {
+      ...row,
+      metrics_json: JSON.stringify(metrics),
+      status: 'running',
+      liveSignature,
+    });
+  }
   const result = new Map();
   for (const taskId of taskIds) {
     const reports = latestByTask.get(taskId) || new Map();
     const signature = [...reports.values()]
-      .map((row) => `${row.report_type}\0${row.report_key}\0${row.revision}\0${row.published_at || ''}\0${row.status}`)
+      .map((row) => `${row.report_type}\0${row.report_key}\0${row.revision}\0${row.published_at || ''}\0${row.status}\0${row.liveSignature || liveSignatures.get(`${taskId}\0${row.report_key}`) || ''}`)
       .join('\x01');
     const cached = taskTestProgressCache.get(taskId);
     if (cached?.signature === signature) {
+      if (liveRows.some(row => row.task_id === taskId)) cached.value.liveProgress = {
+        ...(liveProgressDiagnostics.get(taskId) || { status: 'idle', code: '', updatedAt: '' }),
+      };
       result.set(taskId, cached.value);
       continue;
     }
     const value = calculateTaskTestProgress([...reports.values()]);
+    if (liveRows.some(row => row.task_id === taskId)) value.liveProgress = {
+      ...(liveProgressDiagnostics.get(taskId) || { status: 'idle', code: '', updatedAt: '' }),
+    };
     taskTestProgressCache.set(taskId, { signature, value });
     result.set(taskId, value);
   }
@@ -256,4 +413,5 @@ function combineTaskTestRunProgress(initial, rerun1) {
 module.exports = {
   emptyTaskTestProgress,
   taskTestProgressByTask,
+  refreshLiveTaskProgress,
 };

@@ -11324,6 +11324,15 @@ function deferClaimedCommand(commandId, workerId, error = '') {
   `).run(preserveString(error), retryAt, commandId, workerId).changes === 1;
 }
 
+function renewClaimedCommand(commandId, workerId, ttlMs = COMMAND_CLAIM_TTL_MS) {
+  const now = nowIso();
+  const expires = new Date(Date.now() + ttlMs).toISOString();
+  return ensureStorage().prepare(`
+    UPDATE commands SET claim_expires_at=?
+    WHERE id=? AND status='processing' AND worker_id=? AND claim_expires_at>?
+  `).run(expires, commandId, workerId, now).changes === 1;
+}
+
 function failClaimedCommand(commandId, workerId, error) {
   const db = ensureStorage();
   let handled = false;
@@ -12942,6 +12951,7 @@ module.exports = {
   createAndQueueSession,
   queueSessionRun,
   claimPendingCommands,
+  renewClaimedCommand,
   finishCommand,
   finishClaimedCommand,
   deferClaimedCommand,

@@ -573,6 +573,20 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     }];
   `, context);
   assert.equal(vm.runInContext('dashboardPollDelay()', context), 5000);
+  vm.runInContext(`
+    state.dashboard.sessions = [{
+      id: 'background-progress', status: 'waiting_review', activeExternalAttempts: 1,
+      testProgress: { runs: { initial: { available: false, status: 'unavailable' }, rerun1: { available: false, status: 'unavailable' } } }
+    }];
+  `, context);
+  assert.equal(vm.runInContext('dashboardPollDelay()', context), 2000);
+  vm.runInContext(`
+    state.dashboard.sessions = [{
+      id: 'scheduled-progress', status: 'waiting_review', activeScheduledJobs: 1,
+      testProgress: { runs: { initial: { available: false, status: 'unavailable' }, rerun1: { available: false, status: 'unavailable' } } }
+    }];
+  `, context);
+  assert.equal(vm.runInContext('dashboardPollDelay()', context), 10000);
   assert.equal(vm.runInContext("formatTime('not-a-timestamp')", context), 'not-a-timestamp');
   assert.equal(vm.runInContext("statusLabel({ enabled: false, status: 'idle' })", context), '已禁用');
   assert.equal(vm.runInContext("statusClass({ enabled: false, status: 'idle' })", context), 'disabled');
@@ -2170,6 +2184,10 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     {id:'historical-follow-up-task',name:'Historical follow-up task',status:'waiting_review'},
     ${JSON.stringify(historicalFollowUpReports)},[],[],[],[],${JSON.stringify(finalCounts)})`, context);
   assert.match(countedSummary, /累计统计/);
+  assert.match(countedSummary, /各轮结果/);
+  assert.match(countedSummary, /首轮回归/);
+  assert.match(countedSummary, /Rerun #1/);
+  assert.match(countedSummary, /汇总结果/);
   assert.match(countedSummary, /7,517/);
   assert.match(countedSummary, /7,437/);
   assert.match(countedSummary, /6,750/);

@@ -8,7 +8,13 @@ const { ensureManagedDirectory } = require('./managed-storage');
 const { safeId } = require('./utils');
 
 const PLAYBACK_CACHE_VERSION = 'v1';
+const FFMPEG_TIMEOUT_MS = 120000;
+const FFMPEG_KILL_GRACE_MS = 2000;
 const playbackMaterializations = new Map();
+
+function playbackAbortError() {
+  return playbackError('Playback request was aborted', 499);
+}
 
 function playbackError(message, statusCode = 409, cause = null) {
   const error = Object.assign(new Error(message), { statusCode, expected: true });
@@ -125,7 +131,9 @@ function ffmpegExecutable() {
   return String(process.env.CODEX_REPORT_FFMPEG_PATH || 'ffmpeg').trim() || 'ffmpeg';
 }
 
-function runFfmpeg(inputPath, outputPath) {
+function runFfmpeg(inputPath, outputPath, options = {}) {
+  const signal = options.signal;
+  const timeoutMs = Number(options.timeoutMs || FFMPEG_TIMEOUT_MS);
   const args = [
     '-nostdin',
     '-hide_banner',
@@ -144,20 +152,58 @@ function runFfmpeg(inputPath, outputPath) {
       windowsHide: true,
     });
     let stderr = '';
+    let settled = false;
+    let terminationError = null;
+    let timeout;
+    let forceKillTimer;
+    const abortListener = () => {
+      terminate(playbackAbortError());
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      clearTimeout(forceKillTimer);
+      signal?.removeEventListener('abort', abortListener);
+    };
+    const finish = (error = null) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const terminate = (error) => {
+      if (settled) return;
+      terminationError ||= error;
+      try { child.kill('SIGTERM'); } catch {}
+      forceKillTimer = setTimeout(() => {
+        if (settled) return;
+        try { child.kill('SIGKILL'); } catch {}
+      }, FFMPEG_KILL_GRACE_MS);
+    };
+    timeout = setTimeout(
+      () => terminate(playbackError('FFmpeg playback preparation timed out', 504)),
+      timeoutMs,
+    );
+    if (signal?.aborted) abortListener();
+    else signal?.addEventListener('abort', abortListener, { once: true });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => {
       if (stderr.length < 64 * 1024) stderr += chunk.slice(0, (64 * 1024) - stderr.length);
     });
     child.once('error', (error) => {
-      reject(playbackError(`Could not start FFmpeg: ${error.message}`, 503, error));
+      finish(terminationError || playbackError(`Could not start FFmpeg: ${error.message}`, 503, error));
     });
     child.once('close', (code, signal) => {
+      if (terminationError) {
+        finish(terminationError);
+        return;
+      }
       if (code === 0) {
-        resolve();
+        finish();
         return;
       }
       const detail = stderr.trim().split(/\r?\n/).slice(-4).join(' | ');
-      reject(playbackError(
+      finish(playbackError(
         'FFmpeg could not prepare HLS playback',
         409,
         new Error(detail || String(signal || code)),
@@ -197,7 +243,7 @@ async function materializePlaybackFile(options, cachePath) {
     options.assertOwner?.();
     const playlistUrl = await materializeLocalPlaylist(options, stagingDirectory);
     const stagedOutput = path.join(stagingDirectory, 'playback.mp4');
-    await runFfmpeg(fileURLToPath(playlistUrl), stagedOutput);
+    await runFfmpeg(fileURLToPath(playlistUrl), stagedOutput, { signal: options.signal });
     const stat = await fs.promises.lstat(stagedOutput);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size === 0) {
       throw playbackError('FFmpeg produced an empty playback file');
@@ -211,6 +257,7 @@ async function materializePlaybackFile(options, cachePath) {
 }
 
 async function openHlsPlaybackFile(options) {
+  if (options.signal?.aborted) throw playbackAbortError();
   const source = await options.openResource(options.resourceId);
   if (!source) return null;
   const extension = path.extname(source.fileName).toLowerCase();
@@ -229,12 +276,78 @@ async function openHlsPlaybackFile(options) {
     `${PLAYBACK_CACHE_VERSION}-${sourceSha256}.mp4`,
   );
   let materialization = playbackMaterializations.get(cachePath);
+  if (materialization?.cancelled || materialization?.controller.signal.aborted) {
+    if (playbackMaterializations.get(cachePath) === materialization) {
+      playbackMaterializations.delete(cachePath);
+    }
+    materialization = null;
+  }
   if (!materialization) {
-    materialization = materializePlaybackFile(options, cachePath)
-      .finally(() => playbackMaterializations.delete(cachePath));
+    const controller = new AbortController();
+    materialization = {
+      controller,
+      consumers: 0,
+      cancelled: false,
+      settled: false,
+      promise: null,
+    };
+    materialization.promise = materializePlaybackFile({
+      ...options,
+      signal: controller.signal,
+    }, cachePath).finally(() => {
+      materialization.settled = true;
+      if (playbackMaterializations.get(cachePath) === materialization) {
+        playbackMaterializations.delete(cachePath);
+      }
+    });
     playbackMaterializations.set(cachePath, materialization);
   }
-  await materialization;
+
+  materialization.consumers += 1;
+  let released = false;
+  const releaseConsumer = () => {
+    if (released) return;
+    released = true;
+    materialization.consumers -= 1;
+    if (materialization.consumers === 0 && !materialization.settled) {
+      materialization.cancelled = true;
+      materialization.controller.abort();
+    }
+  };
+  try {
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        options.signal?.removeEventListener('abort', onAbort);
+        releaseConsumer();
+        reject(playbackAbortError());
+      };
+      if (options.signal?.aborted) {
+        onAbort();
+        return;
+      }
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+      materialization.promise.then((value) => {
+        if (settled) return;
+        settled = true;
+        options.signal?.removeEventListener('abort', onAbort);
+        releaseConsumer();
+        resolve(value);
+      }, (error) => {
+        if (settled) return;
+        settled = true;
+        options.signal?.removeEventListener('abort', onAbort);
+        releaseConsumer();
+        reject(error);
+      });
+    });
+  } catch (error) {
+    releaseConsumer();
+    throw error;
+  }
+  if (options.signal?.aborted) throw playbackAbortError();
   options.assertOwner?.();
 
   const opened = await openRegularFileForRead(cachePath, {

@@ -331,8 +331,16 @@ function codexRuntimeProcesses(options = {}) {
     const pidUpdateLoop = appServerIndex > 0
       && argv[appServerIndex + 1] === 'daemon' && argv[appServerIndex + 2] === 'pid-update-loop';
     const codeModeHost = path.basename(executable) === 'codex-code-mode-host';
-    const cliMain = options.includeCliMain && path.basename(executable) === 'codex'
-      && appServerIndex < 0 && (argv.includes('resume') || argv.includes('exec'));
+    const cliScript = argv.some((argument) => {
+      const script = path.resolve(argument);
+      return path.basename(script) === 'codex.js'
+        && script.includes(`${path.sep}node_modules${path.sep}@openai${path.sep}codex${path.sep}`)
+        && path.basename(path.dirname(script)) === 'bin';
+    });
+    const cliMain = options.includeCliMain
+      && appServerIndex < 0
+      && (path.basename(executable) === 'codex' || cliScript)
+      && (argv.includes('resume') || argv.includes('exec'));
     if (!managedDaemon && !pidUpdateLoop && !codeModeHost && !cliMain && !options.includeTaskProcesses) continue;
     const environment = readProcessText(procRoot, pid, 'environ').split('\0');
     const values = Object.fromEntries(environment

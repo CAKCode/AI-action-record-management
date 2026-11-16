@@ -137,4 +137,6 @@ test('a loopback process still rejects externally addressed pages without creden
   assert.equal(external.status, 401);
   assert.match(external.headers.get('content-type') || '', /application\/json/);
   assert.doesNotMatch(await external.text(), /<html|<script|<body/i);
+  const spoofedLoopback = await fetch(baseUrl, { headers: { 'x-forwarded-host': 'localhost' } });
+  assert.equal(spoofedLoopback.status, 401);
 });

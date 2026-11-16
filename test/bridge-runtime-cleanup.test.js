@@ -277,11 +277,13 @@ test('discovers daemon, PID maintenance and code hosts only for the exact Sessio
     [209, [`${home}-other/codex`, 'app-server', '--managed-daemon'], environment],
     [210, [codex, 'app-server', '--managed-daemon'], { WECOM_BRIDGE_SESSION_ID: artifacts.sessionId }],
     [211, ['/usr/local/bin/codex', 'resume', 'thread-id'], environment],
+    [212, ['/usr/bin/node', '/usr/local/lib/node_modules/@openai/codex/bin/codex.js', 'resume', 'thread-id'], environment],
+    [213, ['/usr/bin/node', '/tmp/project/codex/bin/codex.js', 'resume', 'thread-id'], environment],
   ];
   for (const [pid, argv, env] of fixtures) writeProcessFixture(procRoot, pid, argv, env);
   assert.deepEqual(sessionDaemonProcesses(artifacts.sessionId, home, { procRoot }).map(match => match.pid), [201, 202, 203]);
   assert.deepEqual(sessionDaemonProcesses(artifacts.sessionId, home, { procRoot, includeCliMain: true }).map(match => match.pid),
-    [201, 202, 203, 207, 208, 211]);
+    [201, 202, 203, 207, 208, 211, 212]);
   assert.deepEqual(sessionDaemonProcesses('', home, { procRoot }), []);
   assert.deepEqual(sessionDaemonProcesses(artifacts.sessionId, '', { procRoot }), []);
 });

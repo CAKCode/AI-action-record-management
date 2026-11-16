@@ -42,6 +42,19 @@ test('Task leases keep a recovery window for transient SQLite or host scheduling
   assert.ok(expiresAt - before <= 65000);
 });
 
+test('command claims can be renewed during a slow Session startup', () => {
+  store.createAndQueueSession('command-renewal', {
+    name: 'command-renewal', objective: 'local fixture', workingDir: '.',
+  });
+  const [command] = store.claimPendingCommands('renew-worker', 1);
+  assert(command);
+  assert.equal(store.renewClaimedCommand(command.id, 'renew-worker'), true);
+  const renewed = getDatabase().prepare('SELECT claim_expires_at FROM commands WHERE id=?').get(command.id);
+  assert.ok(Date.parse(renewed.claim_expires_at) > Date.now() + 10000);
+  getDatabase().prepare("UPDATE commands SET claim_expires_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(command.id);
+  assert.equal(store.renewClaimedCommand(command.id, 'renew-worker'), false);
+});
+
 test('queue policy serializes a series while unrelated tasks remain runnable', () => {
   const schedule = cycle('serial');
   due(schedule.id, 2000); store.claimDueTaskSeriesSchedules('worker');

@@ -143,6 +143,8 @@ const state = {
   editingSkillId: '',
   editingExecutionId: '',
   currentExecutions: [],
+  currentAttempts: [],
+  currentExternalAttempts: [],
   currentSkillReports: [],
   skillUsage: null,
   dashboardSignature: '',
@@ -238,7 +240,7 @@ const messages = {
     cycleDeletionProgress: '已删除 {deleted}/{total} 个 Task，正在清理剩余产物和运行环境。',
     cycleDeletionRetry: '清理正在重试，进度会自动更新。', cycleDeletionRefreshFailed: '删除已受理，刷新进度失败，请稍后查看。',
     cycleDeletionLegacy: '当前服务仍使用保留 Task 的旧删除逻辑，任务和产物尚未删除；请应用新版服务后继续清理。',
-    cumulativeResults: '累计统计', includingReruns: '含重跑', finalCaseResults: '最终结果', rerunsReplaceEarlier: '重跑覆盖原结果', resultTotal: '总数', fullResultDetail: '展开完整结论', caseCountNotes: '总数包含 Skip 和 XFail；实际执行（不含 Skip）{count} 次。', resultCountsIncomplete: '部分报告尚不可统计，以下为当前已读取的结果。',
+    cumulativeResults: '累计统计', includingReruns: '含重跑', finalCaseResults: '最终结果', rerunsReplaceEarlier: '重跑覆盖原结果', runResultBreakdown: '各轮结果', runResultBreakdownHint: '首轮与失败重跑分别统计', aggregateResults: '汇总结果', aggregateResultsHint: '累计执行与最终覆盖结果', resultTotal: '总数', fullResultDetail: '展开完整结论', caseCountNotes: '总数包含 Skip 和 XFail；实际执行（不含 Skip）{count} 次。', resultCountsIncomplete: '部分报告尚不可统计，以下为当前已读取的结果。',
     expandInstruction: '展开输入', collapseInstruction: '收起输入', copyReportName: '复制文件名', reportNameCopied: '文件名已复制', copyReportNameFailed: '复制失败，请展开后手动复制文件名。',
     deleteTaskArtifacts: '删除任务及产物', taskArtifactsDeleted: '任务及平台产物已删除，Runtime 由后台回收。', reclaimRuntimeOnly: '仅回收 Runtime', taskStorageLabel: 'TASK STORAGE',
     taskStorageHeading: '任务与归档产物', taskStorageNote: '包含报告、视频、音频、日志、播放缓存和 Skill 快照。/data/jenkins/videos 源文件由你手动清理。',
@@ -277,7 +279,7 @@ const messages = {
     taskName: '任务名称', objective: '任务目标 / 首次指令', workingDir: '工作目录', notes: '备注', taskProject: '项目分类', taskTestType: '测试类型', taskTags: '标准标签（逗号分隔，最多6个）', taskTagsHint: '使用 scope:/mode:/env:/source:/exclude:/change:/version: 前缀；类型、项目和周期不重复写入标签。', enabled: '启用',
     maxRetries: '中断重试次数', autoResume: '服务重启后自动恢复', createAndStart: '创建并启动', updateTask: '更新任务', createTask: '新建任务 Session', editTask: '编辑任务',
     idHint: '只允许字母、数字、短横线和下划线', pathHint: '相对路径以任务工作区根目录为基准；绝对路径必须位于允许的根目录内。',
-    taskContext: '任务上下文', sessionId: 'Session ID', status: '状态', runCount: '执行次数', recoveryAttempts: '自动恢复次数', createdAt: '创建时间', finishedAt: '完成时间', workspace: '工作区', workspaceMode: '工作区模式', sourceMode: '源码模式', sourceCommit: '源码 Commit', archiveState: '源码归档状态', sessionRoot: 'Session 根目录', nextCheck: '下次检查', activeBackground: '活动后台执行', activeSchedules: '活动定时检查',
+    taskContext: '任务上下文', sessionId: 'Session ID', status: '状态', processIdentity: '执行进程', processGroup: '进程组', processRegistered: '已登记', processStopping: '停止中，等待进程退出', runCount: '执行次数', recoveryAttempts: '自动恢复次数', createdAt: '创建时间', finishedAt: '完成时间', workspace: '工作区', workspaceMode: '工作区模式', sourceMode: '源码模式', sourceCommit: '源码 Commit', archiveState: '源码归档状态', sessionRoot: 'Session 根目录', nextCheck: '下次检查', activeBackground: '活动后台执行', activeSchedules: '活动定时检查',
     waitingStart: '创建后将立即启动独立 Session。', runningHint: '任务正在执行，日志会自动刷新。', scheduledHint: 'Codex 已释放；平台将在到点后恢复同一 Session，并创建新的 Turn 检查后台结果。', reviewHint: '检查本轮结果；可以继续发送指令，或确认完成并归档。', archivedHint: '该 Session 已完成并归档，不能再次运行。', recoverHint: '恢复会继续使用 Task 当前最新的持久 Session，不会创建新会话。', disabledHint: '任务已禁用，启用后才能启动或继续。',
     startTask: '启动任务', recoverTask: '恢复任务', taskStarted: '任务已排队', taskSaved: '任务已保存', taskDeleted: '任务已删除', taskCompleted: '任务已确认完成', taskRestored: '任务已恢复，可重新连接 Codex CLI', taskReset: '任务配置和历史已保留，后续运行将创建新的 Codex Session', stopRequested: '已请求停止任务', stopNotApplicable: '任务当前不需要停止', operationOutcomeUnknown: '请求结果暂时无法确认；系统已保留操作标识，重试不会重复执行',
     skillName: 'Skill 名称', category: '分类', description: '描述', tags: '标签（逗号分隔）', skillContent: 'SKILL.md 内容', createSkill: '新建 Skill', editSkill: '编辑 Skill', viewSkill: '查看 Skill',
@@ -303,7 +305,7 @@ const messages = {
     cycleDeletionProgress: '{deleted}/{total} Tasks deleted. Cleaning remaining artifacts and runtime.',
     cycleDeletionRetry: 'Cleanup is retrying. Progress updates automatically.', cycleDeletionRefreshFailed: 'Deletion accepted, but progress could not be refreshed. Check again later.',
     cycleDeletionLegacy: 'The running service still retains Tasks on cycle deletion. Tasks and artifacts have not been deleted; apply the updated service before continuing cleanup.',
-    cumulativeResults: 'Cumulative', includingReruns: 'Includes reruns', finalCaseResults: 'Final results', rerunsReplaceEarlier: 'Latest result per case', resultTotal: 'Total', fullResultDetail: 'Full conclusion', caseCountNotes: 'Totals include Skip and XFail; {count} executions excluding Skip.', resultCountsIncomplete: 'Some reports are not available for counting; these are the results read so far.',
+    cumulativeResults: 'Cumulative', includingReruns: 'Includes reruns', finalCaseResults: 'Final results', rerunsReplaceEarlier: 'Latest result per case', runResultBreakdown: 'Run breakdown', runResultBreakdownHint: 'Initial and failed-case reruns are shown separately', aggregateResults: 'Aggregated results', aggregateResultsHint: 'Cumulative executions and final per-case results', resultTotal: 'Total', fullResultDetail: 'Full conclusion', caseCountNotes: 'Totals include Skip and XFail; {count} executions excluding Skip.', resultCountsIncomplete: 'Some reports are not available for counting; these are the results read so far.',
     expandInstruction: 'Write a message', collapseInstruction: 'Collapse input', copyReportName: 'Copy filename', reportNameCopied: 'Filename copied', copyReportNameFailed: 'Copy failed. Expand the filename to copy it manually.',
     deleteTaskArtifacts: 'Delete task & artifacts', taskArtifactsDeleted: 'Task and managed artifacts deleted. Runtime reclamation runs in the background.', reclaimRuntimeOnly: 'Reclaim Runtime only', taskStorageLabel: 'TASK STORAGE',
     taskStorageHeading: 'Tasks & archived artifacts', taskStorageNote: 'Reports, video, audio, logs, playback caches and Skill snapshots. Source files in /data/jenkins/videos remain for manual cleanup.',
@@ -342,7 +344,7 @@ const messages = {
     taskName: 'Task name', objective: 'Task objective / initial instruction', workingDir: 'Working directory', notes: 'Notes', taskProject: 'Project classification', taskTestType: 'Test type', taskTags: 'Standard tags (comma separated, max 6)', taskTagsHint: 'Use scope:/mode:/env:/source:/exclude:/change:/version: prefixes; do not duplicate type, project, or cycle fields.', enabled: 'Enabled',
     maxRetries: 'Interruption retries', autoResume: 'Auto-recover after service restart', createAndStart: 'Create & Start', updateTask: 'Update Task', createTask: 'New Task Session', editTask: 'Edit Task',
     idHint: 'Letters, numbers, hyphens, and underscores only', pathHint: 'Relative paths resolve from the task workspace root; absolute paths must be under an allowed root.',
-    taskContext: 'Task Context', sessionId: 'Session ID', status: 'Status', runCount: 'Runs', recoveryAttempts: 'Auto recoveries', createdAt: 'Created', finishedAt: 'Completed', workspace: 'Workspace', workspaceMode: 'Workspace mode', sourceMode: 'Source mode', sourceCommit: 'Source commit', archiveState: 'Source archive', sessionRoot: 'Session root', nextCheck: 'Next check', activeBackground: 'Active background runs', activeSchedules: 'Active scheduled checks',
+    taskContext: 'Task Context', sessionId: 'Session ID', status: 'Status', processIdentity: 'Execution process', processGroup: 'Process group', processRegistered: 'Registered', processStopping: 'Stopping; waiting for process exit', runCount: 'Runs', recoveryAttempts: 'Auto recoveries', createdAt: 'Created', finishedAt: 'Completed', workspace: 'Workspace', workspaceMode: 'Workspace mode', sourceMode: 'Source mode', sourceCommit: 'Source commit', archiveState: 'Source archive', sessionRoot: 'Session root', nextCheck: 'Next check', activeBackground: 'Active background runs', activeSchedules: 'Active scheduled checks',
     waitingStart: 'The independent session starts immediately after creation.', runningHint: 'The task is running. Logs refresh automatically.', scheduledHint: 'Codex has been released. The platform will resume this Session and create a new Turn when the durable check is due.', reviewHint: 'Review this turn, then continue the same session or complete and archive the task.', archivedHint: 'This Session is archived. Its complete Codex CLI transcript is read only; explicitly restore it to reconnect and continue.', recoverHint: "Recovery continues the Task's latest persistent Session and does not create a new one.", disabledHint: 'Enable this task before starting or continuing it.',
     startTask: 'Start Task', recoverTask: 'Recover Task', taskStarted: 'Task queued', taskSaved: 'Task saved', taskDeleted: 'Task deleted', taskCompleted: 'Task completed and archived', taskRestored: 'Task restored. You can reconnect to Codex CLI.', taskReset: 'Task configuration and history were retained. The next run will create a new Codex Session.', stopRequested: 'Stop requested', stopNotApplicable: 'This task does not need to be stopped', operationOutcomeUnknown: 'The result cannot be confirmed yet. The operation identity was retained, so retrying will not execute it twice.',
     skillName: 'Skill name', category: 'Category', description: 'Description', tags: 'Tags (comma separated)', skillContent: 'SKILL.md content', createSkill: 'New Skill', editSkill: 'Edit Skill', viewSkill: 'View Skill',
@@ -1934,23 +1936,56 @@ function businessFinalSummary(runs) {
   return runs.map((run, index) => `${businessRegressionTitle(run, index)}: ${testRunSummary(run)}`).join(' · ');
 }
 
-function pytestResultSummaryHtml(summary) {
+function pytestMetricValue(report, keys) {
+  const wanted = new Set(keys);
+  const metric = (report?.metrics || []).find((item) => wanted.has(String(item?.key || '').toLowerCase()));
+  const value = Number(metric?.value);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function pytestRunResultCounts(run) {
+  const report = run?.report;
+  if (!report) return null;
+  const total = pytestMetricValue(report, ['total', 'selected', 'collected']);
+  const passed = pytestMetricValue(report, ['passed', 'pass']) || 0;
+  const failed = (pytestMetricValue(report, ['failed', 'fail']) || 0)
+    + (pytestMetricValue(report, ['error', 'errors']) || 0);
+  const skipped = pytestMetricValue(report, ['skipped', 'skip']) || 0;
+  const xfailed = pytestMetricValue(report, ['xfailed']) || 0;
+  const xpassed = pytestMetricValue(report, ['xpassed']) || 0;
+  if (total == null && passed + failed + skipped + xfailed + xpassed === 0) return null;
+  return {
+    total: Math.max(total == null ? 0 : total, passed + failed + skipped + xfailed + xpassed),
+    passed, failed, skipped, xfailed, xpassed, error: 0, unknown: 0,
+  };
+}
+
+function pytestResultRowHtml(title, note, counts, number) {
+  return `<div class="final-result-row">
+    <div class="final-result-row-title"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(note)}</span></div>
+    <div class="final-result-number"><span>${escapeHtml(tr('resultTotal'))}</span><strong>${number(counts.total)}</strong></div>
+    <div class="final-result-number tone-success"><span>Pass</span><strong>${number(counts.passed)}</strong></div>
+    <div class="final-result-number tone-danger"><span>Fail</span><strong>${number(counts.failed)}</strong></div>
+    <div class="final-result-other">${[['Skip', 'skipped'], ['XFail', 'xfailed'], ['Error', 'error'], ['XPass', 'xpassed'], [tr('unknown'), 'unknown']]
+      .filter(([, key]) => counts[key]).map(([label, key]) => `<span>${escapeHtml(label)} <b>${number(counts[key])}</b></span>`).join('')}</div>
+  </div>`;
+}
+
+function pytestResultSummaryHtml(summary, runs = []) {
   if (!summary?.available) return '';
   const number = value => Number(value || 0).toLocaleString(state.lang === 'zh' ? 'zh-CN' : 'en-US');
-  const rows = [
+  const runRows = (runs || []).map((run, index) => {
+    const counts = pytestRunResultCounts(run);
+    return counts ? pytestResultRowHtml(businessRegressionTitle(run, index), tr('runResultBreakdownHint'), counts, number) : '';
+  }).filter(Boolean).join('');
+  const aggregateRows = [
     ['cumulativeResults', 'includingReruns', summary.cumulative],
     ['finalCaseResults', 'rerunsReplaceEarlier', summary.final],
-  ];
+  ].map(([title, note, counts]) => pytestResultRowHtml(tr(title), tr(note), counts, number)).join('');
   return `<div class="final-result-statistics">
     ${!summary.complete ? `<p class="final-result-incomplete">${escapeHtml(tr('resultCountsIncomplete'))}</p>` : ''}
-    ${rows.map(([title, note, counts]) => `<div class="final-result-row">
-      <div class="final-result-row-title"><strong>${escapeHtml(tr(title))}</strong><span>${escapeHtml(tr(note))}</span></div>
-      <div class="final-result-number"><span>${escapeHtml(tr('resultTotal'))}</span><strong>${number(counts.total)}</strong></div>
-      <div class="final-result-number tone-success"><span>Pass</span><strong>${number(counts.passed)}</strong></div>
-      <div class="final-result-number tone-danger"><span>Fail</span><strong>${number(counts.failed)}</strong></div>
-      <div class="final-result-other">${[['Skip', 'skipped'], ['XFail', 'xfailed'], ['Error', 'error'], ['XPass', 'xpassed'], [tr('unknown'), 'unknown']]
-        .filter(([, key]) => counts[key]).map(([label, key]) => `<span>${escapeHtml(label)} <b>${number(counts[key])}</b></span>`).join('')}</div>
-    </div>`).join('')}
+    ${runRows ? `<section class="final-result-group"><div class="final-result-group-title"><strong>${escapeHtml(tr('runResultBreakdown'))}</strong><span>${escapeHtml(tr('runResultBreakdownHint'))}</span></div>${runRows}</section>` : ''}
+    <section class="final-result-group"><div class="final-result-group-title"><strong>${escapeHtml(tr('aggregateResults'))}</strong><span>${escapeHtml(tr('aggregateResultsHint'))}</span></div>${aggregateRows}</section>
     <p class="final-result-count-note">${escapeHtml(trf('caseCountNotes', { count: number(summary.executed) }))}</p>
   </div>`;
 }
@@ -2515,7 +2550,7 @@ function businessSummaryTimeline(task, reports, externalAttempts, scheduledJobs,
     return timeDifference || left.sortOrder - right.sortOrder;
   });
   const stage = businessSummaryStage(task, runs, analysisReports, latestAnalysisExecution);
-  const resultStatistics = stage.title === tr('finalResult') ? pytestResultSummaryHtml(pytestSummary) : '';
+  const resultStatistics = stage.title === tr('finalResult') ? pytestResultSummaryHtml(pytestSummary, runs) : '';
   if (resultStatistics) stage.status = finalPytestStatus(pytestSummary);
   const stageStatus = reportStatusPresentation(stage.status);
   return `<section class="business-summary">
@@ -5445,11 +5480,40 @@ async function saveTask(event) {
 }
 
 function taskContext(task) {
+  const processRows = [];
+  const addProcess = (kind, id, pid, processGroupId, status) => {
+    if (!Number.isInteger(Number(pid)) || Number(pid) < 2) return;
+    const key = `${Number(pid)}:${Number(processGroupId || pid)}`;
+    if (processRows.some((row) => row.key === key)) return;
+    processRows.push({
+      key,
+      kind,
+      id: String(id || ''),
+      pid: Number(pid),
+      processGroupId: Number(processGroupId || pid),
+      status: String(status || ''),
+    });
+  };
+  addProcess('Task Turn', task.id, task.currentPid, task.currentProcessGroupId, task.status);
+  if (state.currentTaskId === task.id) {
+    for (const attempt of state.currentAttempts || []) {
+      if (!['running', 'recovering', 'stopping'].includes(String(attempt.status || ''))) continue;
+      addProcess('Attempt', attempt.id, attempt.pid, attempt.processGroupId, attempt.status);
+    }
+    for (const attempt of state.currentExternalAttempts || []) {
+      if (String(attempt.status || '') !== 'running') continue;
+      addProcess(attempt.label || 'Background', attempt.id, attempt.pid, attempt.processGroupId, attempt.status);
+    }
+  }
+  const processIdentity = processRows.length
+    ? `<div><dt>${escapeHtml(tr('processIdentity'))}</dt><dd><div class="process-identity-list">${processRows.map((row) => `<div><span class="status-badge ${row.status === 'stopping' ? 'stopping' : 'running'}">${escapeHtml(row.status === 'stopping' ? tr('processStopping') : tr('processRegistered'))}</span> <strong>${escapeHtml(row.kind)}</strong> <code>PID ${row.pid} · ${escapeHtml(tr('processGroup'))} ${row.processGroupId}</code>${row.id && row.id !== task.id ? ` <small>${escapeHtml(row.id)}</small>` : ''}</div>`).join('')}</div></dd></div>`
+    : '';
   return `
     <h3>${escapeHtml(tr('taskContext'))}</h3>
     <p class="context-objective">${escapeHtml(task.objective || '-')}</p>
     <dl>
       <div><dt>${escapeHtml(tr('status'))}</dt><dd><span class="status-badge ${escapeHtml(statusClass(task))}">${escapeHtml(statusLabel(task))}</span></dd></div>
+      ${processIdentity}
       <div><dt>${escapeHtml(tr('sessionId'))}</dt><dd><code>${escapeHtml(task.id)}</code></dd></div>
       <div><dt>${escapeHtml(tr('taskProject'))}</dt><dd>${escapeHtml(task.project || 'cloudRecord')}</dd></div>
       ${task.releaseKey ? `<div><dt>${escapeHtml(tr('releaseKey'))}</dt><dd><code>${escapeHtml(task.releaseKey)}</code></dd></div>` : ''}
@@ -5608,7 +5672,10 @@ async function loadTaskConsole(options = {}) {
       ]);
       if (controller.signal.aborted || state.currentTaskId !== taskId || state.detailTab !== detailTab) return;
       state.detailHasOlder = false;
+      state.currentAttempts = [];
+      state.currentExternalAttempts = externalAttempts;
       state.currentSkillReports = skillReports;
+      renderHtml('taskContext', '#taskContext', taskContext(task));
       state.currentExecutions = executions;
       updateBackgroundTabAvailability(externalAttempts, scheduledJobs);
       renderTaskConsoleHtml(output, businessSummaryTimeline(
@@ -5624,7 +5691,10 @@ async function loadTaskConsole(options = {}) {
       ]);
       if (controller.signal.aborted || state.currentTaskId !== taskId || state.detailTab !== detailTab) return;
       state.detailHasOlder = false;
+      state.currentAttempts = [];
+      state.currentExternalAttempts = externalAttempts;
       state.currentSkillReports = skillReports;
+      renderHtml('taskContext', '#taskContext', taskContext(task));
       renderTaskConsoleHtml(output, businessReportPage(skillReports, externalAttempts, steps));
       return;
     }
@@ -5647,7 +5717,14 @@ async function loadTaskConsole(options = {}) {
           api(`/api/sessions/${encodeURIComponent(taskId)}/external-attempts?limit=50&offset=0`, { signal: controller.signal }),
         ]);
         if (controller.signal.aborted || state.currentTaskId !== taskId || state.detailTab !== detailTab) return;
+        state.currentAttempts = attempts;
+        state.currentExternalAttempts = externalAttempts;
+        renderHtml('taskContext', '#taskContext', taskContext(task));
         managedStream = managedCodexTerminalStream(task, attempts, externalAttempts);
+      } else {
+        state.currentAttempts = [];
+        state.currentExternalAttempts = [];
+        renderHtml('taskContext', '#taskContext', taskContext(task));
       }
       const changed = renderTaskConsoleHtml(output, codexTerminalPage(Boolean(managedStream)));
       const currentView = state.codexTerminalView;
@@ -5686,6 +5763,9 @@ async function loadTaskConsole(options = {}) {
       ]);
       if (controller.signal.aborted || state.currentTaskId !== taskId || state.detailTab !== detailTab) return;
       state.detailHasOlder = false;
+      state.currentAttempts = [];
+      state.currentExternalAttempts = externalAttempts;
+      renderHtml('taskContext', '#taskContext', taskContext(task));
       updateBackgroundTabAvailability(externalAttempts, scheduledJobs);
       renderTaskConsoleHtml(output, backgroundTrackingList(externalAttempts, scheduledJobs));
       return;
@@ -5710,6 +5790,8 @@ async function openTaskDetail(id, initialTab = 'business-summary') {
   state.detailOffset = 0;
   state.detailHasOlder = false;
   state.currentSkillReports = [];
+  state.currentAttempts = [];
+  state.currentExternalAttempts = [];
   state.expandedAttemptOutputKey = '';
   state.taskTerminalAutoOpen = false;
   updateBackgroundTabAvailability();
@@ -6349,6 +6431,8 @@ function dashboardPollDelay() {
   }
   const sessions = state.dashboard.sessions || [];
   if (sessions.some(isActiveTask)) return 2000;
+  if (sessions.some((task) => Number(task?.activeExternalAttempts || 0) > 0)) return 2000;
+  if (sessions.some((task) => Number(task?.activeScheduledJobs || 0) > 0)) return 10000;
   const progressPending = sessions.some((task) => (
     [task?.testProgress?.runs?.initial, task?.testProgress?.runs?.rerun1]
       .some((run) => run?.available && !['completed', 'unavailable'].includes(run.status))

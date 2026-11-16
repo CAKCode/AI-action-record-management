@@ -4,7 +4,12 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { readTaskPytestRunSummaries, readTaskPytestSummary } = require('../src/pytest-result-summary');
+const {
+  readTaskPytestRunSummaries,
+  readTaskPytestSummary,
+  readLivePytestCases,
+  readLivePytestProgressAsync,
+} = require('../src/pytest-result-summary');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pytest-result-summary-'));
 let sequence = 0;
@@ -103,4 +108,18 @@ test('groups pytest results by initial and rerun-1 Step Run', async () => {
     total: 2, passed: 1, failed: 1, error: 0, skipped: 0, xfailed: 0, xpassed: 0, unknown: 0,
   });
   assert.deepEqual(result.find((run) => run.runKey === 'rerun-1').cases, [{ key: 'step-a\0caseA', nodeid: 'caseA', scope: 'step-a', outcome: 'passed' }]);
+});
+
+test('bounds live report reads and rejects partial multi-file progress', async () => {
+  const valid = report('live', { caseA: 'Passed' });
+  assert.equal(readLivePytestCases(valid.filePath).cases.length, 1);
+  const oversized = path.join(root, 'oversized-live.html');
+  fs.writeFileSync(oversized, '<html>');
+  fs.truncateSync(oversized, 64 * 1024 * 1024 + 1);
+  assert.equal(readLivePytestCases(oversized), null);
+  const progress = await readLivePytestProgressAsync([{
+    id: 'partial-live',
+    filePaths: [valid.filePath, path.join(root, 'missing-live.html')],
+  }]);
+  assert.equal(progress['partial-live'], null);
 });

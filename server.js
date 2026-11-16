@@ -1322,8 +1322,11 @@ function normalizedRequestHost(value) {
 
 function requestAuthenticationRequired(req) {
   if (AUTH_USER && AUTH_PASSWORD) return true;
-  const forwardedHost = normalizedRequestHost(req.headers['x-forwarded-host']);
-  const requestHost = forwardedHost || normalizedRequestHost(req.headers.host);
+  // A forwarded host is supplied by a proxy boundary. Treat its presence as
+  // external traffic instead of trusting a client-controlled value such as
+  // "localhost" to downgrade the authentication requirement.
+  if (String(req.headers['x-forwarded-host'] || '').trim()) return true;
+  const requestHost = normalizedRequestHost(req.headers.host);
   if (!requestHost) return !LOOPBACK_HOSTS.has(HOST);
   return !LOOPBACK_HOSTS.has(requestHost);
 }
@@ -2978,6 +2981,11 @@ const server = http.createServer(async (req, res) => {
       if (params && ['GET', 'HEAD'].includes(req.method)) {
         const taskId = requireSessionId(params[0]);
         const releaseLogStream = req.method === 'GET' ? acquireLogStreamSlot() : null;
+        const readController = new AbortController();
+        const abortRead = () => readController.abort();
+        req.once('aborted', abortRead);
+        res.once('close', abortRead);
+        if (req.aborted || res.destroyed) abortRead();
         try {
           const taskCreatedAt = getSession(taskId)?.createdAt;
           const playback = await openHlsPlaybackFile({
@@ -2996,6 +3004,7 @@ const server = http.createServer(async (req, res) => {
               params[2],
               resourceId,
             ),
+            signal: readController.signal,
           });
           if (!playback) {
             json(res, { error: 'Report artifact resource not found' }, 404);
@@ -3020,6 +3029,8 @@ const server = http.createServer(async (req, res) => {
           }
           return;
         } finally {
+          req.off('aborted', abortRead);
+          res.off('close', abortRead);
           releaseLogStream?.();
         }
       }

@@ -200,6 +200,8 @@ curl -fsS http://127.0.0.1:8091/api/ready
 npm run verify:data-protection
 ```
 
+daemon 包由全局 Codex Home 统一维护。更新时先停止或排空活跃 Task，再执行 `codex app-server daemon update --from-cli -y`；新建 Session 会使用全局包，已有 Session 继续使用其当前进程，待空闲后再重启切换。平台不会在普通 Task 启动路径中自动重启共享 daemon。
+
 数据库迁移在新进程首次打开存储时执行。需要回滚到不理解新 schema 的旧版本时，不能只替换源码；停止服务后恢复升级前已复验的数据库或恢复检查点，并同步恢复所需的 data/runtime 和业务产物。先保留故障现场，禁止在运行中的 SQLite 上手工删列或修改迁移状态。
 
 ### 重启后的报告验证
@@ -275,6 +277,10 @@ node --test test/skill-report-artifact-http.test.js test/frontend-performance.te
 只读认证/配置源，默认是服务账户的 `$HOME/.codex`。Bridge 为每个 Session 创建独立的
 `BRIDGE_RUNTIME_ROOT/.bridge-codex-home/sessions/<session-id>/`，复制 `auth.json`、
 `config.toml` 和必要的 Skill 文件，并在该目录中保存 rollout 与 CLI 状态。
+
+Task TUI 使用 daemon 模式。每个 Session 仍隔离认证、配置、rollout、线程状态和 socket，
+Session 的 daemon 包在启动前从全局 Codex Home 的当前包自动同步；daemon 进程按 Session 独立运行，
+全局更新只影响空闲 Session 的下一次启动，不在线替换运行中的进程。
 
 `start-supervised.sh` 会覆盖继承来的任务级 `CODEX_HOME`，避免一次任务的隔离目录被错误地
 当成下一次任务的认证源。修改 `CODEX_SOURCE_HOME` 或启动脚本后必须完整重启服务树；仅刷新
@@ -451,7 +457,7 @@ Web 启动时用当前 HTTP 认证配置原子更新 Runtime 中权限为 `0600`
 子进程补齐本机认证；显式认证优先，其他 API origin 不自动使用本机凭据。该文件属于私有运行材料，
 不进入 Skill 快照或业务报告，不应提交 Git；包含 Runtime 的恢复检查点仍按敏感备份处理。
 
-Web 每 30 秒检查空闲超过 60 秒的 Task，释放其 managed Codex app-server、新版 `app-server daemon pid-update-loop` 和 `codex-code-mode-host` 代码执行辅助进程及进程内的线程。适用待确认、待输入、失败、停止、已完成和等待后台结果的 Task；活跃 CLI、正在排队或执行的 Turn 会保留。后台 pytest 独立运行，释放 Codex runtime 不会停止 pytest。进程释放不删除 Session 记录、Codex Home、认证、rollout、Skill 快照或报告；点击“重新连接”和后续 durable continuation 均可从原会话继续。已确认完成的 Task 保持既有只读行为，需要交互时先使用“恢复并继续”。
+Web 每 30 秒检查空闲超过 60 秒的 Task，释放其 Session daemon、新版 `app-server daemon pid-update-loop` 和 `codex-code-mode-host` 代码执行辅助进程及进程内的线程。适用待确认、待输入、失败、停止、已完成和等待后台结果的 Task；活跃 CLI、正在排队或执行的 Turn 会保留。后台 pytest 独立运行，释放 Codex runtime 不会停止 pytest。进程释放不删除 Session 记录、Codex Home、认证、rollout、Skill 快照或报告；点击“重新连接”和后续 durable continuation 均可从原会话继续。已确认完成的 Task 保持既有只读行为，需要交互时先使用“恢复并继续”。
 
 释放期间有最长 30 秒的 Task runtime 协调租约，Worker 启动和 CLI 重连等待释放完成，不会同时关闭和恢复同一会话；异常重启后的过期租约自动失效。平台只在确认旧进程退出后记录 `session.runtime.released`，失败记录 `session.runtime.release.failed` 并留待下一次检查。
 

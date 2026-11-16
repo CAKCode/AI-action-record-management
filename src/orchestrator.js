@@ -2,7 +2,10 @@ const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');
 const { spawn } = require('child_process');
-const { parser: createJsonParser } = require('stream-json');
+const {
+  parser: createJsonParser,
+  parserStream: createJsonParserStream,
+} = require('stream-json');
 const {
   ROOT_DIR,
   RUNTIME_DIR,
@@ -34,6 +37,7 @@ const {
   prepareAttemptOutputFiles,
   registerAttemptProcess,
   failClaimedCommand,
+  renewClaimedCommand,
   prepareSessionRetry,
   renewTaskLease,
   ensureTaskSkillSnapshot,
@@ -61,9 +65,24 @@ const {
 const { restoreTaskSessionHistory } = require('./task-session-history');
 const { createInteractiveCliTranscriptStore } = require('./interactive-cli-transcript');
 const { recoverRollout } = require('../bin/recover-codex-rollout');
+const { syncSessionDaemonPackage } = require('./codex-session-package-sync');
 
 const activeSessions = new Map();
 const BRIDGE_PYTHON = process.env.BRIDGE_PYTHON || 'python3';
+
+function createEnvelopeParser() {
+  const options = { packKeys: true, packStrings: false, packNumbers: true };
+  const parser = typeof createJsonParserStream === 'function'
+    ? createJsonParserStream(options)
+    : typeof createJsonParser.asStream === 'function'
+      ? createJsonParser.asStream(options)
+      : createJsonParser(options);
+  if (!parser || typeof parser.on !== 'function'
+    || typeof parser.write !== 'function' || typeof parser.end !== 'function') {
+    throw new TypeError('stream-json parser did not provide a Node writable stream');
+  }
+  return parser;
+}
 const BRIDGE_RUNNER = process.env.BRIDGE_RUNNER || path.join(ROOT_DIR, 'bin', 'bridge-stream-runner.py');
 const BRIDGE_BOT_NAME = process.env.BRIDGE_BOT_NAME || 'codex-task-sessions';
 const FULL_ACCESS_CODEX_DIR = path.join(ROOT_DIR, 'bin', 'full-access');
@@ -504,6 +523,29 @@ function rememberFailureMessage(active, message) {
   }
 }
 
+function maintainStartupLeases(taskId, commandId, workerId) {
+  let lost = false;
+  const renew = () => {
+    if (lost) return false;
+    try {
+      const commandOwned = renewClaimedCommand(commandId, workerId);
+      const taskOwned = renewTaskLease(taskId, workerId);
+      if (!commandOwned || !taskOwned) lost = true;
+    } catch {
+      lost = true;
+    }
+    return !lost;
+  };
+  renew();
+  const timer = setInterval(renew, 2000);
+  timer.unref();
+  return {
+    renew,
+    get lost() { return lost; },
+    stop() { clearInterval(timer); },
+  };
+}
+
 async function startSession(command, workerId) {
   const session = getSession(command.task_id);
   if (!session) throw new Error(`Session ${command.task_id} not found`);
@@ -522,10 +564,8 @@ async function startSession(command, workerId) {
   const snapshot = ensureTaskSkillSnapshot(session.id);
   const continuing = Boolean(session.persistentSessionKey);
   const sessionKey = session.persistentSessionKey || bridgeSessionKey(session.id);
-  if (continuing) {
-    const runtime = resolveBridgeSessionRuntime(sessionKey);
-    if (runtime) restoreTaskSessionHistory(session.id, runtime);
-  }
+  const bridgeRuntime = resolveBridgeSessionRuntime(sessionKey);
+  if (continuing && bridgeRuntime) restoreTaskSessionHistory(session.id, bridgeRuntime);
   const taskBrief = command.input !== ''
     ? String(command.input)
     : String(session.lastBrief || session.objective || '');
@@ -544,7 +584,20 @@ async function startSession(command, workerId) {
     throw error;
   }
   let started;
+  const startupLeases = maintainStartupLeases(session.id, command.id, workerId);
   try {
+    if (startupLeases.lost) {
+      throw new Error(`Session ${session.id} startup lease was lost before daemon synchronization`);
+    }
+    await syncSessionDaemonPackage({
+      sessionKey,
+      runtime: bridgeRuntime,
+      codexBinary: REAL_CODEX_BIN,
+      isLeaseValid: () => !startupLeases.lost,
+    });
+    if (!startupLeases.renew()) {
+      throw new Error(`Session ${session.id} startup lease was lost before the Turn could begin`);
+    }
     started = beginSessionTurn({
       taskId: session.id,
       commandId: command.id,
@@ -557,6 +610,8 @@ async function startSession(command, workerId) {
   } catch (error) {
     try { fs.unlinkSync(outputFile); } catch {}
     throw error;
+  } finally {
+    startupLeases.stop();
   }
   const runtimeSession = started.session;
   const turn = started.turn;
@@ -651,6 +706,7 @@ async function launchAttempt(active, initialAttemptPrepared = false) {
   delete executionEnvironment.CODEX_DESK_AUTH_USER;
   delete executionEnvironment.CODEX_DESK_AUTH_PASSWORD;
   delete executionEnvironment.CODEX_ALLOW_ROOT_EXECUTION;
+  delete executionEnvironment.CODEX_VERSION;
   delete executionEnvironment.NO_COLOR;
   const proc = spawn(BRIDGE_PYTHON, [EXECUTION_GATE, '--', BRIDGE_PYTHON, ...args], {
     cwd: active.configuredWorkingDirectory,
@@ -733,7 +789,7 @@ async function launchAttempt(active, initialAttemptPrepared = false) {
   let envelopeDetected = false;
   let envelopeParserFailed = false;
   const envelopeBuffers = { stdout: [], stderr: [] };
-  const envelopeParser = createJsonParser({ packKeys: true, packStrings: false, packNumbers: true });
+  const envelopeParser = createEnvelopeParser();
 
   function handleEnvelopeText(stream, value, final = false) {
     const parts = String(value || '').split('\n');

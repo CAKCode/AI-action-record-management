@@ -7,6 +7,17 @@ const { Worker, isMainThread, parentPort, workerData } = require('node:worker_th
 const OUTCOMES = ['passed', 'failed', 'error', 'skipped', 'xfailed', 'xpassed', 'unknown'];
 const cache = new Map();
 const pending = new Map();
+const liveReportCache = new Map();
+const MAX_LIVE_REPORT_BYTES = 64 * 1024 * 1024;
+const MAX_LIVE_REPORT_BYTES_BIGINT = BigInt(MAX_LIVE_REPORT_BYTES);
+const LIVE_REPORT_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const LIVE_REPORT_CACHE_MAX_ENTRIES = 64;
+let liveReportCacheBytes = 0;
+let liveWorker = null;
+let liveWorkerRequestId = 0;
+const liveWorkerRequests = new Map();
+let liveWorkerIdleTimer = null;
+const LIVE_WORKER_IDLE_MS = 5000;
 let parsing = Promise.resolve();
 
 function emptyCounts() {
@@ -40,6 +51,10 @@ function readCases(report) {
   if (content.length !== report.bytes || crypto.createHash('sha256').update(content).digest('hex') !== report.sha256) {
     throw new Error('PYTEST_REPORT_INTEGRITY');
   }
+  return parseCasesFromContent(content);
+}
+
+function parseCasesFromContent(content) {
   const match = /\bdata-jsonblob\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(content.toString('utf8'));
   if (!match) throw new Error('PYTEST_RESULTS_UNAVAILABLE');
   const data = JSON.parse(decodeAttribute(match[1] ?? match[2]));
@@ -48,6 +63,149 @@ function readCases(report) {
     if (!Array.isArray(rows) || !rows.length) throw new Error('PYTEST_RESULTS_UNAVAILABLE');
     return [nodeid, caseOutcome(rows)];
   });
+}
+
+function liveReportCacheWeight(contentBytes, rows) {
+  const caseBytes = rows.reduce((total, [nodeId, outcome]) => total
+    + Buffer.byteLength(String(nodeId), 'utf8')
+    + Buffer.byteLength(String(outcome), 'utf8')
+    + 128, 0);
+  // Account for both the source text and the parsed case strings. This is a
+  // conservative bound for the retained worker-thread heap.
+  return Math.max(1, (Number(contentBytes) * 2) + caseBytes);
+}
+
+function removeLiveReportCacheEntry(target) {
+  const existing = liveReportCache.get(target);
+  if (!existing) return;
+  liveReportCache.delete(target);
+  liveReportCacheBytes = Math.max(0, liveReportCacheBytes - existing.weight);
+}
+
+function cacheLiveReport(target, signature, rows, contentBytes) {
+  const weight = liveReportCacheWeight(contentBytes, rows);
+  removeLiveReportCacheEntry(target);
+  if (weight > LIVE_REPORT_CACHE_MAX_BYTES) return;
+  liveReportCache.set(target, { signature, value: { signature, cases: rows }, weight });
+  liveReportCacheBytes += weight;
+  while (liveReportCache.size > LIVE_REPORT_CACHE_MAX_ENTRIES
+    || liveReportCacheBytes > LIVE_REPORT_CACHE_MAX_BYTES) {
+    const oldest = liveReportCache.keys().next().value;
+    if (oldest === undefined) break;
+    removeLiveReportCacheEntry(oldest);
+  }
+}
+
+function readLivePytestCases(filePath) {
+  const target = String(filePath || '');
+  if (!target) return null;
+  let stat;
+  try {
+    stat = fs.lstatSync(target, { bigint: true });
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > BigInt(MAX_LIVE_REPORT_BYTES)) return null;
+  } catch { return null; }
+  const signature = [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+  const cached = liveReportCache.get(target);
+  if (cached?.signature === signature) {
+    liveReportCache.delete(target);
+    liveReportCache.set(target, cached);
+    return cached.value;
+  }
+  let descriptor;
+  try {
+    descriptor = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.size > MAX_LIVE_REPORT_BYTES_BIGINT
+      || before.dev !== stat.dev || before.ino !== stat.ino) return null;
+    const content = Buffer.alloc(Number(before.size));
+    let offset = 0;
+    while (offset < content.length) {
+      const bytesRead = fs.readSync(descriptor, content, offset, content.length - offset, offset);
+      if (!bytesRead) return null;
+      offset += bytesRead;
+    }
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    if (before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) return null;
+    const rows = parseCasesFromContent(content);
+    cacheLiveReport(target, signature, rows, content.length);
+    return { signature, cases: rows };
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
+  }
+}
+
+function readLivePytestReportCounts(filePath) {
+  const live = readLivePytestCases(filePath);
+  if (!live) return null;
+  const counts = emptyCounts();
+  for (const [, outcome] of live.cases) {
+    counts.total++;
+    counts[outcome]++;
+  }
+  return { signature: live.signature, counts };
+}
+
+function sendLiveWorkerRequest(mode, payload) {
+  if (!liveWorker) {
+    liveWorker = new Worker(__filename, { workerData: { mode: 'live-worker' } });
+    liveWorker.unref();
+    liveWorker.on('message', (message) => {
+      const request = liveWorkerRequests.get(message?.id);
+      if (!request) return;
+      liveWorkerRequests.delete(message.id);
+      if (message.error) request.reject(new Error(message.error));
+      else request.resolve(message.result || {});
+      scheduleLiveWorkerShutdown();
+    });
+    const failWorker = (error) => {
+      for (const request of liveWorkerRequests.values()) request.reject(error);
+      liveWorkerRequests.clear();
+      liveWorker = null;
+    };
+    liveWorker.on('error', failWorker);
+    liveWorker.on('exit', (code) => {
+      if (code !== 0) failWorker(new Error(`Live pytest progress worker exited (${code})`));
+      else liveWorker = null;
+    });
+  }
+  if (liveWorkerIdleTimer) {
+    clearTimeout(liveWorkerIdleTimer);
+    liveWorkerIdleTimer = null;
+  }
+  return new Promise((resolve, reject) => {
+    const id = ++liveWorkerRequestId;
+    liveWorkerRequests.set(id, { resolve, reject });
+    try {
+      liveWorker.postMessage({ id, mode, ...payload });
+    } catch (error) {
+      liveWorkerRequests.delete(id);
+      reject(error);
+    }
+  });
+}
+
+function readLivePytestProgressAsync(groups) {
+  const normalized = (groups || []).filter(group => group?.id && group.filePaths?.length)
+    .map(group => ({ id: String(group.id), filePaths: [...new Set(group.filePaths.map(String))] }));
+  if (!normalized.length) return Promise.resolve({});
+  return sendLiveWorkerRequest('live-progress', { groups: normalized });
+}
+
+function scheduleLiveWorkerShutdown() {
+  if (liveWorkerIdleTimer || !liveWorker || liveWorkerRequests.size) return;
+  liveWorkerIdleTimer = setTimeout(() => {
+    liveWorkerIdleTimer = null;
+    if (liveWorker && !liveWorkerRequests.size) {
+      const worker = liveWorker;
+      liveWorker = null;
+      worker.terminate().catch(() => {});
+    }
+  }, LIVE_WORKER_IDLE_MS);
+  liveWorkerIdleTimer.unref();
 }
 
 function summarizeReports(reports) {
@@ -212,8 +370,44 @@ function readTaskPytestRunSummaries(reports) {
 }
 
 if (!isMainThread) {
-  const reports = workerData?.reports || [];
-  parentPort.postMessage(workerData?.mode === 'runs' ? summarizeRunReports(reports) : summarizeReports(reports));
+  if (workerData?.mode === 'live-worker') {
+    parentPort.on('message', (message) => {
+      try {
+        let result;
+        if (message.mode === 'live-progress') {
+          result = Object.fromEntries((message.groups || []).map(group => {
+            const cases = new Map();
+            const signatures = [];
+            for (const filePath of group.filePaths || []) {
+              const live = readLivePytestCases(filePath);
+              if (!live) return [group.id, null];
+              signatures.push(live.signature);
+              for (const [nodeId, outcome] of live.cases) cases.set(nodeId, outcome);
+            }
+            const counts = emptyCounts();
+            for (const outcome of cases.values()) {
+              counts.total++;
+              counts[outcome]++;
+            }
+            return [group.id, signatures.length === (group.filePaths || []).length
+              ? { signature: signatures.join('\0'), counts } : null];
+          }));
+        } else result = {};
+        parentPort.postMessage({ id: message.id, result });
+      } catch (error) {
+        parentPort.postMessage({ id: message.id, error: error.message });
+      }
+    });
+  } else {
+    const reports = workerData?.reports || [];
+    parentPort.postMessage(workerData?.mode === 'runs' ? summarizeRunReports(reports) : summarizeReports(reports));
+  }
 }
 
-module.exports = { readTaskPytestSummary, readTaskPytestRunSummaries };
+module.exports = {
+  readTaskPytestSummary,
+  readTaskPytestRunSummaries,
+  readLivePytestCases,
+  readLivePytestReportCounts,
+  readLivePytestProgressAsync,
+};

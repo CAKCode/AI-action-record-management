@@ -12,6 +12,9 @@
 /.worklog/
 /.agents/
 /.codex/
+/.runtime/
+/.pid-display-demo-workspace/
+/artifacts/
 
 # Independent local checkout; it is not part of this application
 /rtk/
