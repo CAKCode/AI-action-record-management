@@ -4044,13 +4044,17 @@ function isPytestCommand(command) {
   return /(^|[^A-Za-z0-9_])pytest([^A-Za-z0-9_]|$)/i.test(String(command || ''));
 }
 
+function isUnresolvedArtifactPath(value) {
+  return /(?:<[^>\r\n]+>|\$\{[^}\r\n]+\}|\$CODEX_[A-Z0-9_]+)/.test(String(value || ''));
+}
+
 function pytestHtmlCommandPaths(command) {
   if (!isPytestCommand(command)) return [];
   const option = /(?:^|\s)--html(?:\s*=\s*|\s+)(?:"([^"]+)"|'([^']+)'|([^\s"';&|]+))/gi;
   const result = [];
   for (const match of String(command).matchAll(option)) {
     const value = String(match[1] ?? match[2] ?? match[3] ?? '').trim();
-    if (value && !/[\0\r\n$`]/.test(value)) result.push(value);
+    if (value && !/[\0\r\n$`]/.test(value) && !isUnresolvedArtifactPath(value)) result.push(value);
   }
   return result;
 }

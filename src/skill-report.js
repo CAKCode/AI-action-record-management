@@ -147,6 +147,9 @@ function normalizeArtifact(value, index) {
   }
   const kind = enumValue(value.kind, `artifacts[${index}].kind`, ARTIFACT_KINDS);
   const sourcePath = boundedText(value.path, `artifacts[${index}].path`, 4096, true);
+  if (/(?:<[^>\r\n]+>|\$\{[^}\r\n]+\}|\$CODEX_[A-Z0-9_]+)/.test(sourcePath)) {
+    throw reportError(`artifacts[${index}].path contains an unresolved placeholder`);
+  }
   if (!path.isAbsolute(sourcePath)) {
     throw reportError(`artifacts[${index}].path must be an absolute path`);
   }

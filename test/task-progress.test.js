@@ -73,6 +73,7 @@ test('Task progress separates initial and rerun-1 and keeps unknown results expl
       .run(externalId, 'progress-live-report', 'live-chain', 'Live pytest', livePath + '.log', livePath + '.meta', JSON.stringify([
         { key: 'live', kind: 'pytest-html', path: livePath },
         { key: 'live-2', kind: 'pytest-html', path: livePath2 },
+        { key: 'placeholder', kind: 'pytest-html', path: livePath + '.<SESSION_ROOT>' },
       ]), now, now, now);
     const liveReportId = insertReport(db, 'progress-live-report', 'live:initial', 'test-result', [
       { key: 'selected', value: 5 },

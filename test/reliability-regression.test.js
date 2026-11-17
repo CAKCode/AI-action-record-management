@@ -258,7 +258,7 @@ test('the task stream runner replaces codex exec with the real interactive TUI c
   ]);
 });
 
-test('the task stream runner removes unsupported top-level trust flags from the TUI command', () => {
+test('the task stream runner translates exec trust flags to the interactive config form', () => {
   const runner = path.join(ROOT_DIR, 'bin', 'bridge-stream-runner.py');
   const converted = spawnSync('python3', [
     '-c',
@@ -281,7 +281,8 @@ test('the task stream runner removes unsupported top-level trust flags from the 
 
   assert.equal(converted.status, 0, converted.stderr);
   assert.deepEqual(JSON.parse(converted.stdout), [
-    'codex', '--no-alt-screen', '-C', '/srv/work', '--', 'Run the task.',
+    'codex', '-c', 'projects."/srv/work".trust_level="trusted"',
+    '--no-alt-screen', '-C', '/srv/work', '--', 'Run the task.',
   ]);
 });
 

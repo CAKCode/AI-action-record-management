@@ -95,13 +95,18 @@ function liveFileSignature(filePath) {
   }
 }
 
+function isUnresolvedArtifactPath(value) {
+  return /(?:<[^>\r\n]+>|\$\{[^}\r\n]+\}|\$CODEX_[A-Z0-9_]+)/.test(String(value || ''));
+}
+
 function liveReportGroups(rows) {
   const groups = new Map();
   for (const row of rows) {
     const declarations = parseJson(row.artifact_declarations_json, []);
     const filePaths = [...new Set(declarations
       .filter(declaration => declaration?.kind === 'pytest-html' && declaration.path)
-      .map(declaration => String(declaration.path)))];
+      .map(declaration => String(declaration.path))
+      .filter(filePath => !isUnresolvedArtifactPath(filePath)))];
     if (!filePaths.length) continue;
     const id = `${row.task_id}\0${row.report_key}`;
     groups.set(id, {

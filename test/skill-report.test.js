@@ -389,6 +389,9 @@ test('Skill report schema preserves useful sections and forces sensitive evidenc
     artifacts: [{ key: 'normal', kind: 'pytest-html', path: 'relative.html' }],
   })), /must be an absolute path/);
   assert.throws(() => normalizeSkillReport(reportFixture({
+    artifacts: [{ key: 'normal', kind: 'pytest-html', path: '/tmp/<SESSION_ROOT>/normal.html' }],
+  })), /unresolved placeholder/);
+  assert.throws(() => normalizeSkillReport(reportFixture({
     artifacts: [{ key: 'normal', kind: 'pytest-html', path: '/tmp/normal.html' }],
   })), /executionEvidence is required/);
   assert.throws(() => normalizeSkillReport(reportFixture({
@@ -3473,6 +3476,35 @@ test('running pytest reports auto-register HTML outputs for terminal reconciliat
   assert.ok(store.listSessionWorklogs(taskId).some((entry) => (
     entry.kind === 'external.attempt.artifacts.auto_registered'
   )));
+});
+
+test('running pytest ignores unresolved placeholder HTML paths during auto-registration', async () => {
+  ensureReportSkill();
+  const taskId = 'pytest-html-unresolved-path-task';
+  const runtime = createRunningTask(taskId, 'pytest-html-unresolved-path-worker');
+  const externalDirectory = path.join(tempDir, 'business-checkout', taskId);
+  const tracked = registerTrackedPytest(taskId, externalDirectory, { runtime, running: true });
+  getDatabase().prepare('UPDATE external_attempts SET artifact_declarations_json=? WHERE id=?')
+    .run(JSON.stringify([{ key: 'webrecord-whiteboard-initial', kind: 'pytest-html', path: tracked.htmlPath }]), tracked.external.id);
+  const placeholderPath = path.join(externalDirectory, '<SESSION_ROOT>', 'report.html');
+  const running = store.publishSkillReport(taskId, reportFixture({
+    reportKey: 'pytest-html:unresolved-path',
+    status: 'running',
+    primaryExecution: {
+      ...reportFixture().primaryExecution,
+      command: `pytest -v tests --html ${JSON.stringify(placeholderPath)}`,
+      commandPath: tracked.commandPath,
+      workingDirectory: externalDirectory,
+      status: 'running',
+      exitCode: null,
+    },
+    executionEvidence: { externalAttemptId: tracked.external.id },
+    artifacts: [],
+  }), { turnId: runtime.turn.id, attemptId: runtime.attemptId });
+  assert.deepEqual(running.artifactDeclarations, []);
+  assert.deepEqual(store.getExternalAttempt(taskId, tracked.external.id).artifactDeclarations, [{
+    key: 'webrecord-whiteboard-initial', kind: 'pytest-html', path: tracked.htmlPath,
+  }]);
 });
 
 test('terminal evidence does not permit an HTML report that still shows pytest running', async () => {
