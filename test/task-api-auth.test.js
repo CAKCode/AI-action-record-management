@@ -29,6 +29,19 @@ test('local Task API authentication stays private, refreshes atomically and pres
   assert.deepEqual(fs.readdirSync(path.dirname(file)), ['task-api-auth.json']);
 });
 
+test('disabling HTTP authentication removes the stale local context', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'task-api-auth-disabled-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, 'runtime', 'task-api-auth.json');
+  writeTaskApiAuthentication({
+    baseUrl: 'http://127.0.0.1:12345', user: 'fixture', password: 'stale-secret',
+  }, file);
+  assert.equal(fs.existsSync(file), true);
+  writeTaskApiAuthentication({ baseUrl: 'http://127.0.0.1:12345', user: '', password: '' }, file);
+  assert.equal(fs.existsSync(file), false);
+  assert.deepEqual(taskApiEnvironment({}, [], file), {});
+});
+
 test('invalid authentication context errors never disclose file contents', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'task-api-auth-invalid-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -78,4 +91,46 @@ test('managed API wrapper authenticates its child without putting credentials in
   assert.equal(authenticated, true);
   assert.deepEqual(JSON.parse(result.stdout), { ok: true });
   assert.equal((result.stdout + result.stderr).includes(password), false);
+});
+
+test('non-managed API wrapper use injects the local authentication context', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'task-api-auth-chat-'));
+  const runtime = path.join(root, 'runtime');
+  const snapshot = path.join(root, 'snapshot');
+  fs.mkdirSync(runtime);
+  fs.mkdirSync(snapshot);
+  const password = 'chat-fixture-secret';
+  writeTaskApiAuthentication({
+    baseUrl: 'http://127.0.0.1:12345', user: 'chat-fixture', password,
+  }, path.join(runtime, 'task-api-auth.json'));
+  fs.writeFileSync(path.join(snapshot, 'manifest.json'), JSON.stringify({
+    skills: [{ id: 'codex-task-platform-api' }],
+  }));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const client = path.join(root, 'client.js');
+  fs.writeFileSync(client, 'process.stdout.write(JSON.stringify({ user: process.env.CODEX_TASK_API_USER || null, password: process.env.CODEX_TASK_API_PASSWORD || null }));');
+  const environment = {
+    ...process.env,
+    CODEX_DESK_RUNTIME_DIR: runtime,
+    CODEX_TASK_SKILL_SNAPSHOT: snapshot,
+  };
+  for (const name of [
+    'CODEX_TASK_ID', 'CODEX_TASK_TURN_ID', 'CODEX_TASK_ATTEMPT_ID',
+    'CODEX_TASK_API_URL', 'CODEX_TASK_API_USER', 'CODEX_TASK_API_PASSWORD',
+  ]) delete environment[name];
+
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn(path.resolve(__dirname, '../bin/full-access/codex-skill-use'),
+      ['codex-task-platform-api', '--', process.execPath, client], { env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('exit', code => resolve({ code, stdout, stderr }));
+  });
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { user: 'chat-fixture', password });
+  assert.equal(result.stderr, '');
 });

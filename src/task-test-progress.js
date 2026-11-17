@@ -387,7 +387,7 @@ function summaryTaskTestProgress(values, complete = null) {
     passed,
     failed,
     skipped,
-    percent: completeReport && total ? 100 : 0,
+    percent: total ? Math.round((completeReport ? total : observed) / total * 100) : 0,
     complete: completeReport,
     status: completeReport ? (failed > 0 ? 'failed' : 'completed') : 'partial',
   };

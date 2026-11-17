@@ -2134,8 +2134,13 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'GET') {
-        res.setHeader('X-Codex-Auth-Required', requestAuthenticationRequired(req) ? '1' : '0');
-        json(res, { ok: Boolean(authSessionFromRequest(req)) });
+        const authenticationRequired = requestAuthenticationRequired(req);
+        const basicAuthenticated = !authenticationRequired
+          || Boolean(AUTH_USER && AUTH_PASSWORD && basicCredentialsValid(req));
+        const session = authSessionFromRequest(req);
+        if (basicAuthenticated && !session) issueAuthSession(res);
+        res.setHeader('X-Codex-Auth-Required', authenticationRequired ? '1' : '0');
+        json(res, { ok: basicAuthenticated || Boolean(session) });
         return;
       }
       res.setHeader('Allow', 'GET, POST, DELETE');

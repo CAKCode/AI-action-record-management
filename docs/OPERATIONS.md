@@ -191,8 +191,11 @@ sudo systemctl status codex-task-sessions.service
 3. 部署新源码并执行 `npm ci`。Node 主版本、操作系统或 CPU 架构变化时必须在目标环境重新安装原生模块。
 4. 执行 `npm run check`、`npm run audit:production` 和 `npm test`，更新非敏感 `CODEX_RELEASE_ID`。
 5. `start-supervised.sh` 部署执行 `npm run restart:supervised`；systemd 部署执行 `sudo systemctl restart codex-task-sessions.service`。
+
 6. 同时检查 `/api/health` 和 `/api/ready`，确认 `release.releaseId` 是新值、`instanceId` 已变化、Web/Worker/Supervisor 身份通过。
 7. 用一个非生产 Task 验证 New、Resume 最新 Session、后台终态刷新，以及至少一份 HTML artifact 的打开入口。
+
+`npm run audit:production` 会临时切换到官方 `registry.npmjs.org` 并直连其审计接口。部分 npm 镜像（包括 `registry.npmmirror.com`）不提供 `/-/npm/v1/security/*`，直接使用这些镜像执行 `npm audit` 会返回 404；依赖安装仍可继续使用部署环境配置的 registry。
 
 ```bash
 curl -fsS http://127.0.0.1:8091/api/health

@@ -86,7 +86,7 @@ test('Task progress separates initial and rerun-1 and keeps unknown results expl
     );
     db.prepare('UPDATE skill_reports SET payload_json=? WHERE task_id=?').run(
       JSON.stringify({
-        metrics: [{ key: 'final_total', value: 10 }, { key: 'final_passed', value: 10 }],
+        metrics: [{ key: 'final_total', value: 10 }, { key: 'final_passed', value: 4 }],
         sections: [{ id: 'count-source', fields: [{ label: '统计完整', value: false }] }],
       }),
       'progress-incomplete-final',
@@ -107,7 +107,7 @@ test('Task progress separates initial and rerun-1 and keeps unknown results expl
     const rerunTen = tasks.find(task => task.id === 'progress-rerun-ten').testProgress;
     if (rerunTen.runs.rerun1.available) throw new Error('rerun-10 was classified as rerun-1');
     const incompleteFinal = tasks.find(task => task.id === 'progress-incomplete-final').testProgress;
-    if (incompleteFinal.status === 'completed' || incompleteFinal.percent !== 0 || incompleteFinal.complete !== false) {
+    if (incompleteFinal.status !== 'partial' || incompleteFinal.percent !== 40 || incompleteFinal.completed !== 4 || incompleteFinal.complete !== false) {
       throw new Error(JSON.stringify(incompleteFinal));
     }
     const parentStage = tasks.find(task => task.id === 'progress-parent-stage').testProgress;

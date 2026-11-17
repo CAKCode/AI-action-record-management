@@ -137,7 +137,13 @@
         clearCredentials();
       }
     }
-    showLogin();
+    // The document and this bootstrap were already served behind the same
+    // Basic Auth challenge. Browsers keep those credentials internally, but
+    // JavaScript cannot read them to populate the fallback login form.
+    // Continue loading and let same-origin requests reuse the browser session;
+    // app.js still shows the fallback form if the cached credentials are stale.
+    await loadApplication();
+    return;
   }
 
   bootstrap().catch((error) => showLogin(error.message || 'Unable to initialize application'));
