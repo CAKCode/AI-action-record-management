@@ -2629,6 +2629,7 @@ test('pytest HTML archival embeds referenced logtxt files for offline report vie
   const logContent = 'setup failed: <untrusted detail>\n';
   const html = [
     '<!doctype html><html><body>',
+    '<div class="logwrapper"><div class="log">embedded log</div></div>',
     `<button onclick="openLog('logs/${logName}')">Log</button>`,
     `<a href="logs/${logName}">duplicate</a>`,
     ...Array.from({ length: 1024 }, (_, index) => `<a href="logs/${logName}">duplicate-${index}</a>`),
@@ -2661,9 +2662,14 @@ test('pytest HTML archival embeds referenced logtxt files for offline report vie
   );
   try {
     const archivedHtml = await opened.fileHandle.readFile('utf8');
-    const embeddedLog = `data:text/plain;charset=utf-8;base64,${Buffer.from(logContent).toString('base64')}`;
+    const embeddedLog = /data:text\/html;charset=utf-8;base64,([A-Za-z0-9+/=]+)/.exec(archivedHtml)?.[1] || '';
+    const embeddedLogHtml = Buffer.from(embeddedLog, 'base64').toString('utf8');
     assert.doesNotMatch(archivedHtml, new RegExp(`logs/${logName}`));
-    assert.equal((archivedHtml.match(new RegExp(embeddedLog, 'g')) || []).length, 1026);
+    assert.equal((archivedHtml.match(/data:text\/html;charset=utf-8;base64,[A-Za-z0-9+/=]+/g) || []).length, 1026);
+    assert.match(embeddedLogHtml, /background:#000!important/);
+    assert.match(embeddedLogHtml, /color:#fff!important/);
+    assert.match(embeddedLogHtml, /setup failed: &lt;untrusted detail&gt;/);
+    assert.match(archivedHtml, /data-codex-pytest-log-theme/);
     assert.equal(artifact.bytes, Buffer.byteLength(archivedHtml));
   } finally {
     await opened.fileHandle.close();
@@ -3121,9 +3127,10 @@ test('pytest HTML archival preserves credentials in report and embedded log evid
   try {
     const archivedHtml = await opened.fileHandle.readFile('utf8');
     const embeddedLog = Buffer.from(
-      archivedHtml.match(/data:text\/plain;charset=utf-8;base64,([A-Za-z0-9+/=]+)/)?.[1] || '',
+      archivedHtml.match(/data:text\/html;charset=utf-8;base64,([A-Za-z0-9+/=]+)/)?.[1] || '',
       'base64',
-    ).toString('utf8');
+    ).toString('utf8').replace(/^[\s\S]*?<pre>/, '').replace(/<\/pre>[\s\S]*$/, '')
+      .replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
     for (const credential of [accessKey, secretKey, bearerToken, basicCredential, cookieCredential]) {
       assert.match(embeddedLog, new RegExp(credential));
     }

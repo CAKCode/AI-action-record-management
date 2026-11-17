@@ -5349,8 +5349,58 @@ async function archivePytestMediaResources(htmlContent, options) {
   };
 }
 
-const OMITTED_PYTEST_LOG_DATA_URL = 'data:text/plain;charset=utf-8,Log%20omitted%3A%20artifact%20size%20limit';
-const PYTEST_LOG_DATA_URL_PREFIX = 'data:text/plain;charset=utf-8;base64,';
+const PYTEST_LOG_VIEWER_STYLE = [
+  'html,body{margin:0;min-height:100%;background:#000!important;color:#fff!important;color-scheme:dark}',
+  'body{box-sizing:border-box;padding:12px;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;overflow-wrap:anywhere}',
+  'pre{margin:0;background:#000!important;color:#fff!important;font:inherit;white-space:pre-wrap}',
+  '::selection{background:#0b84c6;color:#fff}',
+].join('');
+const PYTEST_REPORT_LOG_THEME = [
+  '.logwrapper,.logwrapper .logexpander{background:#000!important;color:#fff!important}',
+  '.logwrapper .log{background:#000!important;color:#fff!important;border-color:#222!important}',
+].join('');
+const PYTEST_LOG_VIEWER_DATA_URL_PREFIX = 'data:text/html;charset=utf-8;base64,';
+
+function pytestLogViewerHtml(content) {
+  const escaped = String(content || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="color-scheme" content="dark"><style>${PYTEST_LOG_VIEWER_STYLE}</style></head><body><pre>${escaped}</pre></body></html>`;
+}
+
+function pytestLogViewerDataUrl(content) {
+  return `${PYTEST_LOG_VIEWER_DATA_URL_PREFIX}${Buffer.from(pytestLogViewerHtml(content), 'utf8').toString('base64')}`;
+}
+
+function injectPytestReportLogTheme(html) {
+  const source = String(html);
+  if (source.includes('data-codex-pytest-log-theme')
+    || !/\b(?:logwrapper|logexpander)\b/i.test(source)) return source;
+  const style = `<style data-codex-pytest-log-theme>${PYTEST_REPORT_LOG_THEME}</style>`;
+  const closingHead = /<\/head\s*>/i.exec(source);
+  if (closingHead) {
+    return `${source.slice(0, closingHead.index)}${style}${source.slice(closingHead.index)}`;
+  }
+  const openingHead = /<head\b[^>]*>/i.exec(source);
+  if (openingHead) {
+    const insertionIndex = openingHead.index + openingHead[0].length;
+    return `${source.slice(0, insertionIndex)}${style}${source.slice(insertionIndex)}`;
+  }
+  const openingHtml = /<html\b[^>]*>/i.exec(source);
+  if (openingHtml) {
+    const insertionIndex = openingHtml.index + openingHtml[0].length;
+    return `${source.slice(0, insertionIndex)}<head>${style}</head>${source.slice(insertionIndex)}`;
+  }
+  const doctype = /^\s*<!doctype\s+html\s*>/i.exec(source);
+  if (doctype) {
+    return `${source.slice(0, doctype[0].length)}<head>${style}</head>${source.slice(doctype[0].length)}`;
+  }
+  return `${style}${source}`;
+}
+
+const OMITTED_PYTEST_LOG_DATA_URL = pytestLogViewerDataUrl('Log omitted: artifact size limit');
 
 function replacePytestLogLinks(html, matches, replacements) {
   const fragments = [];
@@ -5384,6 +5434,7 @@ async function preparePytestLogLinks(html, sourcePath, containmentRoot, options 
 
   let projectedBytes = Buffer.byteLength(html);
   const resolvedLogs = new Map();
+  const logDataUrls = new Map();
   const sourceDirectories = options.sourceDirectories || [path.dirname(sourcePath)];
   for (const [reference, count] of textReferenceCounts) {
     const resolvedPath = await resolvePytestMediaResourceFromDirectories(
@@ -5392,8 +5443,13 @@ async function preparePytestLogLinks(html, sourcePath, containmentRoot, options 
       containmentRoot,
     );
     const stat = await fs.promises.lstat(resolvedPath);
-    const encodedBytes = Buffer.byteLength(PYTEST_LOG_DATA_URL_PREFIX)
-      + (4 * Math.ceil(Number(stat.size) / 3));
+    let encodedBytes = Number.MAX_SAFE_INTEGER;
+    if (Number(stat.size) <= MAX_SKILL_REPORT_ARTIFACT_BYTES) {
+      const content = await readStablePytestArtifactFile(resolvedPath, { label: 'Pytest HTML log' });
+      const dataUrl = pytestLogViewerDataUrl(content);
+      logDataUrls.set(reference, dataUrl);
+      encodedBytes = Buffer.byteLength(dataUrl);
+    }
     projectedBytes += (encodedBytes - Buffer.byteLength(reference)) * count;
     resolvedLogs.set(reference, resolvedPath);
   }
@@ -5416,8 +5472,12 @@ async function preparePytestLogLinks(html, sourcePath, containmentRoot, options 
 
   const replacements = new Map();
   for (const [reference, resolvedPath] of resolvedLogs) {
-    const content = await readStablePytestArtifactFile(resolvedPath, { label: 'Pytest HTML log' });
-    replacements.set(reference, `${PYTEST_LOG_DATA_URL_PREFIX}${content.toString('base64')}`);
+    let dataUrl = logDataUrls.get(reference);
+    if (!dataUrl) {
+      const content = await readStablePytestArtifactFile(resolvedPath, { label: 'Pytest HTML log' });
+      dataUrl = pytestLogViewerDataUrl(content);
+    }
+    replacements.set(reference, dataUrl);
   }
   return {
     content: replacePytestLogLinks(html, textMatches, replacements),
@@ -5496,6 +5556,7 @@ try { void window.sessionStorage.length; } catch {
       + transformed.slice(insertionIndex);
   }
   transformed = await inlinePytestScriptAssets(transformed, sourceDirectories, containmentRoot);
+  transformed = injectPytestReportLogTheme(transformed);
   const preparedLogs = options.includeLogs === false
     ? { content: transformed, externalReferences: [] }
     : await preparePytestLogLinks(transformed, sourcePath, containmentRoot, {
@@ -6288,9 +6349,10 @@ async function archivePytestHtmlArtifact(db, taskId, row, candidate, context = {
       sourceVerifiedForRepair = true;
       sourceSha256 = hashBuffer(sourceContentSnapshot);
     }
-    const hasOmittedLogs = managedContent.includes(
-      'data:text/plain;charset=utf-8,Log%20omitted%3A%20artifact%20size%20limit',
-    );
+    const hasOmittedLogs = managedContent.includes(OMITTED_PYTEST_LOG_DATA_URL)
+      || managedContent.includes(
+        'data:text/plain;charset=utf-8,Log%20omitted%3A%20artifact%20size%20limit',
+      );
     if (hasOmittedLogs && sourceContentSnapshot) {
       const sourceContent = sourceContentSnapshot;
       const legacySelfContained = await selfContainedPytestHtml(
