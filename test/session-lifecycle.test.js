@@ -2427,7 +2427,7 @@ test('authentication and same-origin checks protect remote-capable deployments',
       return result.payload.runtime.workerAvailable ? result : null;
     });
     assert.equal(authorized.response.status, 200);
-    assert.match(authorized.response.headers.get('set-cookie') || '', /Secure/);
+    assert.doesNotMatch(authorized.response.headers.get('set-cookie') || '', /Secure/);
 
     const login = await fetch(`${root}/api/auth/session`, {
       method: 'POST',
@@ -2437,7 +2437,7 @@ test('authentication and same-origin checks protect remote-capable deployments',
     assert.match(login.headers.get('set-cookie') || '', /codex_task_session=[^;]+/);
     assert.match(login.headers.get('set-cookie') || '', /HttpOnly/);
     assert.match(login.headers.get('set-cookie') || '', /SameSite=Strict/);
-    assert.match(login.headers.get('set-cookie') || '', /Secure/);
+    assert.doesNotMatch(login.headers.get('set-cookie') || '', /Secure/);
     const sessionCookie = (login.headers.get('set-cookie') || '').split(';', 1)[0];
     const cookieAuthorized = await fetch(`${root}/api/health`, {
       headers: { cookie: sessionCookie },
@@ -2447,6 +2447,17 @@ test('authentication and same-origin checks protect remote-capable deployments',
       headers: { cookie: sessionCookie },
     });
     assert.deepEqual(await sessionStatus.json(), { ok: true });
+
+    const forwardedLogin = await fetch(`${root}/api/auth/session`, {
+      method: 'POST',
+      headers: {
+        authorization,
+        'x-forwarded-host': 'public.example.test',
+        'x-forwarded-proto': 'https',
+      },
+    });
+    assert.equal(forwardedLogin.status, 200);
+    assert.match(forwardedLogin.headers.get('set-cookie') || '', /Secure/);
 
     const logout = await fetch(`${root}/api/auth/session`, {
       method: 'DELETE',

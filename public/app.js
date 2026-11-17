@@ -1037,6 +1037,13 @@ function taskTestProgressHtml(task) {
   return `<div class="task-progress"><div class="task-progress-runs">${taskProgressRunHtml('taskInitialProgress', runs.initial)}${taskProgressRunHtml('taskRerun1Progress', runs.rerun1)}</div></div>`;
 }
 
+function taskTestProgressIfAvailableHtml(task) {
+  const runs = task?.testProgress?.runs;
+  return runs?.initial?.available || runs?.rerun1?.available
+    ? taskTestProgressHtml(task)
+    : '';
+}
+
 function taskCard(task, layout = 'list') {
   const running = isActiveTask(task);
   const review = isReviewTask(task);
@@ -1058,7 +1065,7 @@ function taskCard(task, layout = 'list') {
           </div>
         </div>
         ${taskClassification(task, { showProject: !grid })}
-        ${grid ? taskTestProgressHtml(task) : ''}
+        ${grid ? taskTestProgressHtml(task) : taskTestProgressIfAvailableHtml(task)}
         ${grid ? '' : `<details class="task-description" data-objective-id="${escapeHtml(task.id)}"${state.expandedTaskObjectives.has(task.id) ? ' open' : ''}>
           <summary><span class="task-objective-label">${escapeHtml(tr('taskObjective'))}</span><span class="task-objective-preview">${escapeHtml(task.objective || task.summary || '-')}</span><span class="objective-expand">${escapeHtml(tr('expandObjective'))}</span><span class="objective-collapse">${escapeHtml(tr('collapseObjective'))}</span></summary>
           <p class="task-objective">${escapeHtml(task.objective || task.summary || '-')}</p>

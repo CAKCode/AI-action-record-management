@@ -1811,7 +1811,7 @@ body {
   transform: translateY(-3px);
 }
 #view-overview .task-progress,
-.task-card-grid .task-progress {
+.task-card .task-progress {
   width: 100%;
   display: grid;
   gap: 8px;

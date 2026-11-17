@@ -378,19 +378,27 @@ if (!isMainThread) {
           result = Object.fromEntries((message.groups || []).map(group => {
             const cases = new Map();
             const signatures = [];
+            const unavailable = [];
             for (const filePath of group.filePaths || []) {
               const live = readLivePytestCases(filePath);
-              if (!live) return [group.id, null];
+              if (!live) {
+                unavailable.push(filePath);
+                continue;
+              }
               signatures.push(live.signature);
               for (const [nodeId, outcome] of live.cases) cases.set(nodeId, outcome);
             }
+            if (!signatures.length) return [group.id, null];
             const counts = emptyCounts();
             for (const outcome of cases.values()) {
               counts.total++;
               counts[outcome]++;
             }
-            return [group.id, signatures.length === (group.filePaths || []).length
-              ? { signature: signatures.join('\0'), counts } : null];
+            return [group.id, {
+              signature: signatures.join('\0'),
+              counts,
+              unavailable,
+            }];
           }));
         } else result = {};
         parentPort.postMessage({ id: message.id, result });

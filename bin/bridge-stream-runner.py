@@ -213,6 +213,29 @@ def ensure_trusted_project(codex_home: Path | None, working_directory: Path) -> 
     if not codex_home.is_dir():
         raise ValueError("Codex home is not available")
 
+    # Multiple task launches can update the shared Codex config concurrently.
+    # Serialize the read/merge/replace sequence so one launch cannot discard a
+    # trust entry written by another launch.
+    lock_path = codex_home / ".config.toml.lock"
+    lock_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    lock_descriptor = os.open(lock_path, lock_flags, 0o600)
+    try:
+        os.fchmod(lock_descriptor, 0o600)
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        _ensure_trusted_project_locked(codex_home, working_directory)
+    finally:
+        try:
+            fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_descriptor)
+
+
+def _ensure_trusted_project_locked(codex_home: Path | None, working_directory: Path) -> None:
+    if codex_home is None:
+        raise ValueError("Codex invocation is missing CODEX_HOME")
+    if not codex_home.is_dir():
+        raise ValueError("Codex home is not available")
+
     project_path = str(working_directory.expanduser().resolve())
     config_path = codex_home / "config.toml"
     source = ""

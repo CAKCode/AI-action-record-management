@@ -110,7 +110,7 @@ test('groups pytest results by initial and rerun-1 Step Run', async () => {
   assert.deepEqual(result.find((run) => run.runKey === 'rerun-1').cases, [{ key: 'step-a\0caseA', nodeid: 'caseA', scope: 'step-a', outcome: 'passed' }]);
 });
 
-test('bounds live report reads and rejects partial multi-file progress', async () => {
+test('bounds live report reads and keeps partial multi-file progress visible', async () => {
   const valid = report('live', { caseA: 'Passed' });
   assert.equal(readLivePytestCases(valid.filePath).cases.length, 1);
   const oversized = path.join(root, 'oversized-live.html');
@@ -121,5 +121,6 @@ test('bounds live report reads and rejects partial multi-file progress', async (
     id: 'partial-live',
     filePaths: [valid.filePath, path.join(root, 'missing-live.html')],
   }]);
-  assert.equal(progress['partial-live'], null);
+  assert.equal(progress['partial-live'].counts.total, 1);
+  assert.deepEqual(progress['partial-live'].unavailable, [path.join(root, 'missing-live.html')]);
 });

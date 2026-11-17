@@ -141,7 +141,11 @@ function refreshLiveTaskProgress(db, taskIds) {
           liveProgressCache.set(group.id, { ...value, sourceSignature: group.sourceSignature });
           liveProgressFailures.delete(group.id);
           setBoundedMapValue(liveProgressDiagnostics, group.taskId,
-            { status: 'ready', code: '', updatedAt }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
+            {
+              status: value.unavailable?.length ? 'partial' : 'ready',
+              code: value.unavailable?.length ? 'LIVE_PROGRESS_SOURCE_UNAVAILABLE' : '',
+              updatedAt,
+            }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
         } else {
           setBoundedMapValue(liveProgressFailures, group.id, group.sourceSignature, LIVE_PROGRESS_FAILURE_MAX);
           setBoundedMapValue(liveProgressDiagnostics, group.taskId, {

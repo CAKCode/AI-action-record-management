@@ -2885,12 +2885,17 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     id: 'recover-card-task', name: 'Interrupted workflow', objective: 'Finish the existing workflow',
     status: 'stopped', enabled: true, createdAt: '2026-08-03T03:00:00.000Z',
     persistentSessionKey: 'single:recover-card-task',
+    testProgress: { runs: {
+      initial: { available: true, resultKnown: true, total: 4, completed: 2, passed: 2, failed: 0, skipped: 0, percent: 50, status: 'running' },
+      rerun1: { available: false },
+    } },
   };
   vm.runInContext(`state.dashboard.sessions.push(${JSON.stringify(recoverableTask)});
     state.releaseCycleTasks = [${JSON.stringify({ ...recoverableTask, releaseCycleId: 'recovery-cycle' })}];`, context);
   const recoveryCard = vm.runInContext("taskCard(findTask('recover-card-task'), 'grid')", context);
   assert.match(recoveryCard, /data-action="recover-task"/);
   assert.match(recoveryCard, /class="card-hit" data-action="open-task"/);
+  assert.match(vm.runInContext("taskCard(findTask('recover-card-task'))", context), /class="task-progress"/);
   let finishRecovery;
   responseOverrides.set('POST /api/sessions/recover-card-task/run', {
     status: 202, payload: new Promise(resolve => { finishRecovery = resolve; }),

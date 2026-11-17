@@ -338,6 +338,40 @@ test('the task stream runner atomically persists task workspace trust in private
   });
 });
 
+test('the task stream runner merges concurrent workspace trust updates', async () => {
+  const runner = path.join(ROOT_DIR, 'bin', 'bridge-stream-runner.py');
+  const fixtureRoot = path.join(tempDir, 'trusted-project-config-race');
+  const codexHome = path.join(fixtureRoot, 'codex-home');
+  const firstWorkspace = path.join(fixtureRoot, 'first-workspace');
+  const secondWorkspace = path.join(fixtureRoot, 'second-workspace');
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(firstWorkspace, { recursive: true });
+  fs.mkdirSync(secondWorkspace, { recursive: true });
+  const script = [
+    'import importlib.util',
+    'import pathlib',
+    'import sys',
+    'spec = importlib.util.spec_from_file_location("bridge_stream_runner", sys.argv[1])',
+    'module = importlib.util.module_from_spec(spec)',
+    'spec.loader.exec_module(module)',
+    'module.ensure_trusted_project(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]))',
+  ].join('\n');
+  const run = (workspace) => new Promise((resolve, reject) => {
+    const child = spawn('python3', ['-c', script, runner, codexHome, workspace], {
+      env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    child.on('error', reject);
+    child.on('close', code => code === 0 ? resolve() : reject(new Error(stderr || `exit ${code}`)));
+  });
+  await Promise.all([run(firstWorkspace), run(secondWorkspace)]);
+  const parsed = fs.readFileSync(path.join(codexHome, 'config.toml'), 'utf8');
+  assert.ok(parsed.includes(`[projects.${JSON.stringify(firstWorkspace)}]`));
+  assert.ok(parsed.includes(`[projects.${JSON.stringify(secondWorkspace)}]`));
+});
+
 test('the task stream runner refuses conflicting task workspace trust', () => {
   const runner = path.join(ROOT_DIR, 'bin', 'bridge-stream-runner.py');
   const fixtureRoot = path.join(tempDir, 'conflicting-project-config');

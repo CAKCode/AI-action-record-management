@@ -200,7 +200,6 @@ const ATTEMPT_OUTPUT_SOCKET_POLL_MS = 250;
 const ATTEMPT_OUTPUT_SOCKET_MAX_BUFFERED_BYTES = 1024 * 1024;
 const ATTEMPT_TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
-const AUTH_SESSION_COOKIE_SECURE = !LOOPBACK_HOSTS.has(HOST);
 const API_RESPONSE_IDLE_GUARD = Symbol('apiResponseIdleGuard');
 let shuttingDown = false;
 let activeApiRequests = 0;
@@ -1378,23 +1377,36 @@ function authSessionFromRequest(req) {
   return readAuthSession(requestCookie(req, AUTH_SESSION_COOKIE));
 }
 
-function setAuthSessionCookie(res, value, maxAgeSeconds) {
-  const secureAttribute = AUTH_SESSION_COOKIE_SECURE ? '; Secure' : '';
+function requestUsesSecureTransport(req) {
+  if (req?.socket?.encrypted) return true;
+  const forwardedHost = String(req?.headers?.['x-forwarded-host'] || '').trim();
+  const forwardedProto = String(req?.headers?.['x-forwarded-proto'] || '')
+    .split(',', 1)[0].trim().toLowerCase();
+  return Boolean(forwardedHost && forwardedProto === 'https');
+}
+
+function setAuthSessionCookie(res, value, maxAgeSeconds, secure = false) {
+  const secureAttribute = secure ? '; Secure' : '';
   res.setHeader(
     'Set-Cookie',
     `${AUTH_SESSION_COOKIE}=${value}; Max-Age=${maxAgeSeconds}; Path=/; HttpOnly; SameSite=Strict${secureAttribute}`,
   );
 }
 
-function issueAuthSession(res) {
+function issueAuthSession(res, req) {
   if (!AUTH_SESSION_SECRET) return '';
   const expiresAt = Date.now() + AUTH_SESSION_TTL_MS;
-  setAuthSessionCookie(res, createAuthSessionValue(), Math.floor(AUTH_SESSION_TTL_MS / 1000));
+  setAuthSessionCookie(
+    res,
+    createAuthSessionValue(),
+    Math.floor(AUTH_SESSION_TTL_MS / 1000),
+    requestUsesSecureTransport(req),
+  );
   return new Date(expiresAt).toISOString();
 }
 
-function clearAuthSession(res) {
-  setAuthSessionCookie(res, '', 0);
+function clearAuthSession(res, req) {
+  setAuthSessionCookie(res, '', 0, requestUsesSecureTransport(req));
 }
 
 function artifactResourceScope(pathname) {
@@ -1495,7 +1507,7 @@ function authorize(req, res, pathname, searchParams) {
     // Refresh the HttpOnly session when the embedded-browser fallback sends
     // Basic credentials. WebSocket upgrades then authenticate via the cookie,
     // without putting the password into a ws:// URL.
-    if (basicCredentialsValid(req) && req.method !== 'HEAD') issueAuthSession(res);
+    if (basicCredentialsValid(req) && req.method !== 'HEAD') issueAuthSession(res, req);
     return true;
   }
   const hasCredentials = String(req.headers.authorization || '').startsWith('Basic ');
@@ -2124,12 +2136,12 @@ const server = http.createServer(async (req, res) => {
     }
     if (pathname === '/api/auth/session') {
       if (req.method === 'POST') {
-        const expiresAt = issueAuthSession(res);
+        const expiresAt = issueAuthSession(res, req);
         json(res, expiresAt ? { ok: true, expiresAt } : { ok: true });
         return;
       }
       if (req.method === 'DELETE') {
-        clearAuthSession(res);
+        clearAuthSession(res, req);
         json(res, { ok: true });
         return;
       }
