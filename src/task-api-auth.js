@@ -6,16 +6,7 @@ const { RUNTIME_DIR } = require('./paths');
 const AUTH_FILE = path.join(RUNTIME_DIR, 'task-api-auth.json');
 
 function writeTaskApiAuthentication({ baseUrl, user, password }, file = AUTH_FILE) {
-  if (!user || !password) {
-    try {
-      const stat = fs.lstatSync(file);
-      if (stat.isDirectory()) throw new Error('Task API authentication context is a directory');
-      fs.unlinkSync(file);
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
-    return;
-  }
+  if (!user || !password) return;
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${crypto.randomUUID()}.tmp`;
   try {

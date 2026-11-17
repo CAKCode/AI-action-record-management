@@ -1013,14 +1013,17 @@ function taskProgressRunHtml(labelKey, progress) {
     return `<div class="task-progress-run task-progress-run-empty"><span>${escapeHtml(tr(labelKey))}</span><strong>${escapeHtml(tr('taskCaseProgressUnavailable'))}</strong></div>`;
   }
   const total = Math.max(0, Number(progress.total || 0));
-  const incomplete = progress.complete === false;
+  if (progress.complete === false) {
+    const observed = Math.min(total, Math.max(0, Number(progress.completed || 0)));
+    return `<div class="task-progress-run task-progress-run-empty"><span>${escapeHtml(tr(labelKey))}</span><strong>${escapeHtml(trf('taskCaseProgressIncomplete', { completed: observed, total }))}</strong></div>`;
+  }
   if (progress.resultKnown === false || progress.status === 'unknown') {
     return `<div class="task-progress-run task-progress-run-empty"><span>${escapeHtml(tr(labelKey))}</span><strong>${escapeHtml(trf('taskCaseProgressUnknown', { total }))}</strong></div>`;
   }
   const completed = Math.min(total, Math.max(0, Number(progress.completed || 0)));
   const percent = Math.min(100, Math.max(0, Number(progress.percent || (total ? Math.round((completed / total) * 100) : 0))));
   return `<div class="task-progress-run ${escapeHtml(progress.status || 'partial')}">
-    <div class="task-progress-head"><span>${escapeHtml(tr(labelKey))}</span><strong>${escapeHtml(incomplete ? trf('taskCaseProgressIncomplete', { completed, total }) : trf('taskCaseProgressCount', { completed, total }))}</strong></div>
+    <div class="task-progress-head"><span>${escapeHtml(tr(labelKey))}</span><strong>${escapeHtml(trf('taskCaseProgressCount', { completed, total }))}</strong></div>
     <div class="task-progress-track" role="progressbar" aria-label="${escapeHtml(tr('taskCaseProgress'))}" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${completed}"><i style="--progress:${percent}%"></i></div>
     <div class="task-progress-meta"><span class="task-progress-pass">${escapeHtml(trf('taskCasePassed', { count: Number(progress.passed || 0) }))}</span><span class="task-progress-fail">${escapeHtml(trf('taskCaseFailed', { count: Number(progress.failed || 0) }))}</span>${Number(progress.skipped || 0) ? `<span class="task-progress-skip">${escapeHtml(trf('taskCaseSkipped', { count: Number(progress.skipped || 0) }))}</span>` : ''}</div>
   </div>`;

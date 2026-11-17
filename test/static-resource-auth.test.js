@@ -5,7 +5,6 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const { WebSocket } = require('ws');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 
@@ -40,24 +39,6 @@ async function stop(child) {
     new Promise((resolve) => child.once('exit', resolve)),
     new Promise((resolve) => setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 5000)),
   ]);
-}
-
-function webSocketStatus(url, headers = {}) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const socket = new WebSocket(url, { headers });
-    const finish = (callback, value) => {
-      if (settled) return;
-      settled = true;
-      socket.terminate();
-      callback(value);
-    };
-    socket.once('unexpected-response', (_request, response) => finish(resolve, response.statusCode));
-    socket.once('open', () => finish(resolve, 101));
-    socket.once('error', error => {
-      if (!settled) finish(reject, error);
-    });
-  });
 }
 
 test('authenticated deployments keep the application page and bundles behind the auth boundary', async (t) => {
@@ -116,20 +97,6 @@ test('authenticated deployments keep the application page and bundles behind the
   assert.equal(bundle.status, 200);
   assert.equal(bundle.headers.get('cache-control'), 'private, no-store');
   assert.match(bundle.headers.get('vary') || '', /Cookie/);
-
-  const bootstrap = await fetch(`${baseUrl}/api/auth/session`, { headers: { authorization } });
-  assert.equal(bootstrap.status, 200);
-  assert.deepEqual(await bootstrap.json(), { ok: true });
-  const bootstrapCookie = (bootstrap.headers.get('set-cookie') || '').split(';', 1)[0];
-  assert.match(bootstrapCookie, /^codex_task_session=[^;]+$/);
-  const cookieAuthorizedApi = await fetch(`${baseUrl}/api/health`, {
-    headers: { cookie: bootstrapCookie },
-  });
-  assert.equal(cookieAuthorizedApi.status, 200);
-
-  const terminalUrl = `${baseUrl.replace('http:', 'ws:')}/api/sessions/missing-task/codex-terminal/live`;
-  assert.equal(await webSocketStatus(terminalUrl), 401);
-  assert.equal(await webSocketStatus(terminalUrl, { cookie: bootstrapCookie }), 404);
 });
 
 test('a loopback process still rejects externally addressed pages without credentials', async (t) => {

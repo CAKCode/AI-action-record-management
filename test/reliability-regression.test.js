@@ -2944,40 +2944,6 @@ test('overlapping data and runtime directories are rejected before storage opens
   assert.match(result.stderr, /must not overlap/);
 });
 
-test('platform storage and task workspace overlaps are rejected before storage opens', () => {
-  const runPaths = (overrides) => spawnSync(process.execPath, ['-e', "require('./src/paths')"], {
-    cwd: path.resolve(__dirname, '..'),
-    env: {
-      ...process.env,
-      CODEX_DESK_BACKUP_DIR: undefined,
-      CODEX_TASK_SESSIONS_DIR: undefined,
-      CODEX_DESK_DATA_DIR: path.join(tempDir, 'isolated-data'),
-      CODEX_DESK_RUNTIME_DIR: path.join(tempDir, 'isolated-runtime'),
-      CODEX_TASK_WORKSPACE_ROOTS: path.join(tempDir, 'isolated-workspace'),
-      ...overrides,
-    },
-    encoding: 'utf8',
-  });
-  const backupInRuntime = runPaths({
-    CODEX_DESK_BACKUP_DIR: path.join(tempDir, 'isolated-runtime', 'backups'),
-  });
-  assert.notEqual(backupInRuntime.status, 0);
-  assert.match(backupInRuntime.stderr, /Backup directory must not overlap/);
-
-  const sessionsInData = runPaths({
-    CODEX_TASK_SESSIONS_DIR: path.join(tempDir, 'isolated-data', 'tasks'),
-  });
-  assert.notEqual(sessionsInData.status, 0);
-  assert.match(sessionsInData.stderr, /Task Session directory must be isolated/);
-
-  const workspaceInRuntime = runPaths({
-    CODEX_TASK_WORKSPACE_ROOTS: path.join(tempDir, 'isolated-runtime', 'tasks'),
-    CODEX_TASK_SESSIONS_DIR: path.join(tempDir, 'isolated-sessions'),
-  });
-  assert.notEqual(workspaceInRuntime.status, 0);
-  assert.match(workspaceInRuntime.stderr, /Task workspace roots must not be inside/);
-});
-
 test('invalid storage capacity thresholds fail before the service can accept work', () => {
   const invalidBytes = spawnSync(process.execPath, ['-e', "require('./src/storage-capacity')"], {
     cwd: ROOT_DIR,

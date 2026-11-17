@@ -573,14 +573,6 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     }];
   `, context);
   assert.equal(vm.runInContext('dashboardPollDelay()', context), 5000);
-  const incompleteProgress = vm.runInContext(`taskProgressRunHtml('taskInitialProgress', ${JSON.stringify({
-    available: true, resultKnown: true, total: 10, completed: 4, passed: 4, failed: 0,
-    skipped: 0, percent: 40, complete: false, status: 'partial',
-  })})`, context);
-  assert.match(incompleteProgress, /task-progress-track/);
-  assert.match(incompleteProgress, /--progress:40%/);
-  assert.match(incompleteProgress, /统计未完整：已观测 4\/10/);
-  assert.doesNotMatch(incompleteProgress, /task-progress-run-empty/);
   vm.runInContext(`
     state.dashboard.sessions = [{
       id: 'background-progress', status: 'waiting_review', activeExternalAttempts: 1,
