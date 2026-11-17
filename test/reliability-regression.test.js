@@ -258,6 +258,33 @@ test('the task stream runner replaces codex exec with the real interactive TUI c
   ]);
 });
 
+test('the task stream runner removes unsupported top-level trust flags from the TUI command', () => {
+  const runner = path.join(ROOT_DIR, 'bin', 'bridge-stream-runner.py');
+  const converted = spawnSync('python3', [
+    '-c',
+    [
+      'import importlib.util',
+      'import json',
+      'import sys',
+      'spec = importlib.util.spec_from_file_location("bridge_stream_runner", sys.argv[1])',
+      'module = importlib.util.module_from_spec(spec)',
+      'spec.loader.exec_module(module)',
+      'argv = ("codex", "--trust", "exec", "--trust=true", "--json", "-")',
+      'converted = module.interactive_terminal_argv(argv, "Run the task.", module.Path("/srv/work"))',
+      'sys.stdout.write(json.dumps(converted))',
+    ].join('\n'),
+    runner,
+  ], {
+    encoding: 'utf8',
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+  });
+
+  assert.equal(converted.status, 0, converted.stderr);
+  assert.deepEqual(JSON.parse(converted.stdout), [
+    'codex', '--no-alt-screen', '-C', '/srv/work', '--', 'Run the task.',
+  ]);
+});
+
 test('the task stream runner atomically persists task workspace trust in private Codex config', () => {
   const runner = path.join(ROOT_DIR, 'bin', 'bridge-stream-runner.py');
   const fixtureRoot = path.join(tempDir, 'trusted-project-config');

@@ -137,6 +137,13 @@ def interactive_terminal_argv(
     else:
         command = values[:exec_index]
         exec_arguments = values[exec_index + 1 :]
+    # Project trust is persisted in Codex config.toml by ensure_trusted_project.
+    # The current interactive CLI does not accept --trust at the top level;
+    # remove it when converting an exec invocation into the TUI command.
+    command = [
+        value for value in command
+        if value != "--trust" and not value.startswith("--trust=")
+    ]
     if not command:
         raise ValueError("Codex executable is missing from the invocation")
 
@@ -152,6 +159,9 @@ def interactive_terminal_argv(
     index = 0
     while index < len(exec_arguments):
         value = exec_arguments[index]
+        if value == "--trust" or value.startswith("--trust="):
+            index += 1
+            continue
         if value in {"--json", "--skip-git-repo-check", "-"}:
             index += 1
             continue
