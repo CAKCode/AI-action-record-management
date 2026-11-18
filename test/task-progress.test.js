@@ -116,7 +116,7 @@ test('Task progress separates initial and rerun-1 and keeps unknown results expl
       throw new Error('parent stage and child reports were double-counted: ' + JSON.stringify(parentStage));
     }
     const live = tasks.find(task => task.id === 'progress-live-report').testProgress.runs.initial;
-    if (live.total !== 5 || live.completed !== 4 || live.passed !== 3 || live.failed !== 1 || live.status !== 'running') {
+    if (live.total !== 5 || live.completed !== 5 || live.passed !== 3 || live.failed !== 2 || live.status !== 'running') {
       throw new Error('live pytest report was not used: ' + JSON.stringify(live));
     }
     console.log(JSON.stringify({ ok: true }));

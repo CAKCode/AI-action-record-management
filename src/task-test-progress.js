@@ -63,13 +63,15 @@ function liveReportRows(db, taskIds) {
   if (!taskIds.length) return [];
   const placeholders = taskIds.map(() => '?').join(',');
   return db.prepare(`
-    SELECT task_id, report_key, revision, payload_json, artifact_declarations_json
+    SELECT task_id, report_key, revision, payload_json, artifact_declarations_json,
+           external_attempt_id
     FROM (
       SELECT report.task_id, report.report_key, report.revision, report.payload_json,
              report.status AS report_status,
+             external.id AS external_attempt_id,
              external.artifact_declarations_json,
              ROW_NUMBER() OVER (
-               PARTITION BY report.task_id, report.report_key
+               PARTITION BY report.task_id, report.report_key, external.id
                ORDER BY report.revision DESC, report.published_at DESC
              ) AS report_rank
       FROM skill_reports report
@@ -108,13 +110,18 @@ function liveReportGroups(rows) {
       .map(declaration => String(declaration.path))
       .filter(filePath => !isUnresolvedArtifactPath(filePath)))];
     if (!filePaths.length) continue;
-    const id = `${row.task_id}\0${row.report_key}`;
-    groups.set(id, {
-      id,
-      taskId: row.task_id,
-      filePaths,
-      sourceSignature: filePaths.map(liveFileSignature).join('\0'),
-    });
+    for (const filePath of filePaths) {
+      const id = `${row.task_id}\0${row.report_key}\0${row.external_attempt_id}\0${filePath}`;
+      groups.set(id, {
+        id,
+        taskId: row.task_id,
+        reportKey: row.report_key,
+        externalAttemptId: row.external_attempt_id,
+        filePath,
+        filePaths: [filePath],
+        sourceSignature: liveFileSignature(filePath),
+      });
+    }
   }
   return [...groups.values()];
 }
@@ -153,7 +160,7 @@ function refreshLiveTaskProgress(db, taskIds) {
           }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
         }
       }
-      while (liveProgressCache.size > 128) liveProgressCache.delete(liveProgressCache.keys().next().value);
+      while (liveProgressCache.size > 2048) liveProgressCache.delete(liveProgressCache.keys().next().value);
       return true;
     })
     .catch((error) => {
@@ -196,19 +203,35 @@ function taskTestProgressByTask(db, taskIds) {
     reports.set(reportKey, row);
   }
   const liveRows = liveReportRows(db, taskIds);
-  const liveGroups = new Map(liveReportGroups(liveRows).map(group => [group.id, group]));
+  const liveGroupsByExecution = new Map();
+  for (const group of liveReportGroups(liveRows)) {
+    const key = `${group.taskId}\0${group.reportKey}\0${group.externalAttemptId}`;
+    const groups = liveGroupsByExecution.get(key) || [];
+    groups.push(group);
+    liveGroupsByExecution.set(key, groups);
+  }
   const liveSignatures = new Map();
   for (const row of liveRows) {
     const payload = parseJson(row.payload_json, {});
     const fallbackMetrics = new Map((Array.isArray(payload.metrics) ? payload.metrics : [])
       .filter(metric => metric && typeof metric.key === 'string')
       .map(metric => [metric.key.trim().toLowerCase(), Number(metric.value)]));
-    const group = liveGroups.get(`${row.task_id}\0${row.report_key}`);
-    const live = group ? liveProgressCache.get(group.id) : null;
-    if (!live || live.sourceSignature !== group.sourceSignature) continue;
-    const liveCounts = live.counts;
-    const liveSignature = live.signature;
-    liveSignatures.set(`${row.task_id}\0${row.report_key}`, liveSignature);
+    const executionKey = `${row.task_id}\0${row.report_key}\0${row.external_attempt_id}`;
+    const groups = liveGroupsByExecution.get(executionKey) || [];
+    const liveCounts = { total: 0, passed: 0, failed: 0, error: 0, skipped: 0, xfailed: 0, xpassed: 0 };
+    const liveSignaturesForExecution = [];
+    let hasLiveCounts = false;
+    for (const group of groups) {
+      const live = liveProgressCache.get(group.id);
+      if (!live || live.sourceSignature !== group.sourceSignature) continue;
+      hasLiveCounts = true;
+      for (const key of Object.keys(liveCounts)) liveCounts[key] += Number(live.counts?.[key] || 0);
+      liveSignaturesForExecution.push(`${group.filePath}\0${live.signature}`);
+    }
+    if (!hasLiveCounts) continue;
+    const liveSignature = liveSignaturesForExecution.sort().join('\0');
+    const liveSignatureKey = `${row.task_id}\0${row.report_key}\0${row.external_attempt_id}`;
+    liveSignatures.set(liveSignatureKey, liveSignature);
     const metrics = [
       { key: 'total', value: Math.max(liveCounts.total, finiteMetricValue(fallbackMetrics, ['total', 'selected']) || 0) },
       { key: 'passed', value: liveCounts.passed },
@@ -231,7 +254,7 @@ function taskTestProgressByTask(db, taskIds) {
   for (const taskId of taskIds) {
     const reports = latestByTask.get(taskId) || new Map();
     const signature = [...reports.values()]
-      .map((row) => `${row.report_type}\0${row.report_key}\0${row.revision}\0${row.published_at || ''}\0${row.status}\0${row.liveSignature || liveSignatures.get(`${taskId}\0${row.report_key}`) || ''}`)
+      .map((row) => `${row.report_type}\0${row.report_key}\0${row.revision}\0${row.published_at || ''}\0${row.status}\0${row.liveSignature || liveSignatures.get(`${taskId}\0${row.report_key}\0${row.external_attempt_id || ''}`) || ''}`)
       .join('\x01');
     const cached = taskTestProgressCache.get(taskId);
     if (cached?.signature === signature) {
@@ -252,6 +275,15 @@ function taskTestProgressByTask(db, taskIds) {
     taskTestProgressCache.delete(taskTestProgressCache.keys().next().value);
   }
   return result;
+}
+
+async function refreshTaskTestProgress(db, taskIds) {
+  const normalizedTaskIds = [...new Set((taskIds || []).map(String).filter(Boolean))];
+  if (!normalizedTaskIds.length) return new Map();
+  await refreshLiveTaskProgress(db, normalizedTaskIds);
+
+  // Re-read after the worker finishes so callers receive this refresh's counts.
+  return taskTestProgressByTask(db, normalizedTaskIds);
 }
 
 function calculateTaskTestProgress(reports) {
@@ -374,7 +406,7 @@ function calculateTaskTestRunProgress(reports, fallbackTotal = null) {
     return progress;
   }
   progress.percent = progress.total ? Math.round((progress.completed / progress.total) * 100) : 0;
-  progress.status = active && progress.completed < progress.total ? 'running'
+  progress.status = active ? 'running'
     : (progress.failed > 0 ? 'failed'
       : (progress.total > 0 && progress.completed >= progress.total ? 'completed' : 'partial'));
   return progress;
@@ -422,5 +454,6 @@ function combineTaskTestRunProgress(initial, rerun1) {
 module.exports = {
   emptyTaskTestProgress,
   taskTestProgressByTask,
+  refreshTaskTestProgress,
   refreshLiveTaskProgress,
 };

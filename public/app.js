@@ -4818,6 +4818,41 @@ function renderAll() {
   renderAudit();
 }
 
+function taskHasLiveProgress(task) {
+  return ['running', 'recovering', 'waiting_scheduled'].includes(String(task?.status || ''))
+    || Number(task?.activeExternalAttempts || 0) > 0;
+}
+
+async function refreshActiveTaskProgress(dashboard, signal) {
+  const activeTasks = (dashboard.sessions || []).filter(taskHasLiveProgress);
+  if (!activeTasks.length) return dashboard;
+  const ids = activeTasks.map(task => task.id);
+  let progress;
+  try {
+    progress = await api(`/api/task-progress?ids=${ids.map(encodeURIComponent).join(',')}`, {
+      signal,
+      timeoutMs: DASHBOARD_REQUEST_TIMEOUT_MS,
+    });
+  } catch (error) {
+    if (error.name === 'AbortError') throw error;
+    return dashboard;
+  }
+  if (signal.aborted) throw Object.assign(new Error('Dashboard progress refresh aborted'), { name: 'AbortError' });
+  const progressByTask = new Map(Object.entries(progress || {}));
+  if (!progressByTask.size) return dashboard;
+  const sessions = (dashboard.sessions || []).map((task) => (
+    progressByTask.has(task.id)
+      ? { ...task, testProgress: progressByTask.get(task.id) }
+      : task
+  ));
+  const activeSessions = (dashboard.activeSessions || []).map((task) => (
+    progressByTask.has(task.id)
+      ? { ...task, testProgress: progressByTask.get(task.id) }
+      : task
+  ));
+  return { ...dashboard, sessions, activeSessions };
+}
+
 async function loadDashboard(options = {}) {
   if (state.dashboardPromise) return state.dashboardPromise;
   const controller = new AbortController();
@@ -4827,6 +4862,7 @@ async function loadDashboard(options = {}) {
     controller.abort();
   }, DASHBOARD_REQUEST_TIMEOUT_MS);
   state.dashboardPromise = api(`/api/dashboard?taskLimit=${state.taskLimit}`, { signal: controller.signal })
+    .then((dashboard) => refreshActiveTaskProgress(dashboard, controller.signal))
     .then((dashboard) => {
       reconcileRunIntents(dashboard.sessions);
       reconcileTaskOperationIntents(dashboard.sessions);
