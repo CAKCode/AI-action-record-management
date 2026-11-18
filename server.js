@@ -41,8 +41,6 @@ const {
   retainOwnedTaskSessionHistory,
   sessionStats,
   getSession,
-  getTaskTestProgress,
-  getTasksTestProgress,
   saveSession,
   updateTaskSourceMetadata,
   listTaskSourceFiles,
@@ -3297,25 +3295,6 @@ const server = http.createServer(async (req, res) => {
           res.off('close', abortRead);
           releaseLogStream();
         }
-      }
-    }
-    {
-      if (pathname === '/api/task-progress' && req.method === 'GET') {
-        const ids = [...new Set(String(url.searchParams.get('ids') || '')
-          .split(',').map(value => value.trim()).filter(Boolean))];
-        if (!ids.length || ids.length > 500) {
-          throw Object.assign(new Error('ids must contain between 1 and 500 task IDs'), { statusCode: 400 });
-        }
-        json(res, await getTasksTestProgress(ids));
-        return;
-      }
-    }
-    {
-      const progressParams = routeParams(/^\/api\/sessions\/([^/]+)\/test-progress$/, pathname);
-      if (progressParams && req.method === 'GET') {
-        const taskId = requireSessionId(progressParams[0]);
-        json(res, await getTaskTestProgress(taskId));
-        return;
       }
     }
     {

@@ -819,17 +819,6 @@ curl -fsS -X PUT "$BASE_URL/api/sessions/verify-release/executions/execution-exa
 `complete=false`；`pendingReports`、`unmatchedRerunCases` 和 `failures` 说明未完成部分，
 不把缺失证据视为零失败。响应不包含测试源码、报告正文或文件系统路径。
 
-### 查询运行中的 pytest 进度
-
-`GET /api/sessions/:id/test-progress`
-
-读取该 Task 当前所有运行中的 External Attempt 及其 pytest HTML 产物，返回与 Dashboard
-任务卡相同的 `testProgress` 对象。云录制全量回归一个 Task 下可以有多个 PID 和多个 HTML
-产物，平台会按同一 `reportKey` 合并这些产物；单测只有一个 PID 时使用同一条路径。请求会等待
-当前一轮实时文件解析完成后返回，避免页面拿到上一轮缓存。响应只包含 initial/rerun-1 的
-`total/completed/passed/failed/skipped/percent/status` 计数，不返回 PID、源码或文件系统路径。
-Dashboard 使用批量形式 `GET /api/task-progress?ids=id-a,id-b`，响应是以 Task ID 为键的同样对象。
-
 ### 查询 Skill 结构化报告
 
 Schema v2 可选 `relatedReportKeys` 关联同一 Task 内的执行报告。前端将这些报告的文件入口
