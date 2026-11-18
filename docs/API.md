@@ -6,7 +6,9 @@
 - JSON 请求必须使用 `Content-Type: application/json`，请求体最大 1 MiB。
 - 时间字段使用 UTC ISO 8601，例如 `2026-07-26T06:36:57.177Z`。
 - 错误响应格式为 `{"error":"错误说明"}`。
-- 每个响应包含 `X-Request-Id`；调用方也可以传入该请求头用于链路定位。
+- JSON/API 响应包含 `X-API-Version: 1`；错误响应额外包含 `X-API-Error-Code`，调用方应优先依据 HTTP 状态码和该响应头处理错误，不要解析错误文案。
+- 每个响应包含 `X-Request-Id`；调用方也可以传入该请求头用于链路定位。`X-Request-Id` 本身不承担跨请求幂等语义。
+- 现有成功 JSON 的 payload 形状保持不变；上述统一约定通过响应头和请求幂等键解析提供，不要求旧客户端改写解码逻辑。
 - 写操作会把 `X-Request-Id` 和当前认证用户名写入审计；未配置认证时操作者记为 `operator`。
 - 配置 HTTP Basic Authentication 后，API、WebSocket 和所有静态资源都必须携带认证信息；未登录的页面请求（包括 `/`）只返回 `401` JSON，不返回 HTML。浏览器通过 Basic Auth 首次打开页面后会建立 12 小时的 HttpOnly 会话 Cookie，之后 artifact、iframe、媒体资源和 WebSocket 会自动复用 Cookie；命令行仍可直接使用 Basic Auth。
 - `index.html`、`app.js`、终端库、报表脚本以及其他静态资源也要求 Basic Auth 或会话 Cookie；仅拿到 URL 不能获取 HTML 元素、下载前端功能代码或调用 API。
@@ -44,7 +46,7 @@ BASE_URL=http://127.0.0.1:8091
 
 ## 浏览器会话认证
 
-远程部署仍以 HTTP Basic Authentication 作为凭据校验和命令行兼容方式。浏览器首次访问受保护页面时通过 Basic Auth 建立 HttpOnly、`SameSite=Strict` 的 `codex_task_session` Cookie，有效期为 12 小时；请求经 HTTPS 或带有可信反向代理 `X-Forwarded-Host` 与 `X-Forwarded-Proto: https` 时 Cookie 带有 `Secure` 属性，密码不会写入 Cookie。会话 Cookie 可用于 API、原生 artifact 导航、HTML iframe、媒体资源和 WebSocket。
+远程部署仍以 HTTP Basic Authentication 作为凭据校验和命令行兼容方式。浏览器首次访问受保护页面时通过 Basic Auth 建立 HttpOnly、`SameSite=Strict` 的 `codex_task_session` Cookie，有效期为 12 小时；请求经 HTTPS 或来自回环/`CODEX_TRUSTED_PROXY_IPS` 配置的可信反向代理，并带有 `X-Forwarded-Host` 与 `X-Forwarded-Proto: https` 时 Cookie 带有 `Secure` 属性，密码不会写入 Cookie。会话 Cookie 可用于 API、原生 artifact 导航、HTML iframe、媒体资源和 WebSocket。
 
 ### `POST /api/auth/session`
 
@@ -84,7 +86,7 @@ GET  /api/release-cycle-deletions/:deletionId
 `POST /api/release-cycles` 也接受可选 `schedule` 对象（`id` 可省略，由服务端生成；其余字段与
 独立创建计划接口相同）。周期、计划、审计及创建回执在同一事务内提交；Cron、时区或计划冲突
 导致失败时不会留下半个周期。省略 `schedule` 保持原来仅创建周期的行为，保存不会立即创建 Task。
-可用 `Idempotency-Key` 请求头或 body 的 `idempotencyKey` 重试相同创建请求；重试复用原周期及
+可用 `Idempotency-Key` 请求头或 body 的 `idempotencyKey` 重试相同创建请求；所有支持幂等的写接口都使用同一规则：请求头优先，body 作为兼容入口，未提供时只生成当前请求的一次性内部键；需要跨请求重试时必须显式提供幂等键。重试复用原周期及
 原计划，不再生成第二条 Cron。已提交结果可在维护期间重放，或在周期后来被删除后返回原创建结果，
 均不会重新创建已删除记录；同一键用于不同内容返回 `409`。
 
@@ -405,7 +407,7 @@ curl -fsS -X POST "$BASE_URL/api/sessions/verify-release/stop" \
 
 若该任务有平台启动的显式交互式 Codex CLI，服务先请求其退出、等待 PTY 结束并复验 transcript；退出超时、写入失败或完整性失败时停止请求失败，任务状态不改变。随后排队任务会取消待处理命令；运行中或有受管后台进程的任务先进入 `stopping`，只有任务 cgroup 的进程/线程以及身份已校验的进程组全部清空后才转为 `stopped`。已登记且保存了 PID 启动 tick 与独立进程组身份的后台执行会收到 `SIGTERM`，两秒后仍存活才发送 `SIGKILL`；旧记录或身份不匹配的进程不会仅凭 PID 被终止。任务不处于可停止状态时仍返回 `200`，但结果为 `{"ok":false}`。
 
-`Idempotency-Key` 建议由调用方为一次逻辑操作生成并在超时重试时复用；已提交的响应与停止状态在同一 SQLite 事务内保存，重放不会重复写停止日志。`X-Task-Created-At` 可选，值取任务的 `createdAt`，用于阻止旧页面或旧脚本操作同 ID 的新任务代际。两个头也适用于确认完成、恢复归档、重置和删除。
+`Idempotency-Key` 建议由调用方为一次逻辑操作生成并在超时重试时复用；已提交的响应与停止状态在同一 SQLite 事务内保存，重放不会重复写停止日志。除请求头外，停止、完成、恢复、重置和删除也接受 JSON body 中的 `idempotencyKey`。`X-Task-Created-At` 可选，值取任务的 `createdAt`，用于阻止旧页面或旧脚本操作同 ID 的新任务代际。两个头也适用于确认完成、恢复归档、重置和删除。
 
 平台恢复检查点持有维护租约时，已存在的 Run、原子创建、停止、完成、恢复、重置和删除幂等键仍可只读重放；没有对应命令或回执的新键返回 `503` 和 `Retry-After`，不会修改任务、文件或工作日志。
 
@@ -619,6 +621,8 @@ curl -fsS "$BASE_URL/api/sessions/verify-release/steps"
 ### 查询后台执行
 
 `GET /api/sessions/:id/external-attempts?limit=100&offset=0&status=running`
+
+新登记的 External Attempt 可以使用独立的业务 checkout；建议显式提供 `workingDirectory`，平台存储目录不能作为外部工作目录，日志、DONE/STATE/META 和 Artifact 路径必须位于该外部目录内。为保持旧版外部调用兼容，省略 `workingDirectory` 时仍接受绝对证据路径，并以日志所在目录校验同一组证据；已有历史记录仍按原记录提供只读查询。
 
 返回该任务登记的外部执行代次。主要字段包括 `stepRunId`、`originTurnId`、`originAttemptId`、`skillInvocationId`、`skills`、`generation`、`status`、`pid`、`commandPath`、`command`、`logPath`、`donePath`、`statePath`、`metaPath`、`artifactDeclarations`、`lastObservation` 和结构化 `result`。`skills` 优先来自登记时正在执行的 `codex-skill-use` invocation；旧记录使用 `executionEvidence.externalAttemptId` 精确关联的 Skill Report，其次使用已经绑定的来源命令归因，不按名称、路径或命令关键字猜测。`artifactDeclarations` 包含启动时登记的稳定 key、kind 和源路径；页面只从中提取文件名，并通过按 key 寻址的受控端点打开文件，不把路径作为 URL 参数。终态日志托管信息位于 `archiveStatus`、`archivedLogPath`、`archivedLogBytes`、`archivedLogSha256`、`archivedAt`、`archiveAttemptCount`、`archiveNextRetryAt` 和 `archiveError`；周期校验信息位于 `archiveVerifyStatus`、`archiveVerifyError`、`archiveVerifyCount`、`archiveVerifiedAt` 和 `archiveVerifyNextAt`。`command` 从后台 runner 生成的普通 `.cmd` 文件读取，不进行改写。DONE/STATE/META 提供业务终态；受管 cgroup 或身份已校验的进程组仍有成员时，记录继续保持 `running`。META 同时支持 JSON 和 `key=value`。
 

@@ -149,6 +149,46 @@ test('retention preserves recent completed tasks and every non-completed task st
   ]) assert.ok(store.getSession(taskId), taskId);
 });
 
+test('retention removes expired release-cycle idempotency receipts', () => {
+  const db = getDatabase();
+  const expired = daysBefore(31);
+  db.prepare('INSERT INTO metadata(key, value) VALUES (?, ?), (?, ?)').run(
+    'release-cycle-create:expired', JSON.stringify({ createdAt: expired, response: {} }),
+    'release-cycle-delete:expired', JSON.stringify({ createdAt: expired, response: {} }),
+  );
+
+  const result = store.performTaskRetentionCleanup({
+    owner: 'test:release-receipts',
+    now: NOW,
+    limit: 10,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.deletedReleaseCycleReceipts, 2);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM metadata WHERE key LIKE 'release-cycle-%:expired'").get().count, 0);
+});
+
+test('retention does not remove a staged cleanup path outside managed roots', () => {
+  const db = getDatabase();
+  const outside = path.join(tempDir, 'outside.deleting-invalid');
+  fs.writeFileSync(outside, 'must survive');
+  db.prepare('INSERT INTO metadata(key, value) VALUES (?, ?)').run(
+    'staged-file-cleanup:invalid',
+    JSON.stringify({ taskId: 'invalid', tombstone: outside }),
+  );
+
+  const result = store.performTaskRetentionCleanup({
+    owner: 'test:invalid-staged-path',
+    now: NOW,
+    limit: 10,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(fs.existsSync(outside), true);
+  assert.equal(db.prepare('SELECT 1 FROM metadata WHERE key=?').get('staged-file-cleanup:invalid'), undefined);
+  fs.rmSync(outside, { force: true });
+});
+
 test('retention defers while platform activity is present and retries without deleting early', () => {
   createTask('retention-deferred-expired', 'completed', daysBefore(31));
   createTask('retention-active', 'queued');

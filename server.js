@@ -3,6 +3,7 @@ process.umask(0o077);
 const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
+const net = require('net');
 const path = require('path');
 const { WebSocket, WebSocketServer } = require('ws');
 const {
@@ -152,6 +153,7 @@ const {
   validateSkillBody,
 } = require('./src/validation');
 const { openHlsPlaybackFile } = require('./src/report-media-playback');
+const { requestIdempotencyKey } = require('./src/api-contract');
 
 const PORT = Number(process.env.PORT || 8091);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -200,6 +202,17 @@ const ATTEMPT_OUTPUT_SOCKET_POLL_MS = 250;
 const ATTEMPT_OUTPUT_SOCKET_MAX_BUFFERED_BYTES = 1024 * 1024;
 const ATTEMPT_TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
+const TRUSTED_PROXY_IPS = new Set(
+  String(process.env.CODEX_TRUSTED_PROXY_IPS || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => {
+      const normalized = value.toLowerCase().replace(/^::ffff:/, '');
+      if (!net.isIP(normalized)) throw new Error(`CODEX_TRUSTED_PROXY_IPS contains an invalid IP: ${value}`);
+      return normalized;
+    }),
+);
 const API_RESPONSE_IDLE_GUARD = Symbol('apiResponseIdleGuard');
 let shuttingDown = false;
 let activeApiRequests = 0;
@@ -273,6 +286,10 @@ const MIME_TYPES = {
 function json(res, payload, statusCode = 200) {
   const body = JSON.stringify(payload);
   armApiResponseIdleTimeout(res);
+  res.setHeader('X-API-Version', '1');
+  if (statusCode >= 400) {
+    res.setHeader('X-API-Error-Code', String(payload?.code || `HTTP_${statusCode}`));
+  }
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
@@ -282,6 +299,7 @@ function json(res, payload, statusCode = 200) {
 
 function text(res, payload, statusCode = 200) {
   armApiResponseIdleTimeout(res);
+  res.setHeader('X-API-Version', '1');
   res.writeHead(statusCode, {
     'Content-Type': 'text/plain; charset=utf-8',
     'Cache-Control': 'no-store',
@@ -1217,6 +1235,20 @@ function readBody(req) {
   });
 }
 
+function readOptionalJsonBody(req) {
+  const declaredLength = Number(req.headers['content-length'] || 0);
+  const hasDeclaredBody = declaredLength > 0 || Boolean(req.headers['transfer-encoding']);
+  if (!hasDeclaredBody) return Promise.resolve({});
+  const contentType = String(req.headers['content-type'] || '').toLowerCase();
+  if (!contentType.startsWith('application/json')) {
+    // These operation endpoints historically ignored request bodies. Keep
+    // that compatibility while accepting JSON idempotency bodies.
+    req.resume();
+    return Promise.resolve({});
+  }
+  return readBody(req);
+}
+
 function readBinaryBody(req, maxBytes = MAX_ARCHIVE_BYTES) {
   return new Promise((resolve, reject) => {
     const allowedTypes = new Set(['application/zip', 'application/x-zip-compressed', 'application/octet-stream']);
@@ -1284,11 +1316,13 @@ function routeParams(pattern, pathname) {
   }
 }
 
-function terminalOperationContext(req, requestContext) {
-  const suppliedIdempotencyKey = String(req.headers['idempotency-key'] || '').trim();
-  const idempotencyKey = suppliedIdempotencyKey || String(requestContext.requestId || '').trim();
+function terminalOperationContext(req, requestContext, body = {}) {
+  const idempotencyKey = requestIdempotencyKey({
+    headerValue: req.headers['idempotency-key'],
+    body,
+    fallbackValue: requestContext.operationId,
+  });
   const expectedTaskCreatedAt = String(req.headers['x-task-created-at'] || '').trim();
-  assertStringLength('idempotency-key header', idempotencyKey, TASK_FIELD_LIMITS.idempotencyKey);
   assertStringLength('x-task-created-at header', expectedTaskCreatedAt, 128);
   if (expectedTaskCreatedAt && !Number.isFinite(Date.parse(expectedTaskCreatedAt))) {
     throw Object.assign(new Error('x-task-created-at must be an ISO timestamp'), { statusCode: 400 });
@@ -1319,15 +1353,47 @@ function normalizedRequestHost(value) {
   return first.split(':', 1)[0];
 }
 
+function normalizedRemoteAddress(value) {
+  return String(value || '').trim().toLowerCase().replace(/^::ffff:/, '');
+}
+
+function forwardedHeadersTrusted(req) {
+  const remoteAddress = normalizedRemoteAddress(req?.socket?.remoteAddress);
+  return LOOPBACK_HOSTS.has(remoteAddress) || TRUSTED_PROXY_IPS.has(remoteAddress);
+}
+
 function effectiveRequestHost(req) {
-  const forwarded = String(req?.headers?.['x-forwarded-host'] || '')
-    .split(',', 1)[0].trim();
+  const forwarded = forwardedHeadersTrusted(req)
+    ? String(req?.headers?.['x-forwarded-host'] || '').split(',', 1)[0].trim()
+    : '';
   return forwarded || String(req?.headers?.host || '').trim();
+}
+
+function normalizedOriginHost(value, protocol = '') {
+  const raw = String(value || '').trim().toLowerCase();
+  let hostname = raw;
+  let port = '';
+  if (raw.startsWith('[')) {
+    const closingBracket = raw.indexOf(']');
+    if (closingBracket < 0) return '';
+    hostname = raw.slice(1, closingBracket);
+    port = raw.slice(closingBracket + 1).replace(/^:/, '');
+  } else {
+    const separator = raw.lastIndexOf(':');
+    if (separator > -1 && raw.indexOf(':') === separator && /^\d+$/.test(raw.slice(separator + 1))) {
+      hostname = raw.slice(0, separator);
+      port = raw.slice(separator + 1);
+    }
+  }
+  const defaultPort = protocol === 'https:' ? '443' : protocol === 'http:' ? '80' : '';
+  return `${hostname}:${port || defaultPort}`;
 }
 
 function originMatchesRequestHost(req, origin) {
   try {
-    return new URL(origin).host.toLowerCase() === effectiveRequestHost(req).toLowerCase();
+    const parsed = new URL(origin);
+    return normalizedOriginHost(parsed.host, parsed.protocol)
+      === normalizedOriginHost(effectiveRequestHost(req), parsed.protocol);
   } catch {
     return false;
   }
@@ -1393,9 +1459,9 @@ function authSessionFromRequest(req) {
 
 function requestUsesSecureTransport(req) {
   if (req?.socket?.encrypted) return true;
+  if (!forwardedHeadersTrusted(req)) return false;
   const forwardedHost = String(req?.headers?.['x-forwarded-host'] || '').trim();
-  const forwardedProto = String(req?.headers?.['x-forwarded-proto'] || '')
-    .split(',', 1)[0].trim().toLowerCase();
+  const forwardedProto = String(req?.headers?.['x-forwarded-proto'] || '').split(',', 1)[0].trim().toLowerCase();
   return Boolean(forwardedHost && forwardedProto === 'https');
 }
 
@@ -1877,6 +1943,7 @@ function sendAttemptOutputControl(ws, payload) {
 function streamAttemptOutputWebSocket(ws, context) {
   let offset = context.offset;
   let timer = null;
+  let idleTimer = null;
   let closed = false;
   let pumping = false;
   let lastStatus = '';
@@ -1889,10 +1956,26 @@ function streamAttemptOutputWebSocket(ws, context) {
     released = true;
     context.releaseLogStream();
   };
+  const resetIdleTimeout = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (closed) return;
+      logStreamIdleTimeoutCount += 1;
+      ws.close(1000, 'Log stream idle timeout');
+      cleanup();
+    }, LOG_STREAM_IDLE_TIMEOUT_MS);
+    idleTimer.unref?.();
+  };
+  const sendControl = (payload) => {
+    const sent = sendAttemptOutputControl(ws, payload);
+    if (sent) resetIdleTimeout();
+    return sent;
+  };
   const cleanup = () => {
     if (closed) return;
     closed = true;
     clearTimeout(timer);
+    clearTimeout(idleTimer);
     release();
   };
   const schedule = (pump, delay = ATTEMPT_OUTPUT_SOCKET_POLL_MS) => {
@@ -1901,7 +1984,7 @@ function streamAttemptOutputWebSocket(ws, context) {
   };
   const fail = (error) => {
     if (closed) return;
-    sendAttemptOutputControl(ws, { type: 'error', message: error.message || 'Attempt output stream failed' });
+    sendControl({ type: 'error', message: error.message || 'Attempt output stream failed' });
     ws.close(1011, 'Attempt output stream failed');
     cleanup();
   };
@@ -1919,16 +2002,16 @@ function streamAttemptOutputWebSocket(ws, context) {
       if (chunk.offset < offset) {
         offset = chunk.offset;
         terminalStablePolls = 0;
-        sendAttemptOutputControl(ws, {
+        sendControl({
           type: 'reset', offset, fileSize: chunk.fileSize, status: output.status,
         });
       }
       if (lastStatus === '') {
-        sendAttemptOutputControl(ws, {
+        sendControl({
           type: 'ready', offset, fileSize: chunk.fileSize, status: output.status,
         });
       } else if (output.status !== lastStatus || chunk.fileSize !== lastFileSize) {
-        sendAttemptOutputControl(ws, {
+        sendControl({
           type: 'status', offset, fileSize: chunk.fileSize, status: output.status,
         });
       }
@@ -1937,6 +2020,7 @@ function streamAttemptOutputWebSocket(ws, context) {
       if (chunk.bytes.length > 0) {
         offset += chunk.bytes.length;
         terminalStablePolls = 0;
+        resetIdleTimeout();
         ws.send(chunk.bytes, { binary: true }, (error) => {
           if (error) fail(error);
         });
@@ -1947,7 +2031,7 @@ function streamAttemptOutputWebSocket(ws, context) {
       if (ATTEMPT_TERMINAL_STATUSES.has(output.status)) {
         terminalStablePolls += 1;
         if (terminalStablePolls >= 2) {
-          sendAttemptOutputControl(ws, {
+          sendControl({
             type: 'end', offset, fileSize: chunk.fileSize, status: output.status,
           });
           ws.close(1000, 'Attempt completed');
@@ -1968,12 +2052,14 @@ function streamAttemptOutputWebSocket(ws, context) {
   ws.once('close', cleanup);
   ws.once('error', cleanup);
   ws.on('message', () => ws.close(1008, 'Read-only output stream'));
+  resetIdleTimeout();
   pump();
 }
 
 function streamExternalAttemptOutputWebSocket(ws, context) {
   let offset = context.offset;
   let timer = null;
+  let idleTimer = null;
   let closed = false;
   let pumping = false;
   let fileHandle = null;
@@ -1987,10 +2073,26 @@ function streamExternalAttemptOutputWebSocket(ws, context) {
     released = true;
     context.releaseLogStream();
   };
+  const resetIdleTimeout = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (closed) return;
+      logStreamIdleTimeoutCount += 1;
+      ws.close(1000, 'Log stream idle timeout');
+      cleanup();
+    }, LOG_STREAM_IDLE_TIMEOUT_MS);
+    idleTimer.unref?.();
+  };
+  const sendControl = (payload) => {
+    const sent = sendAttemptOutputControl(ws, payload);
+    if (sent) resetIdleTimeout();
+    return sent;
+  };
   const cleanup = () => {
     if (closed) return;
     closed = true;
     clearTimeout(timer);
+    clearTimeout(idleTimer);
     const handle = fileHandle;
     fileHandle = null;
     handle?.close().catch(() => {});
@@ -2002,7 +2104,7 @@ function streamExternalAttemptOutputWebSocket(ws, context) {
   };
   const fail = (error) => {
     if (closed) return;
-    sendAttemptOutputControl(ws, { type: 'error', message: error.message || 'Task output stream failed' });
+    sendControl({ type: 'error', message: error.message || 'Task output stream failed' });
     ws.close(1011, 'Task output stream failed');
     cleanup();
   };
@@ -2022,12 +2124,12 @@ function streamExternalAttemptOutputWebSocket(ws, context) {
       if (offset > fileSize) {
         offset = 0;
         terminalStablePolls = 0;
-        sendAttemptOutputControl(ws, { type: 'reset', offset, fileSize, status: attempt.status });
+        sendControl({ type: 'reset', offset, fileSize, status: attempt.status });
       }
       if (lastStatus === '') {
-        sendAttemptOutputControl(ws, { type: 'ready', offset, fileSize, status: attempt.status });
+        sendControl({ type: 'ready', offset, fileSize, status: attempt.status });
       } else if (attempt.status !== lastStatus || fileSize !== lastFileSize) {
-        sendAttemptOutputControl(ws, { type: 'status', offset, fileSize, status: attempt.status });
+        sendControl({ type: 'status', offset, fileSize, status: attempt.status });
       }
       lastStatus = attempt.status;
       lastFileSize = fileSize;
@@ -2038,6 +2140,7 @@ function streamExternalAttemptOutputWebSocket(ws, context) {
         if (bytesRead > 0) {
           offset += bytesRead;
           terminalStablePolls = 0;
+          resetIdleTimeout();
           ws.send(buffer.subarray(0, bytesRead), { binary: true }, (error) => {
             if (error) fail(error);
           });
@@ -2049,7 +2152,7 @@ function streamExternalAttemptOutputWebSocket(ws, context) {
       if (['succeeded', 'failed', 'lost', 'cancelled'].includes(attempt.status)) {
         terminalStablePolls += 1;
         if (terminalStablePolls >= 2) {
-          sendAttemptOutputControl(ws, { type: 'end', offset, fileSize, status: attempt.status });
+          sendControl({ type: 'end', offset, fileSize, status: attempt.status });
           ws.close(1000, 'Background task completed');
           cleanup();
           return;
@@ -2076,6 +2179,7 @@ function streamExternalAttemptOutputWebSocket(ws, context) {
         return;
       }
       fileHandle = opened.fileHandle;
+      resetIdleTimeout();
       pump();
     })
     .catch(fail);
@@ -2087,6 +2191,7 @@ const server = http.createServer(async (req, res) => {
     .trim()
     .slice(0, 128);
   const requestId = suppliedRequestId || crypto.randomUUID();
+  const operationId = crypto.randomUUID();
   res.setHeader('X-Request-Id', requestId);
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
@@ -2102,6 +2207,7 @@ const server = http.createServer(async (req, res) => {
   }
   const pathname = url.pathname;
   const isApiRoute = pathname.startsWith('/api/');
+  if (isApiRoute) res.setHeader('X-API-Version', '1');
   const isAuthSessionProbe = pathname === '/api/auth/session' && req.method === 'GET';
   if (isApiRoute && !isAuthSessionProbe && !authorize(req, res, pathname, url.searchParams)) return;
   if (isApiRoute && !sameOrigin(req, pathname, url.searchParams)) {
@@ -2117,7 +2223,7 @@ const server = http.createServer(async (req, res) => {
   }
   let finishApiRequest = null;
   try {
-    const requestContext = { actor: OPERATOR_ACTOR, requestId };
+    const requestContext = { actor: OPERATOR_ACTOR, requestId, operationId };
     if (pathname.startsWith('/api/') && !isDiagnosticApiRequest(req.method, pathname)) {
       finishApiRequest = acquireApiRequestSlot(res, {
         responseIdleTimeout: !isLogDownloadRequest(req.method, pathname),
@@ -2404,8 +2510,13 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/release-cycles' && req.method === 'POST') {
       const body = await readBody(req);
       const { idempotencyKey, ...cycle } = body || {};
+      const operationKey = requestIdempotencyKey({
+        headerValue: req.headers['idempotency-key'],
+        body,
+        fallbackValue: requestContext.operationId,
+      });
       json(res, createReleaseCycle(cycle, {
-        ...requestContext, idempotencyKey: req.headers['idempotency-key'] || idempotencyKey || '',
+        ...requestContext, idempotencyKey: operationKey,
       }), 201);
       return;
     }
@@ -2434,9 +2545,14 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (params && req.method === 'DELETE') {
+        const body = await readOptionalJsonBody(req);
         const result = deleteReleaseCycle(params[0], {
           ...requestContext,
-          idempotencyKey: req.headers['idempotency-key'] || '',
+          idempotencyKey: requestIdempotencyKey({
+            headerValue: req.headers['idempotency-key'],
+            body,
+            fallbackValue: requestContext.operationId,
+          }),
           expectedCreatedAt: req.headers['x-release-cycle-created-at'] || '',
         });
         json(res, result, result.deleted ? 200 : 202);
@@ -2473,7 +2589,11 @@ const server = http.createServer(async (req, res) => {
       if (params && req.method === 'POST') {
         const body = await readBody(req);
         const { idempotencyKey, ...taskBody } = body || {};
-        const key = req.headers['idempotency-key'] || idempotencyKey || '';
+        const key = requestIdempotencyKey({
+          headerValue: req.headers['idempotency-key'],
+          body,
+          fallbackValue: requestContext.operationId,
+        });
         json(res, createReleaseCycleTask(params[0], taskBody, {
           ...requestContext,
           idempotencyKey: key,
@@ -2516,8 +2636,11 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       validateTaskBody(taskBody);
-      assertStringLength('idempotencyKey', idempotencyKey, TASK_FIELD_LIMITS.idempotencyKey);
-      assertStringLength('idempotency-key header', req.headers['idempotency-key'], TASK_FIELD_LIMITS.idempotencyKey);
+      const operationKey = requestIdempotencyKey({
+        headerValue: req.headers['idempotency-key'],
+        body,
+        fallbackValue: requestContext.operationId,
+      });
       const taskId = canonicalTaskId(taskBody.id);
       const existing = getSession(taskId);
       if (existing) assertInteractiveTerminalIdle(taskId, 'running');
@@ -2533,12 +2656,11 @@ const server = http.createServer(async (req, res) => {
         }, 503);
         return;
       }
-      const key = req.headers['idempotency-key'] || idempotencyKey || requestId;
       const outcome = createAndQueueSession(
         taskId,
         taskBody,
         taskBody.objective,
-        key,
+        operationKey,
         requestContext,
       );
       json(res, outcome.session, outcome.created ? 202 : 200);
@@ -2584,8 +2706,9 @@ const server = http.createServer(async (req, res) => {
           return;
         }
         if (req.method === 'DELETE') {
+          const body = await readOptionalJsonBody(req);
           assertInteractiveTerminalIdle(id, 'deleting');
-          const deleted = deleteSession(id, terminalOperationContext(req, requestContext));
+          const deleted = deleteSession(id, terminalOperationContext(req, requestContext, body));
           json(res, { ok: deleted }, deleted ? 200 : 404);
           return;
         }
@@ -2631,8 +2754,11 @@ const server = http.createServer(async (req, res) => {
           throw Object.assign(new Error('Run body must contain string input and idempotencyKey fields'), { statusCode: 400 });
         }
         assertStringLength('input', body.input, TASK_FIELD_LIMITS.input);
-        assertStringLength('idempotencyKey', body.idempotencyKey, TASK_FIELD_LIMITS.idempotencyKey);
-        assertStringLength('idempotency-key header', req.headers['idempotency-key'], TASK_FIELD_LIMITS.idempotencyKey);
+        const operationKey = requestIdempotencyKey({
+          headerValue: req.headers['idempotency-key'],
+          body,
+          fallbackValue: requestContext.operationId,
+        });
         const runtime = getRuntimeStatus();
         const maintenanceOnly = Boolean(maintenance)
           && runtime.degradedReasons.length === 1
@@ -2640,7 +2766,7 @@ const server = http.createServer(async (req, res) => {
         const session = queueSessionRun(
           id,
           body.input || '',
-          req.headers['idempotency-key'] || body.idempotencyKey || requestId,
+          operationKey,
           requestContext,
           { allowEnqueue: runtime.ready || maintenanceOnly },
         );
@@ -2659,7 +2785,8 @@ const server = http.createServer(async (req, res) => {
       const params = routeParams(/^\/api\/sessions\/([^/]+)\/stop$/, pathname);
       if (params && req.method === 'POST') {
         const id = canonicalTaskId(params[0]);
-        const operationContext = terminalOperationContext(req, requestContext);
+        const body = await readOptionalJsonBody(req);
+        const operationContext = terminalOperationContext(req, requestContext, body);
         const plan = prepareSessionStop(id, operationContext);
         if (!plan.replayed) {
           await codexTerminalManager.terminateAndWait(id, 'task_stopped', plan.taskCreatedAt);
@@ -2678,7 +2805,8 @@ const server = http.createServer(async (req, res) => {
       const params = routeParams(/^\/api\/sessions\/([^/]+)\/complete$/, pathname);
       if (params && req.method === 'POST') {
         const id = canonicalTaskId(params[0]);
-        const operationContext = terminalOperationContext(req, requestContext);
+        const body = await readOptionalJsonBody(req);
+        const operationContext = terminalOperationContext(req, requestContext, body);
         const completed = await codexTerminalManager.withTaskCompletion(id, async () => {
           let plan = prepareSessionCompletion(id, operationContext);
           if (plan.replayed) return plan.session;
@@ -2705,9 +2833,10 @@ const server = http.createServer(async (req, res) => {
       if (params && req.method === 'POST') {
         const id = canonicalTaskId(params[0]);
         assertInteractiveTerminalIdle(id, 'resetting');
+        const body = await readOptionalJsonBody(req);
         json(res, resetSession(
           id,
-          terminalOperationContext(req, requestContext),
+          terminalOperationContext(req, requestContext, body),
         ));
         return;
       }
@@ -2716,6 +2845,7 @@ const server = http.createServer(async (req, res) => {
       const params = routeParams(/^\/api\/sessions\/([^/]+)\/restore$/, pathname);
       if (params && req.method === 'POST') {
         const id = canonicalTaskId(params[0]);
+        const body = await readOptionalJsonBody(req);
         const session = getSession(id);
         if (!session) {
           json(res, { error: 'Not found' }, 404);
@@ -2730,7 +2860,7 @@ const server = http.createServer(async (req, res) => {
         }
         json(res, restoreCompletedSession(
           id,
-          terminalOperationContext(req, requestContext),
+          terminalOperationContext(req, requestContext, body),
         ));
         return;
       }

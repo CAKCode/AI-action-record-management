@@ -165,6 +165,7 @@ Shell 中遗留的任务级路径继承给新服务。每个 Task 仍会在
 | --- | --- | --- |
 | `HOST` | `127.0.0.1` | HTTP 监听地址 |
 | `PORT` | `8091` | HTTP 监听端口 |
+| `CODEX_TRUSTED_PROXY_IPS` | 未配置 | 逗号分隔的可信反向代理 IP；仅这些代理（以及本机回环代理）可提供 `X-Forwarded-Host` / `X-Forwarded-Proto` |
 | `CODEX_DESK_DATA_DIR` | `./data` | SQLite、原始日志和迁移来源 |
 | `CODEX_DESK_BACKUP_DIR` | `<data>/backups` | 原子数据库备份包 |
 | `CODEX_DB_BACKUP_INTERVAL_HOURS` | `24` | 自动数据库备份间隔；`0` 表示关闭自动调度 |

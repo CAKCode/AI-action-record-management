@@ -262,6 +262,7 @@ node --test test/skill-report-artifact-http.test.js test/frontend-performance.te
 | `WORKSPACE_CODEX_SKILLS_DIR` | `<项目>/.codex/skills` | 项目级 Codex Skill 来源 |
 | `CODEX_DESK_AUTH_USER` | 空 | HTTP 基础认证用户名 |
 | `CODEX_DESK_AUTH_PASSWORD` | 空 | HTTP 基础认证密码 |
+| `CODEX_TRUSTED_PROXY_IPS` | 空 | 逗号分隔的可信反向代理 IP；仅这些来源和本机回环代理可提供转发 Host/Proto |
 
 监听非回环地址时，用户名和密码必须同时配置，否则服务拒绝启动。仍建议在外层配置 TLS 和网络访问控制。
 
@@ -502,7 +503,7 @@ outbox 固定为普通文件 `0600`，采用临时文件、`fsync`、重命名�
 本工具面向受控环境内的复盘审计，任务指令、完整命令、命令输出和原始运行事件不会做字段级脱敏。这意味着 HTTP 查询、SQLite 备份和运维快照都可能包含高敏感业务内容。
 
 - 非回环部署必须启用应用鉴权，并在外层使用 TLS 和网络访问控制。
-- 配置 `CODEX_DESK_AUTH_USER` 和 `CODEX_DESK_AUTH_PASSWORD` 后，所有静态资源均受同一认证保护；未登录的 `/` 只返回 `401` JSON，不返回 HTML 元素。浏览器首次访问依赖 `WWW-Authenticate` 完成 Basic Auth，反向代理必须透传 `Authorization`、`Cookie` 和原始 `Host`（或可信的 `X-Forwarded-Host`），否则登录后写请求和 WebSocket 可能被判定为跨域。
+- 配置 `CODEX_DESK_AUTH_USER` 和 `CODEX_DESK_AUTH_PASSWORD` 后，所有静态资源均受同一认证保护；未登录的 `/` 只返回 `401` JSON，不返回 HTML 元素。浏览器首次访问依赖 `WWW-Authenticate` 完成 Basic Auth，反向代理必须透传 `Authorization`、`Cookie` 和原始 `Host`（或来自回环/`CODEX_TRUSTED_PROXY_IPS` 的可信 `X-Forwarded-Host`），否则登录后写请求和 WebSocket 可能被判定为跨域。代理 IP 未配置时，非回环来源的转发头会被忽略。
 - 仅向复盘人员授予页面、API、数据目录和备份读取权限。
 - 不要把数据库、接口响应或页面截图直接投递到公共群、工单或普通日志平台。
 - 访问凭据、备份介质和审计数据应分别授权，并设置与业务要求一致的保留期限。

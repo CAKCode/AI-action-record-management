@@ -4,6 +4,7 @@ const path = require('path');
 const {
   ROOT_DIR,
   DATA_DIR,
+  BACKUP_DIR,
   RUNTIME_DIR,
   SKILLS_DIR,
   SESSIONS_DIR,
@@ -1008,7 +1009,7 @@ function reconcileStagedTaskFiles(db) {
       label: 'Staged task storage root',
     });
     for (const entry of fs.readdirSync(parent, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory() && !entry.isFile()) continue;
       const match = entry.name.match(/^([a-z0-9][a-z0-9_-]{0,63})\.deleting-(?:([0-9a-f]{16})-)?[0-9a-f-]+$/i);
       if (!match) continue;
       const taskId = match[1].toLowerCase();
@@ -2788,6 +2789,7 @@ function taskRetentionStatus(now = new Date()) {
     lastDeletedAuditEvents: Number(state.lastDeletedAuditEvents || 0),
     lastDeletedOperationReceipts: Number(state.lastDeletedOperationReceipts || 0),
     lastDeletedCleanupJobs: Number(state.lastDeletedCleanupJobs || 0),
+    lastDeletedReleaseCycleReceipts: Number(state.lastDeletedReleaseCycleReceipts || 0),
   };
 }
 
@@ -2860,6 +2862,18 @@ function purgeCompletedTaskGeneration(db, candidate, cutoff, maintenanceOwner) {
 }
 
 function cleanupExpiredDetachedRecords(db, cutoff) {
+  retryStagedFileCleanup(db);
+  const releaseReceiptRows = db.prepare(`
+    SELECT key, value FROM metadata
+    WHERE key LIKE 'release-cycle-create:%' OR key LIKE 'release-cycle-delete:%'
+  `).all();
+  const releaseReceiptKeys = releaseReceiptRows.filter((row) => {
+    const value = parseJson(row.value, null);
+    const createdAt = Date.parse(String(value?.createdAt || ''));
+    return Number.isFinite(createdAt) && createdAt <= Date.parse(cutoff);
+  }).map((row) => row.key);
+  const deleteReleaseReceipt = db.prepare('DELETE FROM metadata WHERE key=?');
+  for (const key of releaseReceiptKeys) deleteReleaseReceipt.run(key);
   const deletedOperationReceipts = db.prepare(`
     DELETE FROM session_operation_receipts
     WHERE created_at<=? AND NOT EXISTS (
@@ -2878,7 +2892,12 @@ function cleanupExpiredDetachedRecords(db, cutoff) {
     DELETE FROM bridge_cleanup_jobs
     WHERE status='completed' AND completed_at<>'' AND completed_at<=?
   `).run(cutoff).changes;
-  return { deletedAuditEvents, deletedOperationReceipts, deletedCleanupJobs };
+  return {
+    deletedAuditEvents,
+    deletedOperationReceipts,
+    deletedCleanupJobs,
+    deletedReleaseCycleReceipts: releaseReceiptKeys.length,
+  };
 }
 
 function retentionWorkCounts(db, cutoff) {
@@ -2906,6 +2925,16 @@ function retentionWorkCounts(db, cutoff) {
     completedCleanupJobs: scalar(`
       SELECT COUNT(*) AS count FROM bridge_cleanup_jobs
       WHERE status='completed' AND completed_at<>'' AND completed_at<=?
+    `),
+    stagedFileCleanup: Number(db.prepare(`
+      SELECT COUNT(*) AS count FROM metadata
+      WHERE key LIKE '${STAGED_FILE_CLEANUP_KEY_PREFIX}%'
+    `).get().count),
+    releaseCycleReceipts: scalar(`
+      SELECT COUNT(*) AS count FROM metadata
+      WHERE (key LIKE 'release-cycle-create:%' OR key LIKE 'release-cycle-delete:%')
+        AND json_valid(value)=1
+        AND json_extract(value, '$.createdAt') <= ?
     `),
   };
 }
@@ -2943,6 +2972,7 @@ function performTaskRetentionCleanup(options = {}) {
         lastDeletedAuditEvents: 0,
         lastDeletedOperationReceipts: 0,
         lastDeletedCleanupJobs: 0,
+        lastDeletedReleaseCycleReceipts: 0,
       });
     }).immediate();
     return {
@@ -2956,6 +2986,7 @@ function performTaskRetentionCleanup(options = {}) {
       deletedAuditEvents: 0,
       deletedOperationReceipts: 0,
       deletedCleanupJobs: 0,
+      deletedReleaseCycleReceipts: 0,
     };
   }
 
@@ -2977,7 +3008,12 @@ function performTaskRetentionCleanup(options = {}) {
   let purgedTasks = 0;
   let failedTasks = 0;
   let lastFailureCode = '';
-  let detached = { deletedAuditEvents: 0, deletedOperationReceipts: 0, deletedCleanupJobs: 0 };
+  let detached = {
+    deletedAuditEvents: 0,
+    deletedOperationReceipts: 0,
+    deletedCleanupJobs: 0,
+    deletedReleaseCycleReceipts: 0,
+  };
   let releaseConfirmed = false;
   try {
     const candidates = db.prepare(`
@@ -3018,6 +3054,7 @@ function performTaskRetentionCleanup(options = {}) {
         lastDeletedAuditEvents: detached.deletedAuditEvents,
         lastDeletedOperationReceipts: detached.deletedOperationReceipts,
         lastDeletedCleanupJobs: detached.deletedCleanupJobs,
+        lastDeletedReleaseCycleReceipts: detached.deletedReleaseCycleReceipts,
       });
     }).immediate();
   } finally {
@@ -3656,17 +3693,77 @@ function restoreStagedTaskFiles(staged) {
   }
 }
 
+const STAGED_FILE_CLEANUP_KEY_PREFIX = 'staged-file-cleanup:';
+
+function queueStagedFileCleanup(taskId, tombstone, error) {
+  const db = ensureStorage();
+  const key = `${STAGED_FILE_CLEANUP_KEY_PREFIX}${hashContent(String(tombstone))}`;
+  db.prepare(`
+    INSERT INTO metadata(key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+  `).run(key, JSON.stringify({
+    taskId: String(taskId || ''),
+    tombstone: String(tombstone || ''),
+    queuedAt: nowIso(),
+    lastError: String(error?.message || error || ''),
+  }));
+}
+
+function retryStagedFileCleanup(db) {
+  const managedRoots = [SESSIONS_DIR, SKILL_SNAPSHOTS_DIR, TASK_SESSION_ROOT]
+    .filter(Boolean)
+    .map((root) => path.resolve(root));
+  const stagedName = /^([a-z0-9][a-z0-9_-]{0,63})\.deleting-(?:([0-9a-f]{16})-)?[0-9a-f-]+$/i;
+  const rows = db.prepare(`
+    SELECT key, value FROM metadata WHERE key LIKE '${STAGED_FILE_CLEANUP_KEY_PREFIX}%'
+  `).all();
+  for (const row of rows) {
+    const value = parseJson(row.value, null);
+    const tombstone = String(value?.tombstone || '');
+    const tombstonePath = path.resolve(tombstone);
+    const root = managedRoots.find((candidate) => pathContains(candidate, tombstonePath));
+    let parentIsManaged = false;
+    if (root && stagedName.test(path.basename(tombstonePath))) {
+      try {
+        parentIsManaged = pathContains(
+          fs.realpathSync(root),
+          fs.realpathSync(path.dirname(tombstonePath)),
+        );
+      } catch {
+        parentIsManaged = false;
+      }
+    }
+    if (!tombstone || !root || !parentIsManaged || !stagedName.test(path.basename(tombstonePath))) {
+      db.prepare('DELETE FROM metadata WHERE key=?').run(row.key);
+      continue;
+    }
+    try {
+      if (pathEntryExists(tombstonePath)) removeTree(tombstonePath);
+      if (!pathEntryExists(tombstonePath)) db.prepare('DELETE FROM metadata WHERE key=?').run(row.key);
+    } catch {
+      // Keep the queue entry for the next retention sweep.
+    }
+  }
+}
+
 function discardStagedTaskFiles(staged, taskId) {
   for (const { tombstone } of staged) {
     try {
       removeTree(tombstone);
     } catch (error) {
       if (!pathEntryExists(tombstone)) continue;
-      appendAuditEvent({
-        scope: 'storage', taskId, entityType: 'session', entityId: taskId,
-        kind: 'session.cleanup.failed', level: 'error',
-        message: `Session metadata was deleted but staged files still need cleanup: ${error.message}`,
-      });
+      try {
+        appendAuditEvent({
+          scope: 'storage', taskId, entityType: 'session', entityId: taskId,
+          kind: 'session.cleanup.failed', level: 'error',
+          message: `Session metadata was deleted but staged files still need cleanup: ${error.message}`,
+        });
+      } catch (auditError) {
+        console.error(`[storage] staged file cleanup audit failed: ${auditError.message}`);
+      }
+      try { queueStagedFileCleanup(taskId, tombstone, error); } catch (queueError) {
+        console.error(`[storage] failed to queue staged file cleanup: ${queueError.message}`);
+      }
     }
   }
 }
@@ -3985,19 +4082,12 @@ function registeredSkillReportArtifacts(db, row, report) {
       if (external.status === 'running' || artifact.kind !== 'pytest-html'
         || publishedExternalAttemptArtifact(db, row.task_id, externalAttemptId, artifact)) return registered;
       try {
-        const stat = fs.lstatSync(String(artifact.path || ''));
-        if (!stat.isFile() || stat.isSymbolicLink() || stat.size === 0) {
+        const preview = readTrackedArtifactPreview(String(artifact.path || ''), 64 * 1024);
+        if (!preview || preview.size === 0) {
           return { ...registered, available: false, availabilityReason: 'empty_or_missing' };
         }
-        const fd = fs.openSync(artifact.path, 'r');
-        try {
-          const preview = Buffer.alloc(Math.min(Number(stat.size), 64 * 1024));
-          fs.readSync(fd, preview, 0, preview.length, 0);
-          if (!pytestHtmlHasReportDocument(preview)) {
-            return { ...registered, available: false, availabilityReason: 'empty_or_placeholder' };
-          }
-        } finally {
-          fs.closeSync(fd);
+        if (!pytestHtmlHasReportDocument(preview.content)) {
+          return { ...registered, available: false, availabilityReason: 'empty_or_placeholder' };
         }
       } catch {
         return { ...registered, available: false, availabilityReason: 'missing_or_unreadable' };
@@ -4102,7 +4192,7 @@ function resolvedRegularDirectory(directory, label) {
 }
 
 function assertArtifactWorkingDirectory(workingDirectory) {
-  const forbiddenDirectories = [ROOT_DIR, DATA_DIR, RUNTIME_DIR].map((directory) => {
+  const forbiddenDirectories = [ROOT_DIR, DATA_DIR, BACKUP_DIR, RUNTIME_DIR].map((directory) => {
     try { return fs.realpathSync(directory); } catch { return path.resolve(directory); }
   });
   if (forbiddenDirectories.some((directory) => (
@@ -4110,6 +4200,36 @@ function assertArtifactWorkingDirectory(workingDirectory) {
   ))) {
     throw statusError('Artifact execution working directory overlaps platform storage', 409);
   }
+}
+
+function assertExternalTrackedPathSafe(targetPath, label = 'Tracked path') {
+  const target = path.resolve(String(targetPath || ''));
+  const forbiddenDirectories = [ROOT_DIR, DATA_DIR, BACKUP_DIR, RUNTIME_DIR].map((directory) => {
+    try { return fs.realpathSync(directory); } catch { return path.resolve(directory); }
+  });
+  if (forbiddenDirectories.some((directory) => pathContains(directory, target))) {
+    throw statusError(`${label} must not point into platform storage`, 409);
+  }
+  // A legacy caller may omit workingDirectory, so the path itself can be
+  // outside the declared task root. Resolve existing ancestors as well to
+  // reject a symlink that redirects a missing evidence file into storage.
+  let probe = target;
+  while (true) {
+    try {
+      const resolved = fs.realpathSync(probe);
+      if (forbiddenDirectories.some((directory) => pathContains(directory, resolved))) {
+        throw statusError(`${label} must not point into platform storage`, 409);
+      }
+      break;
+    } catch (error) {
+      if (error.statusCode) throw error;
+      if (error.code !== 'ENOENT') throw error;
+      const parent = path.dirname(probe);
+      if (parent === probe) break;
+      probe = parent;
+    }
+  }
+  return target;
 }
 
 function skillReportExternalAttempt(db, taskId, report) {
@@ -8214,13 +8334,66 @@ function normalizeTrackedPath(value, field, workingDirectory = '') {
   return path.isAbsolute(input) ? path.normalize(input) : path.resolve(workingDirectory || '.', input);
 }
 
+function assertTrackedPathInside(rootDirectory, targetPath, label = 'Tracked path') {
+  const root = path.resolve(String(rootDirectory || ''));
+  const target = path.resolve(String(targetPath || ''));
+  if (!pathContains(root, target)) {
+    throw statusError(`${label} must remain inside the declared working directory`, 400);
+  }
+  // Check the root and its existing ancestors as well. This matters when a
+  // launcher registers a checkout before creating it: a missing path can
+  // otherwise later appear behind a symlink into platform storage.
+  let ancestor = root;
+  while (true) {
+    try {
+      if (fs.lstatSync(ancestor).isSymbolicLink()) {
+        throw statusError(`${label} must not traverse symbolic links`, 400);
+      }
+    } catch (error) {
+      if (error.statusCode) throw error;
+      if (error.code !== 'ENOENT') throw error;
+    }
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) break;
+    ancestor = parent;
+  }
+  let current = root;
+  const relative = path.relative(root, target);
+  for (const segment of relative ? relative.split(path.sep) : []) {
+    current = path.join(current, segment);
+    let stat;
+    try {
+      stat = fs.lstatSync(current);
+    } catch (error) {
+      if (error.code === 'ENOENT') break;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) {
+      throw statusError(`${label} must not traverse symbolic links`, 400);
+    }
+    if (!stat.isDirectory() && current !== target) {
+      throw statusError(`${label} has a non-directory ancestor`, 400);
+    }
+  }
+  return target;
+}
+
+function normalizeTrackedPathInside(value, field, workingDirectory) {
+  return assertTrackedPathInside(
+    workingDirectory,
+    normalizeTrackedPath(value, field, workingDirectory),
+    field,
+  );
+}
+
 function normalizeExternalArtifactDeclarations(value, workingDirectory) {
   const artifacts = normalizeArtifactDeclarations(value || [], 'external artifacts');
   const root = path.resolve(workingDirectory || '.');
   for (const artifact of artifacts) {
-    if (!pathContains(root, artifact.path)) {
-      throw statusError('External artifact paths must remain inside the execution working directory', 400);
-    }
+    assertExternalTrackedPathSafe(
+      assertTrackedPathInside(root, artifact.path, 'External artifact path'),
+      'External artifact path',
+    );
   }
   return artifacts;
 }
@@ -8497,15 +8670,7 @@ function backgroundCommandEvidence(logPath) {
   const normalizedLogPath = String(logPath || '');
   const basePath = normalizedLogPath.endsWith('.log') ? normalizedLogPath.slice(0, -4) : normalizedLogPath;
   const commandPath = `${basePath}.cmd`;
-  try {
-    const stat = fs.lstatSync(commandPath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) {
-      return { commandPath, command: '' };
-    }
-    return { commandPath, command: fs.readFileSync(commandPath, 'utf8') };
-  } catch {
-    return { commandPath, command: '' };
-  }
+  return { commandPath, command: readSmallTrackedArtifact(commandPath, 64 * 1024).content };
 }
 
 function rowToExternalAttempt(row) {
@@ -8734,19 +8899,27 @@ async function openExternalAttemptLogFile(taskId, attemptId, options = {}) {
   if (row.archived_log_sha256) {
     throw statusError('Preserved background log is awaiting integrity repair', 409);
   }
+  let opened = null;
   try {
-    const opened = await openRegularFileForRead(row.log_path, {
+    opened = await openRegularFileForRead(row.log_path, {
       label: 'Tracked log',
       missingCode: 'TRACKED_LOG_MISSING',
       signal: options.signal,
     });
+    const openedPath = await fs.promises.realpath(`/proc/self/fd/${opened.handle.fd}`);
+    if (openedPath !== path.resolve(row.log_path)) {
+      await opened.handle.close();
+      throw statusError('Tracked log must not traverse symbolic links', 409);
+    }
     return { fileHandle: opened.handle, filePath: row.log_path, bytes: opened.bytes };
   } catch (error) {
+    try { await opened?.handle.close(); } catch {}
     if (error?.code === 'ARCHIVE_READ_ABORTED') {
       error.statusCode = 499;
       error.expected = true;
       throw error;
     }
+    if (Number(error?.statusCode) === 409) throw error;
     return null;
   }
 }
@@ -8987,10 +9160,28 @@ function registerExternalAttempt(data, context = {}) {
     if (originTurn && originAttempt && originAttempt.turn_id !== originTurn.id) {
       throw statusError('The background execution attempt does not belong to the supplied turn', 409);
     }
-    const workingDirectory = String(data.workingDirectory || task.working_dir || '.');
+    const hasExplicitWorkingDirectory = data.workingDirectory != null
+      && String(data.workingDirectory).trim() !== '';
+    const requestedWorkingDirectory = String(
+      hasExplicitWorkingDirectory ? data.workingDirectory : (task.working_dir || '.'),
+    );
+    let workingDirectory;
+    try {
+      workingDirectory = resolvedRegularDirectory(
+        requestedWorkingDirectory,
+        'External execution working directory',
+      );
+    } catch (error) {
+      // Preserve the registration contract for launchers that create their
+      // checkout immediately after registration. Existing directories still
+      // go through realpath and symlink checks above.
+      if (error.statusCode !== 409 || !/does not exist$/.test(error.message)) throw error;
+      workingDirectory = path.resolve(requestedWorkingDirectory);
+    }
+    // External runners may use an independent business checkout. Keep that
+    // existing API contract while preventing tracked evidence from pointing
+    // into the platform's own storage tree.
     const artifactsSupplied = data.artifacts != null;
-    const artifactDeclarations = normalizeExternalArtifactDeclarations(data.artifacts, workingDirectory);
-    assertExternalArtifactPathsUnclaimed(db, taskId, artifactDeclarations);
     const sourceExecutionId = String(data.sourceCommandExecutionId || '');
     const sourceExecution = sourceExecutionId
       ? db.prepare('SELECT * FROM command_executions WHERE id=?').get(sourceExecutionId)
@@ -9023,6 +9214,22 @@ function registerExternalAttempt(data, context = {}) {
         throw statusError('Background execution evidence is already bound to a different Run', 409);
       }
     };
+    const requestedLogPath = normalizeTrackedPath(data.logPath, 'logPath', workingDirectory);
+    const logInsideWorkingDirectory = pathContains(workingDirectory, requestedLogPath);
+    if (hasExplicitWorkingDirectory && !logInsideWorkingDirectory) {
+      throw statusError('logPath must remain inside the declared working directory', 400);
+    }
+    const evidenceWorkingDirectory = logInsideWorkingDirectory
+      ? workingDirectory
+      : path.dirname(requestedLogPath);
+    const logPath = assertExternalTrackedPathSafe(requestedLogPath, 'logPath');
+    const artifactDeclarations = normalizeExternalArtifactDeclarations(
+      data.artifacts,
+      evidenceWorkingDirectory,
+    );
+    assertExternalArtifactPathsUnclaimed(db, taskId, artifactDeclarations);
+    const basePath = logPath.endsWith('.log') ? logPath.slice(0, -4) : logPath;
+    const label = String(data.label || path.basename(basePath) || 'background execution').slice(0, 300);
     if (sourceExecutionId) {
       const existing = db.prepare('SELECT * FROM external_attempts WHERE source_command_execution_id=?').get(sourceExecutionId);
       if (existing) {
@@ -9032,9 +9239,6 @@ function registerExternalAttempt(data, context = {}) {
         return;
       }
     }
-    const logPath = normalizeTrackedPath(data.logPath, 'logPath', workingDirectory);
-    const basePath = logPath.endsWith('.log') ? logPath.slice(0, -4) : logPath;
-    const label = String(data.label || path.basename(basePath) || 'background execution').slice(0, 300);
     const previousRunAttempt = stepRun ? db.prepare(`
       SELECT chain_key FROM external_attempts WHERE step_run_id=?
       ORDER BY created_at DESC, generation DESC LIMIT 1
@@ -9057,9 +9261,18 @@ function registerExternalAttempt(data, context = {}) {
       throw statusError('A background execution chain cannot belong to different Runs', 409);
     }
     const pid = Number.isInteger(Number(data.pid)) && Number(data.pid) >= 2 ? Number(data.pid) : null;
-    const donePath = normalizeTrackedPath(data.donePath || `${basePath}.done`, 'donePath', workingDirectory);
-    const statePath = normalizeTrackedPath(data.statePath || `${basePath}.state`, 'statePath', workingDirectory);
-    const metaPath = normalizeTrackedPath(data.metaPath || `${basePath}.meta`, 'metaPath', workingDirectory);
+    const donePath = assertExternalTrackedPathSafe(
+      normalizeTrackedPathInside(data.donePath || `${basePath}.done`, 'donePath', evidenceWorkingDirectory),
+      'donePath',
+    );
+    const statePath = assertExternalTrackedPathSafe(
+      normalizeTrackedPathInside(data.statePath || `${basePath}.state`, 'statePath', evidenceWorkingDirectory),
+      'statePath',
+    );
+    const metaPath = assertExternalTrackedPathSafe(
+      normalizeTrackedPathInside(data.metaPath || `${basePath}.meta`, 'metaPath', evidenceWorkingDirectory),
+      'metaPath',
+    );
     const matchingEvidence = db.prepare(`
       SELECT * FROM external_attempts
       WHERE task_id=? AND log_path=? AND done_path=? AND state_path=? AND meta_path=?
@@ -9413,12 +9626,36 @@ function detectExternalAttemptsForTurn(taskId, turnId, attemptId) {
 }
 
 function readSmallTrackedArtifact(filePath, maxBytes = 65536) {
-  if (!filePath || !fileExists(filePath)) return { content: '', mtimeMs: null };
-  const stat = fs.lstatSync(filePath);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes) {
-    return { content: '', mtimeMs: null };
+  const preview = readTrackedArtifactPreview(filePath, maxBytes);
+  if (!preview || preview.size > maxBytes) return { content: '', mtimeMs: null };
+  return { content: preview.content.toString('utf8'), mtimeMs: preview.mtimeMs };
+}
+
+function readTrackedArtifactPreview(filePath, maxBytes = 65536) {
+  if (!filePath) return null;
+  let fd;
+  try {
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return null;
+    if (fs.realpathSync(`/proc/self/fd/${fd}`) !== path.resolve(filePath)) {
+      return null;
+    }
+    const buffer = Buffer.allocUnsafe(Math.min(stat.size, maxBytes));
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const count = fs.readSync(fd, buffer, bytesRead, buffer.length - bytesRead, null);
+      if (count === 0) break;
+      bytesRead += count;
+    }
+    return { content: buffer.subarray(0, bytesRead), size: stat.size, mtimeMs: stat.mtimeMs };
+  } catch {
+    return null;
+  } finally {
+    if (fd != null) {
+      try { fs.closeSync(fd); } catch {}
+    }
   }
-  return { content: fs.readFileSync(filePath, 'utf8'), mtimeMs: stat.mtimeMs };
 }
 
 function parseTrackedMeta(content) {

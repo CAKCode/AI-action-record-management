@@ -1229,8 +1229,10 @@ test('stop reconciles terminal evidence and archives registered wrapper HTML art
   ensureReportSkill();
   const taskId = 'stop-terminal-artifact-reconciliation-task';
   const runtime = createRunningTask(taskId, 'stop-terminal-artifact-reconciliation-worker');
-  const basePath = path.join(projectDir, 'stop-terminal-artifact-reconciliation');
-  const htmlPath = path.join(projectDir, 'stop-terminal-artifact-reconciliation.html');
+  const reportDirectory = path.join(projectDir, 'stop-terminal-artifact-reconciliation-output');
+  fs.mkdirSync(reportDirectory, { recursive: true });
+  const basePath = path.join(reportDirectory, 'stop-terminal-artifact-reconciliation');
+  const htmlPath = path.join(reportDirectory, 'stop-terminal-artifact-reconciliation.html');
   fs.writeFileSync(`${basePath}.log`, 'pytest wrapper output\n', { mode: 0o600 });
   fs.writeFileSync(`${basePath}.cmd`, `python3 wrapper.py --report ${htmlPath}\n`, { mode: 0o600 });
   fs.writeFileSync(`${basePath}.state`, 'running\n', { mode: 0o600 });
@@ -1297,6 +1299,19 @@ test('stop reconciles terminal evidence and archives registered wrapper HTML art
   assert.deepEqual(terminalReport.artifactDeclarations, [
     { key: 'normal', kind: 'pytest-html', path: htmlPath },
   ]);
+
+  const swappedDirectory = path.join(projectDir, 'stop-terminal-artifact-reconciliation-swapped');
+  fs.mkdirSync(swappedDirectory, { recursive: true });
+  fs.writeFileSync(path.join(swappedDirectory, path.basename(htmlPath)),
+    '<!doctype html><title>Unexpected report target</title>', { mode: 0o600 });
+  fs.renameSync(reportDirectory, `${reportDirectory}.original`);
+  fs.symlinkSync(swappedDirectory, reportDirectory, 'dir');
+  const [swappedReport] = store.listSkillReports(taskId);
+  assert.equal(swappedReport.registeredArtifacts[0].available, false);
+  assert.equal(swappedReport.registeredArtifacts[0].availabilityReason, 'empty_or_missing');
+  fs.unlinkSync(reportDirectory);
+  fs.renameSync(`${reportDirectory}.original`, reportDirectory);
+  fs.rmSync(swappedDirectory, { recursive: true, force: true });
 
   const [job] = store.claimSkillReportArtifactJobs('stop-terminal-artifact-worker', 1);
   assert.equal(job.report_id, terminalReport.id);
