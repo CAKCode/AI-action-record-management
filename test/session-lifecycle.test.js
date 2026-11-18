@@ -2490,6 +2490,16 @@ test('authentication and same-origin checks protect remote-capable deployments',
       headers: { authorization, origin: 'https://example.invalid' },
     }, root);
     assert.equal(crossOrigin.response.status, 403);
+    const forwardedSameOrigin = await request('/api/runtime/sync', {
+      method: 'POST',
+      headers: {
+        authorization,
+        origin: 'https://public.example.test',
+        'x-forwarded-host': 'public.example.test',
+        'x-forwarded-proto': 'https',
+      },
+    }, root);
+    assert.notEqual(forwardedSameOrigin.response.status, 403);
     assert.equal(authorized.response.headers.get('x-frame-options'), 'SAMEORIGIN');
   } finally {
     await stopServer(child);

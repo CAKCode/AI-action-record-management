@@ -1319,6 +1319,20 @@ function normalizedRequestHost(value) {
   return first.split(':', 1)[0];
 }
 
+function effectiveRequestHost(req) {
+  const forwarded = String(req?.headers?.['x-forwarded-host'] || '')
+    .split(',', 1)[0].trim();
+  return forwarded || String(req?.headers?.host || '').trim();
+}
+
+function originMatchesRequestHost(req, origin) {
+  try {
+    return new URL(origin).host.toLowerCase() === effectiveRequestHost(req).toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
 function requestAuthenticationRequired(req) {
   if (AUTH_USER && AUTH_PASSWORD) return true;
   // A forwarded host is supplied by a proxy boundary. Treat its presence as
@@ -1529,12 +1543,8 @@ function sameOrigin(req, pathname = '', searchParams = null) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return true;
   const origin = req.headers.origin;
   if (!origin) return true;
-  try {
-    return new URL(origin).host === req.headers.host
-      || artifactMediaViewAccessValid(req, pathname, searchParams);
-  } catch {
-    return artifactMediaViewAccessValid(req, pathname, searchParams);
-  }
+  return originMatchesRequestHost(req, origin)
+    || artifactMediaViewAccessValid(req, pathname, searchParams);
 }
 
 function summarizeDashboard(taskLimit = 100) {
@@ -1830,11 +1840,7 @@ function rejectWebSocketUpgrade(socket, statusCode, message, headers = {}) {
 function webSocketOriginAllowed(req) {
   const origin = String(req.headers.origin || '');
   if (!origin) return true;
-  try {
-    return new URL(origin).host === req.headers.host;
-  } catch {
-    return false;
-  }
+  return originMatchesRequestHost(req, origin);
 }
 
 function readAttemptOutputChunk(filePath, requestedOffset) {
