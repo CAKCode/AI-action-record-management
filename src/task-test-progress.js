@@ -69,7 +69,7 @@ function liveReportRows(db, taskIds) {
              report.status AS report_status,
              external.artifact_declarations_json,
              ROW_NUMBER() OVER (
-               PARTITION BY report.task_id, report.report_key
+               PARTITION BY report.task_id, report.report_key, external.id
                ORDER BY report.revision DESC, report.published_at DESC
              ) AS report_rank
       FROM skill_reports report
@@ -109,14 +109,22 @@ function liveReportGroups(rows) {
       .filter(filePath => !isUnresolvedArtifactPath(filePath)))];
     if (!filePaths.length) continue;
     const id = `${row.task_id}\0${row.report_key}`;
-    groups.set(id, {
+    const group = groups.get(id) || {
       id,
       taskId: row.task_id,
+      filePaths: new Set(),
+    };
+    for (const filePath of filePaths) group.filePaths.add(filePath);
+    groups.set(id, group);
+  }
+  return [...groups.values()].map((group) => {
+    const filePaths = [...group.filePaths].sort();
+    return {
+      ...group,
       filePaths,
       sourceSignature: filePaths.map(liveFileSignature).join('\0'),
-    });
-  }
-  return [...groups.values()];
+    };
+  });
 }
 
 function refreshLiveTaskProgress(db, taskIds) {
@@ -171,9 +179,9 @@ function refreshLiveTaskProgress(db, taskIds) {
   return liveProgressRefresh;
 }
 
-function taskTestProgressByTask(db, taskIds) {
+function taskTestProgressByTask(db, taskIds, options = {}) {
   if (!taskIds.length) return new Map();
-  refreshLiveTaskProgress(db, taskIds).catch(() => {});
+  if (!options.skipLiveRefresh) refreshLiveTaskProgress(db, taskIds).catch(() => {});
   const placeholders = taskIds.map(() => '?').join(',');
   const rows = db.prepare(`
     SELECT task_id, report_key, report_type, status, revision, published_at, metrics_json, payload_json
@@ -252,6 +260,13 @@ function taskTestProgressByTask(db, taskIds) {
     taskTestProgressCache.delete(taskTestProgressCache.keys().next().value);
   }
   return result;
+}
+
+async function refreshTaskTestProgress(db, taskIds) {
+  const normalizedTaskIds = [...new Set((taskIds || []).map(String).filter(Boolean))];
+  if (!normalizedTaskIds.length) return new Map();
+  await refreshLiveTaskProgress(db, normalizedTaskIds);
+  return taskTestProgressByTask(db, normalizedTaskIds, { skipLiveRefresh: true });
 }
 
 function calculateTaskTestProgress(reports) {
@@ -422,5 +437,6 @@ function combineTaskTestRunProgress(initial, rerun1) {
 module.exports = {
   emptyTaskTestProgress,
   taskTestProgressByTask,
+  refreshTaskTestProgress,
   refreshLiveTaskProgress,
 };

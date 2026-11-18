@@ -86,7 +86,11 @@ const {
   inspectVerifiedTaskCgroup,
 } = require('./task-cgroup');
 const { readTaskPytestRunSummaries } = require('./pytest-result-summary');
-const { emptyTaskTestProgress, taskTestProgressByTask } = require('./task-test-progress');
+const {
+  emptyTaskTestProgress,
+  taskTestProgressByTask,
+  refreshTaskTestProgress,
+} = require('./task-test-progress');
 
 const SKILL_CACHE_TTL_MS = 15000;
 const MAX_QUERY_LIMIT = 500;
@@ -2338,6 +2342,26 @@ function getSession(id) {
   const db = ensureStorage();
   const session = rowToSession(db.prepare('SELECT * FROM tasks WHERE id = ?').get(safeId(id)));
   return session ? enrichSessionsWithScheduling(db, [session])[0] : null;
+}
+
+async function getTaskTestProgress(id) {
+  const progress = await getTasksTestProgress([id]);
+  return progress[safeId(id)] || null;
+}
+
+async function getTasksTestProgress(ids) {
+  const taskIds = [...new Set((ids || []).map(value => safeId(value)))];
+  if (!taskIds.length) return {};
+  const db = ensureStorage();
+  const placeholders = taskIds.map(() => '?').join(',');
+  const existingTaskIds = db.prepare(`SELECT id FROM tasks WHERE id IN (${placeholders})`)
+    .all(...taskIds).map(row => row.id);
+  if (!existingTaskIds.length) return {};
+  const progress = await refreshTaskTestProgress(db, existingTaskIds);
+  return Object.fromEntries(existingTaskIds.map(taskId => [
+    taskId,
+    progress.get(taskId) || emptyTaskTestProgress(),
+  ]));
 }
 
 function saveSessionInTransaction(db, id, data, context = {}) {
@@ -13161,6 +13185,8 @@ module.exports = {
   checkStateInvariants,
   listActiveProcessIdentities,
   getSession,
+  getTaskTestProgress,
+  getTasksTestProgress,
   saveSession,
   updateTaskSourceMetadata,
   sealPendingSessionWorkspace,
