@@ -1049,9 +1049,9 @@ function taskTestProgressHtml(task) {
 
 function taskTestProgressIfAvailableHtml(task) {
   const runs = task?.testProgress?.runs;
-  return runs?.initial?.available || runs?.rerun1?.available
-    ? taskTestProgressHtml(task)
-    : '';
+  const hasProgress = runs?.initial?.available || runs?.rerun1?.available;
+  if (!hasProgress && !taskProgressDiagnosticHtml(task)) return '';
+  return taskTestProgressHtml(task);
 }
 
 function taskCard(task, layout = 'list') {

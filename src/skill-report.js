@@ -17,6 +17,7 @@ const SKILL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const REPORT_STATUSES = new Set([
   'pending', 'running', 'succeeded', 'failed', 'partial', 'blocked', 'cancelled', 'unknown',
 ]);
+const REPORT_COUNT_SCOPES = new Set(['task', 'execution']);
 const TONES = new Set(['neutral', 'info', 'success', 'warning', 'danger']);
 const PRIORITIES = new Set(['primary', 'supporting', 'debug']);
 const SENSITIVITIES = new Set(['normal', 'internal', 'sensitive']);
@@ -299,6 +300,9 @@ function normalizeSkillReport(input) {
     throw reportError(`sections must contain 1-${MAX_SECTIONS} items`);
   }
   const observedAt = optionalTimestamp(input.observedAt ?? input.observed_at, 'observedAt');
+  const countScope = input.countScope == null && input.count_scope == null
+    ? ''
+    : enumValue(input.countScope ?? input.count_scope, 'countScope', REPORT_COUNT_SCOPES);
   const report = {
     schemaVersion,
     reportKey: identifier(input.reportKey ?? input.report_key, 'reportKey'),
@@ -318,6 +322,7 @@ function normalizeSkillReport(input) {
     metrics: metrics.map(normalizeMetric),
     sections: sections.map(normalizeSection),
   };
+  if (countScope) report.countScope = countScope;
   const relatedReportKeys = input.relatedReportKeys ?? input.related_report_keys;
   if (relatedReportKeys != null) {
     if (!Array.isArray(relatedReportKeys)) throw reportError('relatedReportKeys must be an array');

@@ -26,14 +26,16 @@ function writeReport(name, nodeId, result) {
   return filePath;
 }
 
-function insertExternal(db, id, reportPath) {
+function insertExternal(db, id, reportPath, extraPaths = []) {
+  const artifacts = [
+    { key: id, kind: 'pytest-html', path: reportPath },
+    ...extraPaths.map((filePath, index) => ({ key: `${id}-extra-${index}`, kind: 'pytest-html', path: filePath })),
+  ];
   db.prepare(`INSERT INTO external_attempts(
     id, task_id, chain_key, generation, label, status, log_path, meta_path,
     artifact_declarations_json, started_at, created_at, updated_at
   ) VALUES (?, ?, ?, 1, ?, 'running', ?, ?, ?, ?, ?, ?)`)
-    .run(id, taskId, id, id, `${reportPath}.log`, `${reportPath}.meta`, JSON.stringify([
-      { key: id, kind: 'pytest-html', path: reportPath },
-    ]), now, now, now);
+    .run(id, taskId, id, id, `${reportPath}.log`, `${reportPath}.meta`, JSON.stringify(artifacts), now, now, now);
 }
 
 function insertReport(db, id, reportKey, externalAttemptId, revision) {
@@ -58,7 +60,7 @@ test('progress handles one PID and multiple PIDs without merging HTML cases', as
   const db = getDatabase();
   const first = writeReport('pid-1.html', 'same-node', 'Passed');
   const second = writeReport('pid-2.html', 'same-node', 'Failed');
-  insertExternal(db, 'external-pid-1', first);
+  insertExternal(db, 'external-pid-1', first, [path.join(root, 'workspace', 'not-created.html')]);
   insertExternal(db, 'external-pid-2', second);
   insertReport(db, 'report-pid-1', 'stage:initial', 'external-pid-1', 1);
   insertReport(db, 'report-pid-2', 'stage:initial', 'external-pid-2', 2);
@@ -69,4 +71,5 @@ test('progress handles one PID and multiple PIDs without merging HTML cases', as
   assert.equal(progress.passed, 1);
   assert.equal(progress.failed, 1);
   assert.equal(progress.status, 'running');
+  assert.equal((await refreshTaskTestProgress(db, [taskId])).get(taskId).liveProgress.status, 'partial');
 });

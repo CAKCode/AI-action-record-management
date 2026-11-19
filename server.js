@@ -1620,10 +1620,26 @@ function taskHasLiveProgress(session) {
     || Number(session.activeExternalAttempts || 0) > 0;
 }
 
-async function refreshSessionsProgress(sessions) {
+async function refreshSessionsProgress(sessions, { timeoutMs = 1500 } = {}) {
   const liveSessions = sessions.filter(taskHasLiveProgress);
   if (!liveSessions.length) return sessions;
-  const progressByTask = await getTasksTestProgress(liveSessions.map((session) => session.id));
+  const refresh = getTasksTestProgress(liveSessions.map((session) => session.id));
+  let timeout;
+  let progressByTask;
+  try {
+    progressByTask = await Promise.race([
+      refresh,
+      new Promise((resolve) => {
+        timeout = setTimeout(() => resolve(null), timeoutMs);
+        timeout.unref?.();
+      }),
+    ]);
+  } catch {
+    return sessions;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+  if (!progressByTask) return sessions;
   return sessions.map((session) => (
     progressByTask[session.id]
       ? { ...session, testProgress: progressByTask[session.id] }
@@ -2640,7 +2656,7 @@ const server = http.createServer(async (req, res) => {
         releaseCycleId: url.searchParams.get('releaseCycleId') || '',
         releaseKey: url.searchParams.get('releaseKey') || '',
       });
-      json(res, await refreshSessionsProgress(sessions));
+      json(res, await refreshSessionsProgress(sessions, { timeoutMs: 3000 }));
       return;
     }
     if (pathname === '/api/sessions/start' && req.method === 'POST') {
@@ -2708,7 +2724,9 @@ const server = http.createServer(async (req, res) => {
         const id = canonicalTaskId(params[0]);
         if (req.method === 'GET') {
           const session = getSession(id);
-          const freshSessions = session ? await refreshSessionsProgress([session]) : [];
+          const freshSessions = session
+            ? await refreshSessionsProgress([session], { timeoutMs: 3000 })
+            : [];
           json(res, freshSessions[0] || { error: 'Not found' }, session ? 200 : 404);
           return;
         }

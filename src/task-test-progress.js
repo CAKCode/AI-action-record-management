@@ -148,12 +148,17 @@ function refreshLiveTaskProgress(db, taskIds) {
   const pendingGroups = groups.filter(group => group.sourceSignature
     && liveProgressCache.get(group.id)?.sourceSignature !== group.sourceSignature
     && liveProgressFailureCanRetry(group));
-  if (!pendingGroups.length) return Promise.resolve(false);
+  const unavailableTaskIds = new Set(groups.filter(group => !group.sourceSignature).map(group => group.taskId));
+  if (!pendingGroups.length) {
+    for (const taskId of unavailableTaskIds) updateLiveProgressDiagnostic(taskId, groups);
+    return Promise.resolve(false);
+  }
   const refreshingAt = new Date().toISOString();
   for (const group of pendingGroups) {
     setBoundedMapValue(liveProgressDiagnostics, group.taskId,
       { status: 'refreshing', code: '', updatedAt: refreshingAt }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
   }
+  for (const taskId of unavailableTaskIds) updateLiveProgressDiagnostic(taskId, groups);
   const refreshes = pendingGroups.map((group) => {
     const existing = liveProgressRefreshes.get(group.id);
     if (existing) return existing;
@@ -201,9 +206,13 @@ function updateLiveProgressDiagnostic(taskId, groups, exceptGroupId = '') {
     const failure = liveProgressFailures.get(group.id);
     return failure?.signature === group.sourceSignature;
   });
-  const hasPartial = taskGroups.some(group => liveProgressCache.get(group.id)?.unavailable?.length);
+  const hasPartial = taskGroups.some((group) => {
+    const cached = liveProgressCache.get(group.id);
+    return !group.sourceSignature
+      || (cached?.sourceSignature === group.sourceSignature && Boolean(cached?.unavailable?.length));
+  });
   const status = hasFailure ? 'error'
-    : (hasPendingTaskRefresh(taskId, exceptGroupId) ? 'refreshing' : (hasPartial ? 'partial' : 'ready'));
+    : (hasPartial ? 'partial' : (hasPendingTaskRefresh(taskId, exceptGroupId) ? 'refreshing' : 'ready'));
   const code = hasFailure
     ? 'LIVE_PROGRESS_REFRESH_FAILED'
     : (hasPartial ? 'LIVE_PROGRESS_SOURCE_UNAVAILABLE' : '');

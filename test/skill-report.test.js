@@ -368,6 +368,10 @@ test('Skill report schema preserves useful sections and forces sensitive evidenc
   assert.equal(normalized.primaryExecution.exitCode, 1);
   assert.deepEqual(normalized.artifacts, []);
 
+  const executionScoped = normalizeSkillReport(reportFixture({ countScope: 'execution' }));
+  assert.equal(executionScoped.countScope, 'execution');
+  assert.throws(() => normalizeSkillReport(reportFixture({ countScope: 'shard' })), /countScope has an unsupported value/);
+
   const duplicate = reportFixture();
   duplicate.sections[1].id = duplicate.sections[0].id;
   assert.throws(() => normalizeSkillReport(duplicate), /duplicate ids/);

@@ -335,6 +335,11 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
     ...${JSON.stringify(liveProgress)}, liveProgress: { status: 'error', code: 'LIVE_PROGRESS_REFRESH_FAILED' },
   }})`, context);
   assert.match(diagnosticHtml, /LIVE_PROGRESS_REFRESH_FAILED/);
+  const listDiagnosticHtml = vm.runInContext(`taskTestProgressIfAvailableHtml({ testProgress: {
+    runs: { initial: { available: false }, rerun1: { available: false } },
+    liveProgress: { status: 'error', code: 'LIVE_PROGRESS_REFRESH_FAILED' },
+  }})`, context);
+  assert.match(listDiagnosticHtml, /LIVE_PROGRESS_REFRESH_FAILED/);
 
   const cycleFixture = { id: 'demo-cycle', name: 'Demo cycle', releaseKey: 'demo-v1',
     project: 'cloudRecord', status: 'closed', createdAt: '2026-10-22T10:00:00Z', taskCount: 0, schedules: [] };
