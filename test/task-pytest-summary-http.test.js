@@ -84,6 +84,42 @@ test('latest report revisions reuse original artifacts and the read endpoint ret
     const body = await response.json();
     assert.deepEqual(body.final, result.final);
     assert.equal(JSON.stringify(body).includes(root), false);
+
+    const livePath = path.join(root, 'workspace', 'live-progress.html');
+    const liveContent = `<div data-jsonblob="${JSON.stringify({ tests: {
+      livePassed: [{ result: 'Passed' }], liveFailed: [{ result: 'Failed' }],
+    } }).replace(/"/g, '&quot;')}"></div>`;
+    fs.writeFileSync(livePath, liveContent);
+    const liveExternalId = 'external-live-progress';
+    const now = new Date().toISOString();
+    const db = getDatabase();
+    db.prepare(`INSERT INTO external_attempts(
+      id, task_id, chain_key, generation, label, status, log_path, meta_path,
+      artifact_declarations_json, started_at, created_at, updated_at
+    ) VALUES (?, ?, ?, 1, 'Live progress', 'running', ?, ?, ?, ?, ?, ?)`)
+      .run(liveExternalId, taskId, liveExternalId, `${livePath}.log`, `${livePath}.meta`,
+        JSON.stringify([{ key: 'live', kind: 'pytest-html', path: livePath }]), now, now, now);
+    db.prepare(`INSERT INTO skill_reports(
+      id, task_id, report_key, revision, report_hash, schema_version, skill_id,
+      skill_version, skill_content_hash, report_type, status, title, summary,
+      payload_json, published_at
+    ) VALUES (?, ?, 'suite:initial', 3, ?, 2, 'fixture-test', 1, '', 'test-result', 'running', 'Live', 'Live', ?, ?)`)
+      .run('live-progress-report', taskId, 'live-progress-report', JSON.stringify({
+        metrics: [{ key: 'selected', value: 100 }],
+        executionEvidence: { externalAttemptId: liveExternalId },
+      }), now);
+
+    const sessionResponse = await fetch(`http://127.0.0.1:${port}/api/sessions/${taskId}`, { headers });
+    assert.equal(sessionResponse.status, 200);
+    const session = await sessionResponse.json();
+    assert.equal(session.testProgress.runs.initial.total, 100);
+    assert.equal(session.testProgress.runs.initial.completed, 2);
+    assert.equal(session.testProgress.runs.initial.passed, 1);
+    assert.equal(session.testProgress.runs.initial.failed, 1);
+    const sessionsResponse = await fetch(`http://127.0.0.1:${port}/api/sessions?limit=10`, { headers });
+    assert.equal(sessionsResponse.status, 200);
+    const listedSession = (await sessionsResponse.json()).find((item) => item.id === taskId);
+    assert.equal(listedSession.testProgress.runs.initial.completed, 2);
     const missing = await fetch(`http://127.0.0.1:${port}/api/sessions/missing/pytest-summary`, { headers });
     assert.equal(missing.status, 404);
   } finally {

@@ -251,7 +251,7 @@ const messages = {
     reportExecution: '执行信息', reportRelatedDetails: '阶段执行明细', unreportedExecutions: '尚未关联报告的执行',
     actualCommand: '实际执行的命令', rerunResults: 'Rerun 结果', rerunReportsCombined: '已合并 {count} 份重跑报告，展开查看各组结果。',
     workspaceTools: '工具与显示', workbenchGuide: '工作台说明', moreActions: '更多操作', taskReports: '报告', nextInstruction: '下一步指令',
-    taskListDescription: '任务名称与目标', taskListCount: '{count} 个任务', taskObjective: '任务目标', taskCaseProgress: '用例进度', taskCaseProgressUnavailable: '暂无用例进度', taskCaseProgressUnknown: '已收集 {total} 个，结果待上报', taskCaseProgressIncomplete: '统计未完整：已观测 {completed}/{total}', taskCaseProgressCount: '{completed}/{total} 已完成', taskCasePassed: 'Pass {count}', taskCaseFailed: 'Fail {count}', taskCaseSkipped: 'Skip {count}', taskInitialProgress: '首轮 initial', taskRerun1Progress: '失败重跑 rerun-1',
+    taskListDescription: '任务名称与目标', taskListCount: '{count} 个任务', taskObjective: '任务目标', taskCaseProgress: '用例进度', taskCaseProgressUnavailable: '暂无用例进度', taskCaseProgressUnknown: '已收集 {total} 个，结果待上报', taskCaseProgressIncomplete: '统计未完整：已观测 {completed}/{total}', taskCaseProgressCount: '{completed}/{total} 已完成', taskCasePassed: 'Pass {count}', taskCaseFailed: 'Fail {count}', taskCaseSkipped: 'Skip {count}', taskInitialProgress: '首轮 initial', taskRerun1Progress: '失败重跑 rerun-1', taskProgressRefreshing: '实时进度正在刷新…', taskProgressPartial: '部分 HTML 暂不可读，当前显示已解析结果', taskProgressError: '实时进度刷新失败，将自动重试', taskProgressDiagnosticCode: '诊断码 {code}',
     expandObjective: '展开', collapseObjective: '收起', showTaskContext: '任务信息', hideTaskContext: '收起信息',
     brandSubtitle: '持久任务工作台', navOverview: '总览', navTasks: '任务 Session', navReleaseCycles: '版本周期', navSkills: 'Skills', navAudit: '操作审计',
     releaseCyclesNote: '按提测版本查看手动和定时创建的独立 Task。关闭版本周期后只停止后续创建，不影响已运行任务。', refreshReleaseCycles: '刷新', releaseCycleTasksLabel: '版本 Task', closeReleaseCycle: '结束版本周期', releaseCycleActive: '进行中', releaseCycleClosed: '已结束', noReleaseCycles: '还没有提测版本周期。', releaseCycleTaskCount: '{count} 个 Task', taskCountLabel: 'Task 数量', nextRun: '下次创建', lastRun: '最近创建', releaseKey: '提测版本', releaseCycleAnalysis: '周期数据分析', releaseCycleAnalysisHint: '比较 initial 与 rerun-1 的 Pass/Fail 变化，按测试类型分组。', releaseCycleAnalysisLoading: '正在计算周期数据分析…', releaseCycleAnalysisUnavailable: '暂无可比较的 initial/rerun-1 结果。', analysisAll: '全部', analysisComparable: '可比较 Task', analysisPartial: '部分可比较', analysisPending: '待完成', analysisUnavailable: '不可统计', analysisInitialPass: 'initial 全量通过率', analysisTargetInitialPass: 'rerun 目标 initial 通过率', analysisTargetInitialFail: 'rerun 目标 initial 失败率', analysisRerunPass: 'rerun-1 通过率', analysisRecovered: 'Fail → Pass', analysisPersistent: '持续失败', analysisRegressed: 'Pass → Fail', analysisTrend: 'Pass/Fail 趋势', analysisChartHint: '每个 Task 分别显示 initial 与 rerun-1 的 Pass/Fail 比例', analysisPass: 'Pass', analysisFail: 'Fail', analysisTask: 'Task', analysisScheduled: '执行时间', analysisInitial: 'Initial', analysisRerun: 'Rerun-1', analysisTransitions: '状态变化', analysisNoTrend: '暂无完整的 rerun-1 数据。',
@@ -316,7 +316,7 @@ const messages = {
     reportExecution: 'Execution evidence', reportRelatedDetails: 'Stage execution details', unreportedExecutions: 'Executions without a linked report',
     actualCommand: 'Executed command', rerunResults: 'Rerun results', rerunReportsCombined: 'Combined {count} rerun reports. Expand to inspect each group.',
     workspaceTools: 'Tools & display', workbenchGuide: 'About this workbench', moreActions: 'More actions', taskReports: 'Reports', nextInstruction: 'Next instruction',
-    taskListDescription: 'Task name & objective', taskListCount: '{count} tasks', taskObjective: 'Objective', taskCaseProgress: 'Case progress', taskCaseProgressUnavailable: 'No case progress yet', taskCaseProgressUnknown: '{total} cases collected; results pending', taskCaseProgressIncomplete: 'Incomplete statistics: {completed}/{total} observed', taskCaseProgressCount: '{completed}/{total} completed', taskCasePassed: 'Pass {count}', taskCaseFailed: 'Fail {count}', taskCaseSkipped: 'Skip {count}', taskInitialProgress: 'Initial run', taskRerun1Progress: 'Failed-case rerun · rerun-1',
+    taskListDescription: 'Task name & objective', taskListCount: '{count} tasks', taskObjective: 'Objective', taskCaseProgress: 'Case progress', taskCaseProgressUnavailable: 'No case progress yet', taskCaseProgressUnknown: '{total} cases collected; results pending', taskCaseProgressIncomplete: 'Incomplete statistics: {completed}/{total} observed', taskCaseProgressCount: '{completed}/{total} completed', taskCasePassed: 'Pass {count}', taskCaseFailed: 'Fail {count}', taskCaseSkipped: 'Skip {count}', taskInitialProgress: 'Initial run', taskRerun1Progress: 'Failed-case rerun · rerun-1', taskProgressRefreshing: 'Live progress is refreshing…', taskProgressPartial: 'Some HTML sources are unavailable; showing parsed results', taskProgressError: 'Live progress refresh failed; retrying automatically', taskProgressDiagnosticCode: 'Diagnostic code {code}',
     expandObjective: 'Expand', collapseObjective: 'Collapse', showTaskContext: 'Task info', hideTaskContext: 'Hide info',
     brandSubtitle: 'Persistent Task Desk', navOverview: 'Overview', navTasks: 'Task Sessions', navReleaseCycles: 'Release Cycles', navSkills: 'Skills', navAudit: 'Operation Audit',
     releaseCyclesNote: 'View independent manual and scheduled Tasks by release version. Closing a cycle stops future creation without affecting running Tasks.', refreshReleaseCycles: 'Refresh', releaseCycleTasksLabel: 'RELEASE TASKS', closeReleaseCycle: 'Close Release Cycle', releaseCycleActive: 'Active', releaseCycleClosed: 'Closed', noReleaseCycles: 'No release cycles yet.', releaseCycleTaskCount: '{count} Tasks', taskCountLabel: 'Task count', nextRun: 'Next run', lastRun: 'Last run', releaseKey: 'Release version', releaseCycleAnalysis: 'Cycle analytics', releaseCycleAnalysisHint: 'Compare initial and rerun-1 Pass/Fail results by test type.', releaseCycleAnalysisLoading: 'Calculating cycle analytics…', releaseCycleAnalysisUnavailable: 'No comparable initial/rerun-1 results yet.', analysisAll: 'All', analysisComparable: 'Comparable Tasks', analysisPartial: 'Partially comparable', analysisPending: 'Pending', analysisUnavailable: 'Unavailable', analysisInitialPass: 'Initial full pass rate', analysisTargetInitialPass: 'Rerun target initial pass rate', analysisTargetInitialFail: 'Rerun target initial fail rate', analysisRerunPass: 'Rerun-1 pass rate', analysisRecovered: 'Fail → Pass', analysisPersistent: 'Persistent failures', analysisRegressed: 'Pass → Fail', analysisTrend: 'Pass/Fail trend', analysisChartHint: 'Each Task shows its initial and rerun-1 Pass/Fail ratio', analysisPass: 'Pass', analysisFail: 'Fail', analysisTask: 'Task', analysisScheduled: 'Scheduled', analysisInitial: 'Initial', analysisRerun: 'Rerun-1', analysisTransitions: 'Transitions', analysisNoTrend: 'No complete rerun-1 data yet.',
@@ -1029,12 +1029,22 @@ function taskProgressRunHtml(labelKey, progress) {
   </div>`;
 }
 
+function taskProgressDiagnosticHtml(task) {
+  const live = task?.testProgress?.liveProgress;
+  const status = String(live?.status || '').toLowerCase();
+  if (!live || !['refreshing', 'partial', 'error'].includes(status)) return '';
+  const messageKey = status === 'refreshing' ? 'taskProgressRefreshing'
+    : (status === 'partial' ? 'taskProgressPartial' : 'taskProgressError');
+  const code = live.code ? ` <code>${escapeHtml(trf('taskProgressDiagnosticCode', { code: live.code }))}</code>` : '';
+  return `<div class="task-progress-diagnostic ${escapeHtml(status)}" role="status">${escapeHtml(tr(messageKey))}${code}</div>`;
+}
+
 function taskTestProgressHtml(task) {
   const runs = task?.testProgress?.runs;
   if (!runs?.initial?.available && !runs?.rerun1?.available) {
-    return `<div class="task-progress task-progress-empty"><span>${escapeHtml(tr('taskCaseProgress'))}</span><strong>${escapeHtml(tr('taskCaseProgressUnavailable'))}</strong></div>`;
+    return `<div class="task-progress task-progress-empty"><span>${escapeHtml(tr('taskCaseProgress'))}</span><strong>${escapeHtml(tr('taskCaseProgressUnavailable'))}</strong>${taskProgressDiagnosticHtml(task)}</div>`;
   }
-  return `<div class="task-progress"><div class="task-progress-runs">${taskProgressRunHtml('taskInitialProgress', runs.initial)}${taskProgressRunHtml('taskRerun1Progress', runs.rerun1)}</div></div>`;
+  return `<div class="task-progress"><div class="task-progress-runs">${taskProgressRunHtml('taskInitialProgress', runs.initial)}${taskProgressRunHtml('taskRerun1Progress', runs.rerun1)}</div>${taskProgressDiagnosticHtml(task)}</div>`;
 }
 
 function taskTestProgressIfAvailableHtml(task) {
@@ -4818,41 +4828,6 @@ function renderAll() {
   renderAudit();
 }
 
-function taskHasLiveProgress(task) {
-  return ['running', 'recovering', 'waiting_scheduled'].includes(String(task?.status || ''))
-    || Number(task?.activeExternalAttempts || 0) > 0;
-}
-
-async function refreshActiveTaskProgress(dashboard, signal) {
-  const activeTasks = (dashboard.sessions || []).filter(taskHasLiveProgress);
-  if (!activeTasks.length) return dashboard;
-  const ids = activeTasks.map(task => task.id);
-  let progress;
-  try {
-    progress = await api(`/api/task-progress?ids=${ids.map(encodeURIComponent).join(',')}`, {
-      signal,
-      timeoutMs: DASHBOARD_REQUEST_TIMEOUT_MS,
-    });
-  } catch (error) {
-    if (error.name === 'AbortError') throw error;
-    return dashboard;
-  }
-  if (signal.aborted) throw Object.assign(new Error('Dashboard progress refresh aborted'), { name: 'AbortError' });
-  const progressByTask = new Map(Object.entries(progress || {}));
-  if (!progressByTask.size) return dashboard;
-  const sessions = (dashboard.sessions || []).map((task) => (
-    progressByTask.has(task.id)
-      ? { ...task, testProgress: progressByTask.get(task.id) }
-      : task
-  ));
-  const activeSessions = (dashboard.activeSessions || []).map((task) => (
-    progressByTask.has(task.id)
-      ? { ...task, testProgress: progressByTask.get(task.id) }
-      : task
-  ));
-  return { ...dashboard, sessions, activeSessions };
-}
-
 async function loadDashboard(options = {}) {
   if (state.dashboardPromise) return state.dashboardPromise;
   const controller = new AbortController();
@@ -4863,12 +4838,9 @@ async function loadDashboard(options = {}) {
   }, DASHBOARD_REQUEST_TIMEOUT_MS);
   state.dashboardPromise = api(`/api/dashboard?taskLimit=${state.taskLimit}`, { signal: controller.signal })
     .then((dashboard) => {
-      // The dashboard request and live report parsing have independent budgets.
-      // A slow dashboard response must not leave the progress request only a
-      // fraction of the timeout window.
       clearTimeout(timeoutTimer);
       timedOut = false;
-      return refreshActiveTaskProgress(dashboard, controller.signal);
+      return dashboard;
     })
     .then((dashboard) => {
       reconcileRunIntents(dashboard.sessions);

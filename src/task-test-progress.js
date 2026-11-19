@@ -6,6 +6,7 @@ const { readLivePytestProgressAsync } = require('./pytest-result-summary');
 const TASK_TEST_PROGRESS_CACHE_MAX = 1000;
 const LIVE_PROGRESS_DIAGNOSTIC_MAX = 1000;
 const LIVE_PROGRESS_FAILURE_MAX = 1000;
+const LIVE_PROGRESS_FAILURE_RETRY_MS = 5000;
 const taskTestProgressCache = new Map();
 const liveProgressCache = new Map();
 const liveProgressFailures = new Map();
@@ -127,12 +128,26 @@ function liveReportGroups(rows) {
   return [...groups.values()];
 }
 
+function liveProgressFailureCanRetry(group, now = Date.now()) {
+  const failure = liveProgressFailures.get(group.id);
+  return !failure
+    || failure.signature !== group.sourceSignature
+    || Number(failure.retryAt || 0) <= now;
+}
+
+function rememberLiveProgressFailure(group) {
+  setBoundedMapValue(liveProgressFailures, group.id, {
+    signature: group.sourceSignature,
+    retryAt: Date.now() + LIVE_PROGRESS_FAILURE_RETRY_MS,
+  }, LIVE_PROGRESS_FAILURE_MAX);
+}
+
 function refreshLiveTaskProgress(db, taskIds) {
   const rows = liveReportRows(db, taskIds);
   const groups = liveReportGroups(rows);
   const pendingGroups = groups.filter(group => group.sourceSignature
     && liveProgressCache.get(group.id)?.sourceSignature !== group.sourceSignature
-    && liveProgressFailures.get(group.id) !== group.sourceSignature);
+    && liveProgressFailureCanRetry(group));
   if (!pendingGroups.length) return Promise.resolve(false);
   const refreshingAt = new Date().toISOString();
   for (const group of pendingGroups) {
@@ -158,7 +173,7 @@ function refreshLiveTaskProgress(db, taskIds) {
               }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
           }
         } else {
-          setBoundedMapValue(liveProgressFailures, group.id, group.sourceSignature, LIVE_PROGRESS_FAILURE_MAX);
+          rememberLiveProgressFailure(group);
           setBoundedMapValue(liveProgressDiagnostics, group.taskId, {
             status: 'error', code: 'LIVE_PROGRESS_REFRESH_FAILED', updatedAt,
           }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
@@ -169,7 +184,7 @@ function refreshLiveTaskProgress(db, taskIds) {
       .catch((error) => {
         const updatedAt = new Date().toISOString();
         console.error(`[task-test-progress] live pytest progress refresh failed: ${error.message}`);
-        setBoundedMapValue(liveProgressFailures, group.id, group.sourceSignature, LIVE_PROGRESS_FAILURE_MAX);
+        rememberLiveProgressFailure(group);
         setBoundedMapValue(liveProgressDiagnostics, group.taskId, {
           status: 'error', code: 'LIVE_PROGRESS_REFRESH_FAILED', updatedAt,
         }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
@@ -254,7 +269,14 @@ function taskTestProgressByTask(db, taskIds) {
       signatures: [],
     };
     for (const key of Object.keys(aggregate.counts)) aggregate.counts[key] += liveCounts[key];
-    aggregate.fallbackTotal += finiteMetricValue(fallbackMetrics, ['total', 'selected']) || 0;
+    // Report metrics describe one logical run. A task can expose the same
+    // selected/total denominator through several PIDs or HTML artifacts, so
+    // use the largest declared denominator unless the producer explicitly
+    // declares execution-scoped counts.
+    const fallbackTotal = finiteMetricValue(fallbackMetrics, ['total', 'selected']) || 0;
+    const countScope = String(payload.countScope || '').trim().toLowerCase();
+    if (countScope === 'execution') aggregate.fallbackTotal += fallbackTotal;
+    else aggregate.fallbackTotal = Math.max(aggregate.fallbackTotal, fallbackTotal);
     aggregate.signatures.push(...liveSignaturesForExecution);
     liveAggregates.set(aggregateKey, aggregate);
   }

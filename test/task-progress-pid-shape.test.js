@@ -43,7 +43,7 @@ function insertReport(db, id, reportKey, externalAttemptId, revision) {
     payload_json, published_at
   ) VALUES (?, ?, ?, ?, ?, 2, 'fixture-test', 1, '', 'test-result', 'running', ?, ?, ?, ?)`)
     .run(id, taskId, reportKey, revision, id, reportKey, reportKey, JSON.stringify({
-      metrics: [{ key: 'selected', value: 1 }],
+      metrics: [{ key: 'selected', value: 100 }],
       executionEvidence: { externalAttemptId },
     }), now);
 }
@@ -64,7 +64,7 @@ test('progress handles one PID and multiple PIDs without merging HTML cases', as
   insertReport(db, 'report-pid-2', 'stage:initial', 'external-pid-2', 2);
 
   const progress = (await refreshTaskTestProgress(db, [taskId])).get(taskId).runs.initial;
-  assert.equal(progress.total, 2);
+  assert.equal(progress.total, 100);
   assert.equal(progress.completed, 2);
   assert.equal(progress.passed, 1);
   assert.equal(progress.failed, 1);

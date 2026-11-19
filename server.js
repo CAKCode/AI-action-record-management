@@ -1615,10 +1615,26 @@ function sameOrigin(req, pathname = '', searchParams = null) {
     || artifactMediaViewAccessValid(req, pathname, searchParams);
 }
 
-function summarizeDashboard(taskLimit = 100) {
+function taskHasLiveProgress(session) {
+  return ACTIVE_STATUSES.includes(session.status)
+    || Number(session.activeExternalAttempts || 0) > 0;
+}
+
+async function refreshSessionsProgress(sessions) {
+  const liveSessions = sessions.filter(taskHasLiveProgress);
+  if (!liveSessions.length) return sessions;
+  const progressByTask = await getTasksTestProgress(liveSessions.map((session) => session.id));
+  return sessions.map((session) => (
+    progressByTask[session.id]
+      ? { ...session, testProgress: progressByTask[session.id] }
+      : session
+  ));
+}
+
+async function summarizeDashboard(taskLimit = 100) {
   const skillsMounted = countSkills();
   const stats = sessionStats();
-  const sessions = listSessions({ limit: taskLimit, internal: true });
+  const sessions = await refreshSessionsProgress(listSessions({ limit: taskLimit, internal: true }));
   const activeSessions = sessions.filter((session) => ACTIVE_STATUSES.includes(session.status));
   return {
     stats: {
@@ -2365,7 +2381,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (pathname === '/api/dashboard' && req.method === 'GET') {
-      json(res, summarizeDashboard(Number(url.searchParams.get('taskLimit') || 100)));
+      json(res, await summarizeDashboard(Number(url.searchParams.get('taskLimit') || 100)));
       return;
     }
     if (pathname === '/api/runtime/sync' && req.method === 'POST') {
@@ -2617,13 +2633,14 @@ const server = http.createServer(async (req, res) => {
       if (statuses.some((status) => !SESSION_STATUSES.includes(status))) {
         throw Object.assign(new Error('status contains an unsupported task state'), { statusCode: 400 });
       }
-      json(res, listSessions({
+      const sessions = listSessions({
         limit: Number(url.searchParams.get('limit') || 100),
         offset: Number(url.searchParams.get('offset') || 0),
         statuses,
         releaseCycleId: url.searchParams.get('releaseCycleId') || '',
         releaseKey: url.searchParams.get('releaseKey') || '',
-      }));
+      });
+      json(res, await refreshSessionsProgress(sessions));
       return;
     }
     if (pathname === '/api/sessions/start' && req.method === 'POST') {
@@ -2691,7 +2708,8 @@ const server = http.createServer(async (req, res) => {
         const id = canonicalTaskId(params[0]);
         if (req.method === 'GET') {
           const session = getSession(id);
-          json(res, session || { error: 'Not found' }, session ? 200 : 404);
+          const freshSessions = session ? await refreshSessionsProgress([session]) : [];
+          json(res, freshSessions[0] || { error: 'Not found' }, session ? 200 : 404);
           return;
         }
         if (req.method === 'PUT') {

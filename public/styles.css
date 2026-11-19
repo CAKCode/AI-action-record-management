@@ -1841,6 +1841,10 @@ body {
 .task-progress-pass { color: #a6e3a1; }
 .task-progress-fail { color: #f38ba8; }
 .task-progress-skip { color: #cba6f7; }
+.task-progress-diagnostic { color: var(--muted); font-size: .625rem; line-height: 1.4; }
+.task-progress-diagnostic code { color: inherit; font-family: var(--mono); }
+.task-progress-diagnostic.partial { color: var(--amber); }
+.task-progress-diagnostic.error { color: var(--red); }
 
 #view-overview .overview-cycle-list {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));

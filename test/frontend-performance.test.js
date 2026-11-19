@@ -331,14 +331,10 @@ test('dashboard polling pauses when hidden, avoids stale health, and skips uncha
       rerun1: { available: false, resultKnown: false, total: 0, completed: 0, passed: 0, failed: 0, skipped: 0, percent: 0, status: 'unavailable' },
     },
   };
-  responseOverrides.set('GET /api/task-progress?ids=live-progress', { payload: { 'live-progress': liveProgress } });
-  const refreshedDashboard = await vm.runInContext(`refreshActiveTaskProgress({
-    sessions: [{ id: 'live-progress', status: 'running', activeExternalAttempts: 1 }],
-    activeSessions: [{ id: 'live-progress', status: 'running', activeExternalAttempts: 1 }],
-  }, new AbortController().signal)`, context);
-  assert.deepEqual(refreshedDashboard.sessions[0].testProgress, liveProgress);
-  assert.deepEqual(refreshedDashboard.activeSessions[0].testProgress, liveProgress);
-  responseOverrides.delete('GET /api/task-progress?ids=live-progress');
+  const diagnosticHtml = vm.runInContext(`taskTestProgressHtml({ testProgress: {
+    ...${JSON.stringify(liveProgress)}, liveProgress: { status: 'error', code: 'LIVE_PROGRESS_REFRESH_FAILED' },
+  }})`, context);
+  assert.match(diagnosticHtml, /LIVE_PROGRESS_REFRESH_FAILED/);
 
   const cycleFixture = { id: 'demo-cycle', name: 'Demo cycle', releaseKey: 'demo-v1',
     project: 'cloudRecord', status: 'closed', createdAt: '2026-10-22T10:00:00Z', taskCount: 0, schedules: [] };
