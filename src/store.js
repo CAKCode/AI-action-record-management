@@ -4160,7 +4160,7 @@ function rowToSkillReport(row, db = null) {
     title: row.title,
     summary: row.summary,
     observedAt: report.observedAt || '',
-    countScope: report.countScope || 'task',
+    countScope: report.countScope === 'execution' ? 'execution' : 'task',
     executionEvidence: report.executionEvidence || null,
     primaryExecution: report.primaryExecution || null,
     relatedReportKeys: Array.isArray(report.relatedReportKeys) ? report.relatedReportKeys : [],
