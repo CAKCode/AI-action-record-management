@@ -4862,7 +4862,14 @@ async function loadDashboard(options = {}) {
     controller.abort();
   }, DASHBOARD_REQUEST_TIMEOUT_MS);
   state.dashboardPromise = api(`/api/dashboard?taskLimit=${state.taskLimit}`, { signal: controller.signal })
-    .then((dashboard) => refreshActiveTaskProgress(dashboard, controller.signal))
+    .then((dashboard) => {
+      // The dashboard request and live report parsing have independent budgets.
+      // A slow dashboard response must not leave the progress request only a
+      // fraction of the timeout window.
+      clearTimeout(timeoutTimer);
+      timedOut = false;
+      return refreshActiveTaskProgress(dashboard, controller.signal);
+    })
     .then((dashboard) => {
       reconcileRunIntents(dashboard.sessions);
       reconcileTaskOperationIntents(dashboard.sessions);

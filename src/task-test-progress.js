@@ -9,7 +9,8 @@ const LIVE_PROGRESS_FAILURE_MAX = 1000;
 const taskTestProgressCache = new Map();
 const liveProgressCache = new Map();
 const liveProgressFailures = new Map();
-let liveProgressRefresh = null;
+const liveProgressRefreshes = new Map();
+const liveProgressRefreshTaskIds = new Map();
 const liveProgressDiagnostics = new Map();
 
 function setBoundedMapValue(map, key, value, maximum) {
@@ -133,49 +134,63 @@ function refreshLiveTaskProgress(db, taskIds) {
     && liveProgressCache.get(group.id)?.sourceSignature !== group.sourceSignature
     && liveProgressFailures.get(group.id) !== group.sourceSignature);
   if (!pendingGroups.length) return Promise.resolve(false);
-  if (liveProgressRefresh) return liveProgressRefresh;
   const refreshingAt = new Date().toISOString();
   for (const group of pendingGroups) {
     setBoundedMapValue(liveProgressDiagnostics, group.taskId,
       { status: 'refreshing', code: '', updatedAt: refreshingAt }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
   }
-  liveProgressRefresh = readLivePytestProgressAsync(pendingGroups)
-    .then(results => {
-      const updatedAt = new Date().toISOString();
-      for (const group of pendingGroups) {
+  const refreshes = pendingGroups.map((group) => {
+    const existing = liveProgressRefreshes.get(group.id);
+    if (existing) return existing;
+    const refresh = readLivePytestProgressAsync([group])
+      .then(results => {
+        const updatedAt = new Date().toISOString();
         const value = results[group.id];
         if (value) {
           liveProgressCache.set(group.id, { ...value, sourceSignature: group.sourceSignature });
           liveProgressFailures.delete(group.id);
-          setBoundedMapValue(liveProgressDiagnostics, group.taskId,
-            {
-              status: value.unavailable?.length ? 'partial' : 'ready',
-              code: value.unavailable?.length ? 'LIVE_PROGRESS_SOURCE_UNAVAILABLE' : '',
-              updatedAt,
-            }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
+          if (!hasPendingTaskRefresh(group.taskId, group.id)) {
+            setBoundedMapValue(liveProgressDiagnostics, group.taskId,
+              {
+                status: value.unavailable?.length ? 'partial' : 'ready',
+                code: value.unavailable?.length ? 'LIVE_PROGRESS_SOURCE_UNAVAILABLE' : '',
+                updatedAt,
+              }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
+          }
         } else {
           setBoundedMapValue(liveProgressFailures, group.id, group.sourceSignature, LIVE_PROGRESS_FAILURE_MAX);
           setBoundedMapValue(liveProgressDiagnostics, group.taskId, {
             status: 'error', code: 'LIVE_PROGRESS_REFRESH_FAILED', updatedAt,
           }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
         }
-      }
-      while (liveProgressCache.size > 2048) liveProgressCache.delete(liveProgressCache.keys().next().value);
-      return true;
-    })
-    .catch((error) => {
-      const updatedAt = new Date().toISOString();
-      console.error(`[task-test-progress] live pytest progress refresh failed: ${error.message}`);
-      for (const group of pendingGroups) {
+        while (liveProgressCache.size > 2048) liveProgressCache.delete(liveProgressCache.keys().next().value);
+        return true;
+      })
+      .catch((error) => {
+        const updatedAt = new Date().toISOString();
+        console.error(`[task-test-progress] live pytest progress refresh failed: ${error.message}`);
         setBoundedMapValue(liveProgressFailures, group.id, group.sourceSignature, LIVE_PROGRESS_FAILURE_MAX);
         setBoundedMapValue(liveProgressDiagnostics, group.taskId, {
           status: 'error', code: 'LIVE_PROGRESS_REFRESH_FAILED', updatedAt,
         }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
-      }
-      return false;
-    })
-    .finally(() => { liveProgressRefresh = null; });
-  return liveProgressRefresh;
+        return false;
+      })
+      .finally(() => {
+        liveProgressRefreshes.delete(group.id);
+        liveProgressRefreshTaskIds.delete(group.id);
+      });
+    liveProgressRefreshTaskIds.set(group.id, group.taskId);
+    liveProgressRefreshes.set(group.id, refresh);
+    return refresh;
+  });
+  return Promise.all(refreshes).then(() => true);
+}
+
+function hasPendingTaskRefresh(taskId, exceptGroupId = '') {
+  for (const [groupId, groupTaskId] of liveProgressRefreshTaskIds) {
+    if (groupId !== exceptGroupId && groupTaskId === taskId) return true;
+  }
+  return false;
 }
 
 function taskTestProgressByTask(db, taskIds) {
@@ -210,7 +225,7 @@ function taskTestProgressByTask(db, taskIds) {
     groups.push(group);
     liveGroupsByExecution.set(key, groups);
   }
-  const liveSignatures = new Map();
+  const liveAggregates = new Map();
   for (const row of liveRows) {
     const payload = parseJson(row.payload_json, {});
     const fallbackMetrics = new Map((Array.isArray(payload.metrics) ? payload.metrics : [])
@@ -229,32 +244,45 @@ function taskTestProgressByTask(db, taskIds) {
       liveSignaturesForExecution.push(`${group.filePath}\0${live.signature}`);
     }
     if (!hasLiveCounts) continue;
-    const liveSignature = liveSignaturesForExecution.sort().join('\0');
-    const liveSignatureKey = `${row.task_id}\0${row.report_key}\0${row.external_attempt_id}`;
-    liveSignatures.set(liveSignatureKey, liveSignature);
+    const aggregateKey = `${row.task_id}\0${row.report_key}`;
+    const aggregate = liveAggregates.get(aggregateKey) || {
+      taskId: row.task_id,
+      reportKey: row.report_key,
+      row,
+      counts: { total: 0, passed: 0, failed: 0, error: 0, skipped: 0, xfailed: 0, xpassed: 0 },
+      fallbackTotal: 0,
+      signatures: [],
+    };
+    for (const key of Object.keys(aggregate.counts)) aggregate.counts[key] += liveCounts[key];
+    aggregate.fallbackTotal += finiteMetricValue(fallbackMetrics, ['total', 'selected']) || 0;
+    aggregate.signatures.push(...liveSignaturesForExecution);
+    liveAggregates.set(aggregateKey, aggregate);
+  }
+  for (const aggregate of liveAggregates.values()) {
     const metrics = [
-      { key: 'total', value: Math.max(liveCounts.total, finiteMetricValue(fallbackMetrics, ['total', 'selected']) || 0) },
-      { key: 'passed', value: liveCounts.passed },
-      { key: 'failed', value: liveCounts.failed },
-      { key: 'error', value: liveCounts.error },
-      { key: 'skipped', value: liveCounts.skipped },
-      { key: 'xfailed', value: liveCounts.xfailed },
-      { key: 'xpassed', value: liveCounts.xpassed },
-      { key: 'executed', value: liveCounts.total - liveCounts.skipped },
+      { key: 'total', value: Math.max(aggregate.counts.total, aggregate.fallbackTotal) },
+      { key: 'passed', value: aggregate.counts.passed },
+      { key: 'failed', value: aggregate.counts.failed },
+      { key: 'error', value: aggregate.counts.error },
+      { key: 'skipped', value: aggregate.counts.skipped },
+      { key: 'xfailed', value: aggregate.counts.xfailed },
+      { key: 'xpassed', value: aggregate.counts.xpassed },
+      { key: 'executed', value: aggregate.counts.total - aggregate.counts.skipped },
     ];
-    if (!latestByTask.has(row.task_id)) latestByTask.set(row.task_id, new Map());
-    latestByTask.get(row.task_id).set(row.report_key, {
-      ...row,
+    if (!latestByTask.has(aggregate.taskId)) latestByTask.set(aggregate.taskId, new Map());
+    const existing = latestByTask.get(aggregate.taskId).get(aggregate.reportKey) || aggregate.row;
+    latestByTask.get(aggregate.taskId).set(aggregate.reportKey, {
+      ...existing,
       metrics_json: JSON.stringify(metrics),
       status: 'running',
-      liveSignature,
+      liveSignature: aggregate.signatures.sort().join('\0'),
     });
   }
   const result = new Map();
   for (const taskId of taskIds) {
     const reports = latestByTask.get(taskId) || new Map();
     const signature = [...reports.values()]
-      .map((row) => `${row.report_type}\0${row.report_key}\0${row.revision}\0${row.published_at || ''}\0${row.status}\0${row.liveSignature || liveSignatures.get(`${taskId}\0${row.report_key}\0${row.external_attempt_id || ''}`) || ''}`)
+      .map((row) => `${row.report_type}\0${row.report_key}\0${row.revision}\0${row.published_at || ''}\0${row.status}\0${row.liveSignature || ''}`)
       .join('\x01');
     const cached = taskTestProgressCache.get(taskId);
     if (cached?.signature === signature) {

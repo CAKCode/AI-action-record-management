@@ -36,13 +36,13 @@ function insertExternal(db, id, reportPath) {
     ]), now, now, now);
 }
 
-function insertReport(db, id, reportKey, externalAttemptId) {
+function insertReport(db, id, reportKey, externalAttemptId, revision) {
   db.prepare(`INSERT INTO skill_reports(
     id, task_id, report_key, revision, report_hash, schema_version, skill_id,
     skill_version, skill_content_hash, report_type, status, title, summary,
     payload_json, published_at
-  ) VALUES (?, ?, ?, 1, ?, 2, 'fixture-test', 1, '', 'test-result', 'running', ?, ?, ?, ?)`)
-    .run(id, taskId, reportKey, id, reportKey, reportKey, JSON.stringify({
+  ) VALUES (?, ?, ?, ?, ?, 2, 'fixture-test', 1, '', 'test-result', 'running', ?, ?, ?, ?)`)
+    .run(id, taskId, reportKey, revision, id, reportKey, reportKey, JSON.stringify({
       metrics: [{ key: 'selected', value: 1 }],
       executionEvidence: { externalAttemptId },
     }), now);
@@ -60,8 +60,8 @@ test('progress handles one PID and multiple PIDs without merging HTML cases', as
   const second = writeReport('pid-2.html', 'same-node', 'Failed');
   insertExternal(db, 'external-pid-1', first);
   insertExternal(db, 'external-pid-2', second);
-  insertReport(db, 'report-pid-1', 'stage:initial:pid1', 'external-pid-1');
-  insertReport(db, 'report-pid-2', 'stage:initial:pid2', 'external-pid-2');
+  insertReport(db, 'report-pid-1', 'stage:initial', 'external-pid-1', 1);
+  insertReport(db, 'report-pid-2', 'stage:initial', 'external-pid-2', 2);
 
   const progress = (await refreshTaskTestProgress(db, [taskId])).get(taskId).runs.initial;
   assert.equal(progress.total, 2);
