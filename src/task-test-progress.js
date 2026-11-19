@@ -159,35 +159,22 @@ function refreshLiveTaskProgress(db, taskIds) {
     if (existing) return existing;
     const refresh = readLivePytestProgressAsync([group])
       .then(results => {
-        const updatedAt = new Date().toISOString();
         const value = results[group.id];
         if (value) {
           liveProgressCache.set(group.id, { ...value, sourceSignature: group.sourceSignature });
           liveProgressFailures.delete(group.id);
-          if (!hasPendingTaskRefresh(group.taskId, group.id)) {
-            setBoundedMapValue(liveProgressDiagnostics, group.taskId,
-              {
-                status: value.unavailable?.length ? 'partial' : 'ready',
-                code: value.unavailable?.length ? 'LIVE_PROGRESS_SOURCE_UNAVAILABLE' : '',
-                updatedAt,
-              }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
-          }
+          updateLiveProgressDiagnostic(group.taskId, groups, group.id);
         } else {
           rememberLiveProgressFailure(group);
-          setBoundedMapValue(liveProgressDiagnostics, group.taskId, {
-            status: 'error', code: 'LIVE_PROGRESS_REFRESH_FAILED', updatedAt,
-          }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
+          updateLiveProgressDiagnostic(group.taskId, groups, group.id);
         }
         while (liveProgressCache.size > 2048) liveProgressCache.delete(liveProgressCache.keys().next().value);
         return true;
       })
       .catch((error) => {
-        const updatedAt = new Date().toISOString();
         console.error(`[task-test-progress] live pytest progress refresh failed: ${error.message}`);
         rememberLiveProgressFailure(group);
-        setBoundedMapValue(liveProgressDiagnostics, group.taskId, {
-          status: 'error', code: 'LIVE_PROGRESS_REFRESH_FAILED', updatedAt,
-        }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
+        updateLiveProgressDiagnostic(group.taskId, groups, group.id);
         return false;
       })
       .finally(() => {
@@ -206,6 +193,23 @@ function hasPendingTaskRefresh(taskId, exceptGroupId = '') {
     if (groupId !== exceptGroupId && groupTaskId === taskId) return true;
   }
   return false;
+}
+
+function updateLiveProgressDiagnostic(taskId, groups, exceptGroupId = '') {
+  const taskGroups = groups.filter(group => group.taskId === taskId);
+  const hasFailure = taskGroups.some(group => {
+    const failure = liveProgressFailures.get(group.id);
+    return failure?.signature === group.sourceSignature;
+  });
+  const hasPartial = taskGroups.some(group => liveProgressCache.get(group.id)?.unavailable?.length);
+  const status = hasFailure ? 'error'
+    : (hasPendingTaskRefresh(taskId, exceptGroupId) ? 'refreshing' : (hasPartial ? 'partial' : 'ready'));
+  const code = hasFailure
+    ? 'LIVE_PROGRESS_REFRESH_FAILED'
+    : (hasPartial ? 'LIVE_PROGRESS_SOURCE_UNAVAILABLE' : '');
+  setBoundedMapValue(liveProgressDiagnostics, taskId, {
+    status, code, updatedAt: new Date().toISOString(),
+  }, LIVE_PROGRESS_DIAGNOSTIC_MAX);
 }
 
 function taskTestProgressByTask(db, taskIds) {
