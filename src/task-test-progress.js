@@ -6,7 +6,7 @@ const { readLivePytestProgressAsync } = require('./pytest-result-summary');
 const TASK_TEST_PROGRESS_CACHE_MAX = 1000;
 const LIVE_PROGRESS_DIAGNOSTIC_MAX = 1000;
 const LIVE_PROGRESS_FAILURE_MAX = 1000;
-const LIVE_PROGRESS_FAILURE_RETRY_MS = 5000;
+const LIVE_PROGRESS_FAILURE_BACKOFF_MS = [5000, 15000, 60000];
 const taskTestProgressCache = new Map();
 const liveProgressCache = new Map();
 const liveProgressFailures = new Map();
@@ -136,9 +136,15 @@ function liveProgressFailureCanRetry(group, now = Date.now()) {
 }
 
 function rememberLiveProgressFailure(group) {
+  const previous = liveProgressFailures.get(group.id);
+  const attempts = previous?.signature === group.sourceSignature
+    ? Number(previous.attempts || 0) + 1
+    : 1;
+  const backoffIndex = Math.min(attempts - 1, LIVE_PROGRESS_FAILURE_BACKOFF_MS.length - 1);
   setBoundedMapValue(liveProgressFailures, group.id, {
     signature: group.sourceSignature,
-    retryAt: Date.now() + LIVE_PROGRESS_FAILURE_RETRY_MS,
+    attempts,
+    retryAt: Date.now() + LIVE_PROGRESS_FAILURE_BACKOFF_MS[backoffIndex],
   }, LIVE_PROGRESS_FAILURE_MAX);
 }
 

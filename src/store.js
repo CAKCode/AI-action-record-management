@@ -2344,12 +2344,12 @@ function getSession(id) {
   return session ? enrichSessionsWithScheduling(db, [session])[0] : null;
 }
 
-async function getTaskTestProgress(id) {
-  const progress = await getTasksTestProgress([id]);
+async function getTaskTestProgress(id, options = {}) {
+  const progress = await getTasksTestProgress([id], options);
   return progress[safeId(id)] || null;
 }
 
-async function getTasksTestProgress(ids) {
+async function getTasksTestProgress(ids, { timeoutMs = 0 } = {}) {
   const taskIds = [...new Set((ids || []).map(value => safeId(value)))];
   if (!taskIds.length) return {};
   const db = ensureStorage();
@@ -2357,7 +2357,25 @@ async function getTasksTestProgress(ids) {
   const existingTaskIds = db.prepare(`SELECT id FROM tasks WHERE id IN (${placeholders})`)
     .all(...taskIds).map(row => row.id);
   if (!existingTaskIds.length) return {};
-  const progress = await refreshTaskTestProgress(db, existingTaskIds);
+  const refresh = refreshTaskTestProgress(db, existingTaskIds);
+  let progress;
+  if (Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0) {
+    let timeout;
+    try {
+      progress = await Promise.race([
+        refresh,
+        new Promise((resolve) => {
+          timeout = setTimeout(() => resolve(null), Number(timeoutMs));
+          timeout.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  } else {
+    progress = await refresh;
+  }
+  if (!progress) progress = taskTestProgressByTask(db, existingTaskIds);
   return Object.fromEntries(existingTaskIds.map(taskId => [
     taskId,
     progress.get(taskId) || emptyTaskTestProgress(),
@@ -4142,6 +4160,7 @@ function rowToSkillReport(row, db = null) {
     title: row.title,
     summary: row.summary,
     observedAt: report.observedAt || '',
+    countScope: report.countScope || 'task',
     executionEvidence: report.executionEvidence || null,
     primaryExecution: report.primaryExecution || null,
     relatedReportKeys: Array.isArray(report.relatedReportKeys) ? report.relatedReportKeys : [],

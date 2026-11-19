@@ -1623,23 +1623,12 @@ function taskHasLiveProgress(session) {
 async function refreshSessionsProgress(sessions, { timeoutMs = 1500 } = {}) {
   const liveSessions = sessions.filter(taskHasLiveProgress);
   if (!liveSessions.length) return sessions;
-  const refresh = getTasksTestProgress(liveSessions.map((session) => session.id));
-  let timeout;
   let progressByTask;
   try {
-    progressByTask = await Promise.race([
-      refresh,
-      new Promise((resolve) => {
-        timeout = setTimeout(() => resolve(null), timeoutMs);
-        timeout.unref?.();
-      }),
-    ]);
+    progressByTask = await getTasksTestProgress(liveSessions.map((session) => session.id), { timeoutMs });
   } catch {
     return sessions;
-  } finally {
-    if (timeout) clearTimeout(timeout);
   }
-  if (!progressByTask) return sessions;
   return sessions.map((session) => (
     progressByTask[session.id]
       ? { ...session, testProgress: progressByTask[session.id] }
@@ -3342,7 +3331,7 @@ const server = http.createServer(async (req, res) => {
         if (!ids.length || ids.length > 500) {
           throw Object.assign(new Error('ids must contain between 1 and 500 task IDs'), { statusCode: 400 });
         }
-        json(res, await getTasksTestProgress(ids));
+        json(res, await getTasksTestProgress(ids, { timeoutMs: 3000 }));
         return;
       }
     }
@@ -3350,7 +3339,7 @@ const server = http.createServer(async (req, res) => {
       const progressParams = routeParams(/^\/api\/sessions\/([^/]+)\/test-progress$/, pathname);
       if (progressParams && req.method === 'GET') {
         const taskId = requireSessionId(progressParams[0]);
-        json(res, await getTaskTestProgress(taskId));
+        json(res, await getTaskTestProgress(taskId, { timeoutMs: 3000 }));
         return;
       }
     }
